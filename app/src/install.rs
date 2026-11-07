@@ -156,7 +156,7 @@ pub fn install() -> Result<String, String> {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
         let text = format!(
-            "[Desktop Entry]\nType=Application\nName={NAME}\nGenericName=File Manager\nComment=Fast file manager with column navigation, tabs and two panes\nExec={} %F\nIcon={BIN}\nTerminal=false\nCategories=System;FileTools;FileManager;Utility;\nMimeType=inode/directory;\nStartupWMClass={BIN}\n",
+            "[Desktop Entry]\nType=Application\nName={NAME}\nGenericName=File Manager\nComment=Fast file manager with tiled panels, tabs and column navigation\nExec={} %F\nIcon={BIN}\nTerminal=false\nCategories=System;FileTools;FileManager;Utility;\nMimeType=inode/directory;\nStartupWMClass={BIN}\n",
             command
         );
         std::fs::write(&desk, text).map_err(|e| e.to_string())?;

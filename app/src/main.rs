@@ -1,5 +1,5 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
-//! Ferrous Commander — a fast, light file manager with column navigation, tabs and two panes.
+//! Ferrous Commander — a fast, light multi-pane file manager with tiled panels, tabs and column navigation.
 
 mod app;
 mod drives;

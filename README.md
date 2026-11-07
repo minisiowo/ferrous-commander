@@ -1,6 +1,6 @@
 # Ferrous Commander
 
-A fast, light dual-pane file manager for Linux and Windows, written in Rust.
+A fast, light multi-pane file manager for Linux and Windows, written in Rust. Split the window into as many tiled panels as you need.
 
 **Download:** get the latest build from the
 [Releases](https://github.com/minisiowo/ferrous-commander/releases) page. Windows may

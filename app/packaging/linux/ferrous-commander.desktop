@@ -2,7 +2,7 @@
 Type=Application
 Name=Ferrous Commander
 GenericName=File Manager
-Comment=Fast file manager with column navigation, tabs and two panes
+Comment=Fast file manager with tiled panels, tabs and column navigation
 Exec=ferrous-commander %F
 Icon=ferrous-commander
 Terminal=false

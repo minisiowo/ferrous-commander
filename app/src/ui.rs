@@ -965,7 +965,7 @@ impl App {
         let mut rects = Vec::new();
         let mut divs = Vec::new();
         if self.panes.len() > 1 && full.width() < 2.0 * COLLAPSE_W {
-            // config BrowserCollapseBreakpointWidth: too narrow for two browsers, so only the
+            // too narrow for two browsers, so only the
             // active panel is shown (resource MSG_I_CannotFitBothBrowsers)
             rects.push((self.active, full));
         } else {

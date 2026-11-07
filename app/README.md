@@ -1,6 +1,6 @@
 # Ferrous Commander
 
-A fast, light file manager in Rust (egui): two browsers side by side, tabs, folder columns
+A fast, light multi-pane file manager in Rust (egui): tiled panels, tabs, folder columns
 (press <kbd>`</kbd>), preview pane, favourites, drives, history, search, colour tags, themes.
 
 Folder reads and refreshes run on a bounded background worker. Sidebar metadata and

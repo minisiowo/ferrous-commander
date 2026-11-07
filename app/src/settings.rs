@@ -110,7 +110,6 @@ impl Default for Settings {
             accent: crate::defaults::ACCENT_RGB.into(),
             layout: Layout::Standard,
             tree_files: false,
-            // Two browsers side by side.
             dual: true,
             show_hidden: crate::defaults::SHOW_HIDDEN_FILES,
             show_extensions: crate::defaults::SHOW_FILE_EXTENSION,
