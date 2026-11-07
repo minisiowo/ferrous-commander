@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Ferrous Commander
+GenericName=File Manager
+Comment=Fast file manager with column navigation, tabs and two panes
+Exec=ferrous-commander %F
+Icon=ferrous-commander
+Terminal=false
+Categories=System;FileTools;FileManager;Utility;
+MimeType=inode/directory;
+StartupWMClass=ferrous-commander

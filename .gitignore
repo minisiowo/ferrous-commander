@@ -1,0 +1,20 @@
+# Rust build outputs and packaged binaries
+/app/target/
+/app/dist/
+
+# Local activity and session logs
+/build-activity.log
+/pinned/*.log
+/feed.json
+/usage.json
+
+# Local credentials and editor files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.vs/
+*.swp
+Thumbs.db
+.DS_Store

@@ -1,0 +1,677 @@
+//! Folder listing, sorting, hidden-file rules and value formatting.
+
+use std::cmp::Ordering;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use chrono::{DateTime, Local};
+use egui::Color32;
+use serde::{Deserialize, Serialize};
+
+use crate::defaults::{HIDDEN_NAMES, HIDDEN_EXTENSIONS, HIDDEN_PREFIXES};
+/// Additional preview formats supported by the rebuild.
+const EXTRA_TEXT_EXTS: &[&str] = &[
+    "log", "csv", "toml", "yaml", "yml",
+    "rs", "py", "js", "ts", "c", "h", "cpp", "cs", "java", "go", "sh", "bat", "ps1", "css",
+];
+
+pub fn is_text_extension(ext: &str) -> bool {
+    crate::defaults::TEXT_EXTENSIONS.contains(&ext) || EXTRA_TEXT_EXTS.contains(&ext)
+}
+/// Decoder allowlist for preview; classification can recognize more formats.
+pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tif", "tiff"];
+const VIDEO_EXTS: &[&str] = &["mkv", "avi", "mp4", "mov", "webm", "m4v", "wmv", "mpeg", "mpg", "3gp"];
+const AUDIO_EXTS: &[&str] = &["mp3", "wav", "aiff", "flac", "aac", "m4a", "ape", "ogg", "opus", "wma"];
+const DOC_EXTS: &[&str] = &[
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "pdf", "rtf", "epub",
+];
+const ARCHIVE_EXTS: &[&str] = &["zip", "7z", "rar", "tar", "gz", "bz2", "xz", "iso", "cab", "tgz"];
+const EXEC_EXTS: &[&str] = &["exe", "msi", "bat", "cmd", "com", "ps1", "sh", "appimage", "deb"];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Folder,
+    Image,
+    Video,
+    Audio,
+    Document,
+    Archive,
+    Program,
+    Text,
+    Other,
+}
+
+impl Kind {
+    pub fn from_ext(ext: &str) -> Kind {
+        let e = ext.to_ascii_lowercase();
+        let e = e.as_str();
+        // Category precedence and extra portable formats are rebuild choices.
+        // Shipped membership lists are exact configuration observations.
+        use crate::defaults as original;
+        if IMAGE_EXTS.contains(&e)
+            || original::IMAGE_EXTENSIONS.contains(&e)
+            || original::PHOTO_EXTENSIONS.contains(&e)
+        {
+            Kind::Image
+        } else if VIDEO_EXTS.contains(&e) || original::VIDEO_EXTENSIONS.contains(&e) {
+            Kind::Video
+        } else if AUDIO_EXTS.contains(&e) || original::AUDIO_EXTENSIONS.contains(&e) {
+            Kind::Audio
+        } else if DOC_EXTS.contains(&e) || original::DOCUMENT_EXTENSIONS.contains(&e) {
+            Kind::Document
+        } else if ARCHIVE_EXTS.contains(&e) || original::ARCHIVE_EXTENSIONS.contains(&e) {
+            Kind::Archive
+        } else if EXEC_EXTS.contains(&e) || original::EXECUTABLE_EXTENSIONS.contains(&e) {
+            Kind::Program
+        } else if is_text_extension(e) {
+            Kind::Text
+        } else {
+            Kind::Other
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Folder => "Folder",
+            Kind::Image => "Image",
+            Kind::Video => "Video",
+            Kind::Audio => "Audio",
+            Kind::Document => "Document",
+            Kind::Archive => "Archive",
+            Kind::Program => "Program",
+            Kind::Text => "Text",
+            Kind::Other => "File",
+        }
+    }
+
+    /// Accent colour of the little file glyph.
+    pub fn color(self) -> Color32 {
+        match self {
+            Kind::Folder => Color32::from_rgb(0xF2, 0xC2, 0x4F),
+            Kind::Image => Color32::from_rgb(0x88, 0xC8, 0x66),
+            Kind::Video => Color32::from_rgb(0xC7, 0x8E, 0xDD),
+            Kind::Audio => Color32::from_rgb(0xED, 0xA9, 0x5D),
+            Kind::Document => Color32::from_rgb(0x6F, 0xB8, 0xEF),
+            Kind::Archive => Color32::from_rgb(0xEF, 0x70, 0x63),
+            Kind::Program => Color32::from_rgb(0x5E, 0xD0, 0xC0),
+            Kind::Text => Color32::from_rgb(0xB8, 0xB8, 0xC0),
+            Kind::Other => Color32::from_rgb(0x9A, 0x98, 0xA0),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Entry {
+    pub name: String,
+    /// Lower-case name, cached for filtering and sorting.
+    pub lname: String,
+    pub ext: String,
+    pub path: PathBuf,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: Option<SystemTime>,
+    pub created: Option<SystemTime>,
+    pub hidden: bool,
+    pub readonly: bool,
+    pub kind: Kind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub enum SortBy {
+    #[default]
+    Name,
+    Date,
+    Size,
+    Type,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Sorting {
+    pub by: SortBy,
+    pub ascending: bool,
+    pub folders_on_top: bool,
+}
+
+impl Default for Sorting {
+    fn default() -> Self {
+        Sorting {
+            by: crate::defaults::SORT_BY,
+            ascending: crate::defaults::SORT_ASCENDING,
+            folders_on_top: crate::defaults::SORT_FOLDERS_ON_TOP,
+        }
+    }
+}
+
+fn is_hidden_by_rule(name: &str, ext: &str) -> bool {
+    let l = name.to_lowercase();
+    if HIDDEN_NAMES.iter().any(|n| n.eq_ignore_ascii_case(&l))
+        || HIDDEN_PREFIXES.iter().any(|p| l.starts_with(p)) {
+        return true;
+    }
+    let e = ext.to_ascii_lowercase();
+    if HIDDEN_EXTENSIONS.contains(&e.as_str()) {
+        return true;
+    }
+    // Dot-files: not hidden on Windows,
+    // but they are the hiding convention on Linux.
+    (crate::defaults::TREAT_DOT_FILES_AS_HIDDEN || cfg!(not(windows)))
+        && name.starts_with('.')
+}
+
+#[cfg(windows)]
+fn attr_flags(md: &std::fs::Metadata) -> (bool, bool) {
+    use std::os::windows::fs::MetadataExt;
+    let a = md.file_attributes();
+    (a & 0x2 != 0 || a & 0x4 != 0, a & 0x1 != 0)
+}
+#[cfg(not(windows))]
+fn attr_flags(md: &std::fs::Metadata) -> (bool, bool) {
+    (false, md.permissions().readonly())
+}
+
+pub fn split_ext(name: &str, is_dir: bool) -> String {
+    if is_dir {
+        return String::new();
+    }
+    match name.rfind('.') {
+        Some(i) if i > 0 && i + 1 < name.len() => name[i + 1..].to_string(),
+        _ => String::new(),
+    }
+}
+
+pub fn make_entry(path: PathBuf, md: &std::fs::Metadata) -> Entry {
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let is_dir = md.is_dir();
+    let ext = split_ext(&name, is_dir);
+    let (attr_hidden, readonly) = attr_flags(md);
+    let hidden = attr_hidden || is_hidden_by_rule(&name, &ext);
+    let kind = if is_dir { Kind::Folder } else { Kind::from_ext(&ext) };
+    Entry {
+        lname: name.to_lowercase(),
+        name,
+        ext,
+        path,
+        is_dir,
+        size: if is_dir { 0 } else { md.len() },
+        modified: md.modified().ok(),
+        created: md.created().ok(),
+        hidden,
+        readonly,
+        kind,
+    }
+}
+
+/// Read one folder. Fast path: one directory walk, metadata comes with the entry on Windows.
+pub fn read_dir(dir: &Path) -> Result<Vec<Entry>, String> {
+    let rd = std::fs::read_dir(dir).map_err(|e| friendly_err(&e))?;
+    let mut out = Vec::with_capacity(64);
+    // Stop at the first error: on a drive that was pulled out it can repeat forever.
+    for de in rd.map_while(Result::ok) {
+        let p = de.path();
+        let md = match de.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        // Follow links to folders so they behave like folders.
+        let md = if md.file_type().is_symlink() {
+            std::fs::metadata(&p).unwrap_or(md)
+        } else {
+            md
+        };
+        out.push(make_entry(p, &md));
+    }
+    Ok(out)
+}
+
+pub fn friendly_err(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => "No access".into(),
+        std::io::ErrorKind::NotFound => "Not available".into(),
+        _ => e.to_string(),
+    }
+}
+
+/// Number-aware comparison ("file2" < "file10"), case-insensitive.
+#[cfg(any(not(windows), test))]
+pub fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let (ab, bb) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0, 0);
+    while i < ab.len() && j < bb.len() {
+        let (ca, cb) = (ab[i], bb[j]);
+        if ca.is_ascii_digit() && cb.is_ascii_digit() {
+            let si = i;
+            while i < ab.len() && ab[i].is_ascii_digit() {
+                i += 1;
+            }
+            let sj = j;
+            while j < bb.len() && bb[j].is_ascii_digit() {
+                j += 1;
+            }
+            let na = a[si..i].trim_start_matches('0');
+            let nb = b[sj..j].trim_start_matches('0');
+            let o = na.len().cmp(&nb.len()).then_with(|| na.cmp(nb));
+            if o != Ordering::Equal {
+                return o;
+            }
+        } else {
+            let o = ca.to_ascii_lowercase().cmp(&cb.to_ascii_lowercase());
+            if o != Ordering::Equal {
+                return o;
+            }
+            i += 1;
+            j += 1;
+        }
+    }
+    (ab.len() - i).cmp(&(bb.len() - j))
+}
+
+/// Prepared name for comparing, kept only while sorting: most folders hold far
+/// more entries than they are ever re-sorted, so entries do not carry it.
+#[cfg(windows)]
+type NameKey = Vec<u16>;
+#[cfg(not(windows))]
+type NameKey = ();
+
+fn name_key(_e: &Entry) -> NameKey {
+    #[cfg(windows)]
+    { crate::win::wide(&_e.name) }
+}
+
+fn compare_entries(keyed_a: &(NameKey, Entry), keyed_b: &(NameKey, Entry), s: Sorting) -> Ordering {
+    let (a, b) = (&keyed_a.1, &keyed_b.1);
+    if s.folders_on_top && a.is_dir != b.is_dir {
+        return b.is_dir.cmp(&a.is_dir);
+    }
+    let by_name = || {
+        #[cfg(windows)]
+        { crate::win::logical_cmp(&keyed_a.0, &keyed_b.0) }
+        #[cfg(not(windows))]
+        { natural_cmp(&a.lname, &b.lname) }
+    };
+    // "Folders can't be sorted by size" (resource SortBySize_LargestFirst).
+    if s.by == SortBy::Size && a.is_dir && b.is_dir {
+        return by_name();
+    }
+    fn lower(text: &str) -> impl Iterator<Item = char> + '_ {
+        text.chars().flat_map(char::to_lowercase)
+    }
+    let o = match s.by {
+        SortBy::Name => by_name(),
+        SortBy::Date => a.modified.cmp(&b.modified).then_with(by_name),
+        // Folders stay one group next to the files, even empty ones. Comparing them
+        // with files by size and name would make the order inconsistent, and the
+        // standard sort may panic on an inconsistent order.
+        SortBy::Size if a.is_dir != b.is_dir => b.is_dir.cmp(&a.is_dir),
+        SortBy::Size => a.size.cmp(&b.size).then_with(by_name),
+        SortBy::Type => lower(&a.ext).cmp(lower(&b.ext)).then_with(by_name),
+    };
+    if s.ascending { o } else { o.reverse() }
+}
+
+pub fn sort_entries(v: &mut Vec<Entry>, s: Sorting) {
+    let mut keyed: Vec<(NameKey, Entry)> = std::mem::take(v).into_iter().map(|e| (name_key(&e), e)).collect();
+    keyed.sort_by(|a, b| compare_entries(a, b, s));
+    *v = keyed.into_iter().map(|(_, e)| e).collect();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathKind {
+    Folder,
+    File,
+    Missing,
+}
+
+/// Checks paths without letting a sleeping network share freeze the caller:
+/// an answer that does not arrive within `limit` stays `None`.
+pub fn probe_paths(paths: &[PathBuf], limit: std::time::Duration) -> Vec<Option<PathKind>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (k, path) in paths.iter().cloned().enumerate() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let kind = match std::fs::metadata(&path) {
+                Ok(md) if md.is_dir() => PathKind::Folder,
+                Ok(md) if md.is_file() => PathKind::File,
+                _ => PathKind::Missing,
+            };
+            let _ = tx.send((k, kind));
+        });
+    }
+    drop(tx);
+    let deadline = std::time::Instant::now() + limit;
+    let mut kinds = vec![None; paths.len()];
+    for _ in paths {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let Ok((k, kind)) = rx.recv_timeout(left) else { break };
+        kinds[k] = Some(kind);
+    }
+    kinds
+}
+
+/// Size with decimal units.
+pub fn fmt_size(bytes: u64, mebibytes: bool) -> String {
+    let k = if mebibytes { 1024.0 } else { 1000.0 };
+    let units: [&str; 5] = if mebibytes {
+        ["B", "KiB", "MiB", "GiB", "TiB"]
+    } else {
+        ["B", "KB", "MB", "GB", "TB"]
+    };
+    let mut v = bytes as f64;
+    let mut u = 0;
+    while v >= k && u < units.len() - 1 {
+        v /= k;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{bytes} B")
+    } else if v >= 100.0 {
+        format!("{v:.0} {}", units[u])
+    } else {
+        format!("{v:.1} {}", units[u])
+    }
+}
+
+pub fn age_secs(t: Option<SystemTime>) -> Option<f64> {
+    let t = t?;
+    Some(SystemTime::now().duration_since(t).map(|d| d.as_secs_f64()).unwrap_or(0.0))
+}
+
+/// Short relative age as in the Age column: `40'`, `1 h 44'`, `4 d`, `3 M`, `1 y`
+/// (such as `16'`, `1 h 44'`, `2 h 2'`).
+pub fn fmt_age(t: Option<SystemTime>) -> String {
+    let Some(s) = age_secs(t) else { return String::new() };
+    let min = s / 60.0;
+    let h = min / 60.0;
+    let d = h / 24.0;
+    if min < 60.0 {
+        format!("{}'", min.floor() as i64)
+    } else if h < 24.0 {
+        format!("{} h {}'", h.floor() as i64, (min % 60.0).floor() as i64)
+    } else if d < 60.0 {
+        format!("{} d", d.floor() as i64)
+    } else if d < 365.0 {
+        format!("{} M", (d / 30.44).floor() as i64)
+    } else {
+        format!("{} y", (d / 365.25).floor() as i64)
+    }
+}
+
+/// Windows-style HLS (0..240 scale) to RGB.
+fn hls240(h: f32, l: f32, s: f32) -> Color32 {
+    let (h, l, s) = (h / 240.0, l / 240.0, s / 240.0);
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let f = |mut t: f32| {
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Color32::from_rgb(c(f(h + 1.0 / 3.0)), c(f(h)), c(f(h - 1.0 / 3.0)))
+}
+
+/// Saturation and luminosity come from the defaults.
+pub const AGE_SATURATION: f32 = crate::defaults::AGE_SATURATION;
+pub const AGE_LUMA: f32 = crate::defaults::AGE_LUMA;
+
+/// Age colour: red (now) → yellow (1 day) → green (7 days) → cyan (60 days) → blue (330 days),
+/// grey after a year. The curve points are estimated from the program's own age legend picture.
+pub fn age_color(t: Option<SystemTime>) -> Option<Color32> {
+    let s = age_secs(t)?;
+    let days = s / 86400.0;
+    if days >= 365.0 {
+        return None;
+    }
+    // (days, hue in degrees)
+    const PTS: [(f64, f64); 5] = [(1.0 / 24.0, 0.0), (1.0, 60.0), (7.0, 120.0), (60.0, 180.0), (330.0, 240.0)];
+    let d = days.max(PTS[0].0);
+    let mut hue = 240.0;
+    for w in PTS.windows(2) {
+        let ((d0, h0), (d1, h1)) = (w[0], w[1]);
+        if d <= d1 {
+            let t = (d.ln() - d0.ln()) / (d1.ln() - d0.ln());
+            hue = h0 + (h1 - h0) * t.clamp(0.0, 1.0);
+            break;
+        }
+    }
+    Some(hls240(hue as f32 / 360.0 * 240.0, AGE_LUMA, AGE_SATURATION))
+}
+
+pub fn fmt_date(t: Option<SystemTime>) -> String {
+    t.map(|t| DateTime::<Local>::from(t).format(crate::defaults::DATE_FORMAT).to_string()).unwrap_or_default()
+}
+pub fn fmt_time(t: Option<SystemTime>) -> String {
+    t.map(|t| DateTime::<Local>::from(t).format(crate::defaults::TIME_FORMAT).to_string()).unwrap_or_default()
+}
+pub fn fmt_datetime(t: Option<SystemTime>) -> String {
+    t.map(|t| DateTime::<Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
+/// Folder name for tabs and titles.
+pub fn display_name(p: &Path) -> String {
+    match p.file_name() {
+        Some(n) => n.to_string_lossy().into_owned(),
+        None => {
+            let s = p.to_string_lossy().into_owned();
+            if s.is_empty() { "/".into() } else { s.trim_end_matches(['\\']).to_string() }
+        }
+    }
+}
+
+/// Ancestor chain from the root down to `p` (inclusive).
+pub fn ancestors(p: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = p.ancestors().map(|a| a.to_path_buf()).collect();
+    v.reverse();
+    v.retain(|a| !a.as_os_str().is_empty());
+    v
+}
+
+/// Collision-safe candidate retaining the original OS filename bytes.
+pub fn unique_os_name(dir: &Path, name: &std::ffi::OsStr, is_dir: bool) -> PathBuf {
+    let candidate = dir.join(name);
+    if std::fs::symlink_metadata(&candidate).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        return candidate;
+    }
+    let path = Path::new(name);
+    let ext = if is_dir { None } else { path.extension() };
+    let stem = if is_dir { name } else { path.file_stem().unwrap_or(name) };
+    for n in 1.. {
+        let mut next = stem.to_os_string();
+        next.push(if n == 1 { " - Copy".into() } else { format!(" - Copy ({n})") });
+        if let Some(ext) = ext { next.push("."); next.push(ext); }
+        let candidate = dir.join(next);
+        match std::fs::symlink_metadata(&candidate) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return candidate,
+            Err(_) => return candidate, // The operation reports the actual access error.
+            Ok(_) => {}
+        }
+    }
+    unreachable!()
+}
+
+pub fn valid_name(name: &str) -> bool {
+    let bad: &[char] = if cfg!(windows) { &['\\', '/', ':', '*', '?', '"', '<', '>', '|'] } else { &['/'] };
+    if name.is_empty() || name.contains('\0') || name.contains(bad) || name == "." || name == ".." { return false; }
+    #[cfg(windows)]
+    {
+        if name.encode_utf16().count() > 255 || name.ends_with([' ', '.']) || name.chars().any(|c| c < ' ') { return false; }
+        let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_uppercase();
+        if ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"].contains(&stem.as_str()) { return false; }
+        if let Some(n) = stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT"))
+            && ["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"].contains(&n) { return false; }
+        true
+    }
+    #[cfg(not(windows))]
+    { name.len() <= 255 }
+}
+
+/// Names the system runs, or hands to something that runs them, instead of showing them.
+const RUNNABLE_EXTS: &[&str] = &[
+    "exe", "com", "scr", "pif", "cpl", "msi", "msp", "msc", "appx", "msix", "application",
+    "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "jar", "reg", "inf",
+    "lnk", "url", "scf", "appref-ms", "library-ms", "search-ms",
+    "msu", "mst", "msixbundle", "appxbundle", "appinstaller", "vb", "ws", "wsc", "psd1", "ps1xml",
+    "chm", "hlp", "settingcontent-ms", "diagcab", "gadget", "shb", "shs", "sct", "xbap",
+    "sh", "bash", "run", "desktop", "appimage", "deb", "rpm",
+];
+
+/// Hand a file or folder to the system, which runs it if it is a program.
+pub fn open_with_system(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    { crate::win::open(path) }
+    #[cfg(not(windows))]
+    { open::that_detached(path) }
+}
+
+pub fn is_runnable(name: &str) -> bool {
+    // Windows drops trailing dots and spaces, so `setup.exe.` still runs as `setup.exe`.
+    let ext = split_ext(name.trim_end_matches(['.', ' ']), false).to_ascii_lowercase();
+    RUNNABLE_EXTS.contains(&ext.as_str())
+}
+
+/// Types `xdg-open` can hand to something that runs them. A file gets its type from its
+/// contents or a link's target, so a harmless name proves nothing.
+#[cfg(not(windows))]
+const RUNNABLE_TYPES: &[&str] = &[
+    "application/x-executable", "application/x-pie-executable", "application/x-sharedlib",
+    "application/x-dosexec", "application/x-ms-dos-executable", "application/x-msdownload",
+    "application/vnd.microsoft.portable-executable", "application/x-msi",
+    "application/x-shellscript", "application/x-sh", "text/x-shellscript", "application/x-desktop",
+    "application/java-archive", "application/x-java-archive", "application/x-jar",
+    "application/vnd.appimage", "application/x-iso9660-appimage",
+    "text/x-python", "text/x-script.python", "application/x-perl", "text/x-perl", "application/x-ruby",
+    "application/vnd.debian.binary-package", "application/x-rpm", "application/vnd.flatpak.ref",
+];
+
+#[cfg(not(windows))]
+pub fn is_runnable_type(mime: &str) -> bool {
+    RUNNABLE_TYPES.contains(&mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase().as_str())
+}
+
+/// Links lead elsewhere and must never be walked recursively. On Windows this covers
+/// symbolic links, junctions and mount points, but not placeholders such as OneDrive's,
+/// which are real folders and files.
+pub fn is_link_like(md: &std::fs::Metadata) -> bool {
+    md.file_type().is_symlink()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_sorting_is_a_consistent_order() {
+        use std::cmp::Ordering::Greater;
+        let root = std::env::temp_dir().join(format!("fc_sort_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for name in ["a", "c", "e"] { std::fs::create_dir_all(root.join(name)).unwrap(); }
+        for (name, size) in [("b", 0), ("d", 0), ("f", 1), ("g.TXT", 0), ("h.txt", 2), ("Ż.Żx", 0), ("i.żx", 0)] {
+            std::fs::write(root.join(name), vec![0; size]).unwrap();
+        }
+        let entries: Vec<_> = read_dir(&root).unwrap().into_iter().map(|e| (super::name_key(&e), e)).collect();
+        assert_eq!(entries.len(), 10);
+        for by in [SortBy::Name, SortBy::Date, SortBy::Size, SortBy::Type] {
+            for ascending in [true, false] {
+                for folders_on_top in [true, false] {
+                    let s = Sorting { by, ascending, folders_on_top };
+                    for a in &entries { for b in &entries { for c in &entries {
+                        if super::compare_entries(a, b, s) != Greater && super::compare_entries(b, c, s) != Greater {
+                            assert_ne!(super::compare_entries(a, c, s), Greater, "{s:?}: {} {} {}", a.1.name, b.1.name, c.1.name);
+                        }
+                    }}}
+                }
+            }
+        }
+        let by_type = Sorting { by: SortBy::Type, ascending: true, folders_on_top: false };
+        let (mut upper, mut lower) = (None, None);
+        for e in &entries {
+            if e.1.name == "g.TXT" { upper = Some(e); }
+            if e.1.name == "h.txt" { lower = Some(e); }
+        }
+        assert_eq!(super::compare_entries(upper.unwrap(), lower.unwrap(), by_type), std::cmp::Ordering::Less, "extensions ignore case");
+
+        let file = root.join("f");
+        let missing = root.join("missing");
+        let kinds = super::probe_paths(&[root.clone(), file, missing], std::time::Duration::from_secs(5));
+        assert_eq!(kinds, [Some(super::PathKind::Folder), Some(super::PathKind::File), Some(super::PathKind::Missing)]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn windows_creation_names() {
+        for bad in ["CON", "nul.txt", "COM1", "LPT9.log", "COM¹.txt", "con .txt", "CONIN$", "trailing.", "trailing ", "a:b", "line\nbreak", "..", ""] {
+            assert!(!valid_name(bad), "{bad:?}");
+        }
+        for good in ["Zażółć 日本語.txt", "COM10.txt", "report", ".gitignore", " leading", "a..b"] { assert!(valid_name(good), "{good}"); }
+        assert!(valid_name(&"ą".repeat(255))); assert!(!valid_name(&"ą".repeat(256)));
+        assert!(valid_name(&"🙂".repeat(127))); assert!(!valid_name(&"🙂".repeat(128)));
+    }
+    #[test]
+    fn runnable_names_cannot_hide_behind_case_or_trailing_characters() {
+        for name in ["setup.exe", "SETUP.EXE", "start.bat", "photo.jpg.lnk", "setup.exe.", "setup.exe . ", "Install.desktop", "app.AppImage", "help.chm", "update.msu", "open.settingcontent-ms"] {
+            assert!(is_runnable(name), "{name}");
+        }
+        for name in ["photo.jpg", "notes.txt", "exe", ".exe.txt", "archive.zip"] {
+            assert!(!is_runnable(name), "{name}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn runnable_types_ignore_case_and_parameters() {
+        for mime in ["application/java-archive", "APPLICATION/X-PIE-EXECUTABLE", "text/x-shellscript; charset=utf-8"] {
+            assert!(is_runnable_type(mime), "{mime}");
+        }
+        for mime in ["text/plain", "image/jpeg", "application/zip", "application/pdf", ""] {
+            assert!(!is_runnable_type(mime), "{mime}");
+        }
+    }
+
+    #[test]
+    fn natural() {
+        assert_eq!(natural_cmp("file2", "file10"), Ordering::Less);
+        assert_eq!(natural_cmp("a", "B"), Ordering::Less);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_logical_sort() {
+        let cmp = |a: &str, b: &str| crate::win::logical_cmp(&crate::win::wide(a), &crate::win::wide(b));
+        assert_eq!(cmp("file2.txt", "file10.txt"), Ordering::Less);
+        assert_eq!(cmp("REPORT.txt", "report.txt"), Ordering::Equal);
+        assert_eq!(cmp("zażółć2.txt", "zażółć10.txt"), Ordering::Less);
+    }
+    #[test]
+    fn sizes() {
+        assert_eq!(fmt_size(10_500_000, false), "10.5 MB");
+        assert_eq!(fmt_size(512, false), "512 B");
+    }
+    #[test]
+    fn shipped_formats_classify_without_expanding_preview_decoders() {
+        for (ext, expected) in [
+            ("CR2", Kind::Image), ("avif", Kind::Image), ("heic", Kind::Image),
+            ("m2ts", Kind::Video), ("mka", Kind::Audio), ("docm", Kind::Document),
+            ("qcow2", Kind::Archive), ("py", Kind::Program),
+            ("gif", Kind::Image), ("m2v", Kind::Image), ("!!!", Kind::Text),
+        ] {
+            assert_eq!(Kind::from_ext(ext), expected, "{ext}");
+        }
+        for ext in ["cr2", "heic", "avif"] {
+            assert!(!IMAGE_EXTS.contains(&ext), "classification must not enable unsupported preview: {ext}");
+        }
+    }
+}
