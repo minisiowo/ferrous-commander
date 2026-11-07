@@ -1086,9 +1086,12 @@ fn held_keys_do_not_repeat_file_operations() {
     frame(&ctx, &mut app, vec![release(Key::D, Modifiers::COMMAND)], Modifiers::COMMAND);
     frame(&ctx, &mut app, vec![key_event(Key::D, false, Modifiers::COMMAND)], Modifiers::COMMAND);
     assert_eq!(app.jobs.len(), 1, "keyboard must be live in this test");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // On Linux the job ends once the whole filesystem is synced, which takes a while when
+    // other tests write to the same slow disk.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while !app.jobs.is_empty() {
-        assert!(std::time::Instant::now() < deadline, "duplicate timed out");
+        let step = app.jobs[0].progress.lock().unwrap().current.clone();
+        assert!(std::time::Instant::now() < deadline, "duplicate timed out at: {step}");
         frame(&ctx, &mut app, vec![], Modifiers::NONE);
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
