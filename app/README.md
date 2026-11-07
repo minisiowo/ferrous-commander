@@ -175,6 +175,21 @@ without discarding its entries.
 Windows filesystem audit, tested behavior and remaining limits:
 [WINDOWS_FILESYSTEM_AUDIT.md](WINDOWS_FILESYSTEM_AUDIT.md).
 
+## Archives
+
+Double-click an archive, press Enter on it, or right-click it and choose **Extract here** to
+unpack it beside itself. **Extract to the other panel** sends it there, and **Open with** still
+reaches an archive manager. Supported: `.zip`, `.7z`, `.tar`, `.tar.gz`/`.tgz`,
+`.tar.bz2`/`.tbz2`, `.tar.xz`/`.txz`, `.tar.zst`/`.tzst`, and single `.gz`, `.bz2`, `.xz` and
+`.zst` files. Nothing else needs to be installed. RAR and password-protected archives are not
+supported; a `.rar` file still opens in its default application.
+
+An archive with one top-level item unpacks as that item; anything else gets a folder named
+after the archive. Existing files are never replaced, and a damaged or cancelled archive
+leaves nothing behind. An archive that tries to write outside its folder is refused. Links
+leading out of the archive, special files, and names the system can't use are left out, and
+the app says how many.
+
 ## Linux file support
 
 Right-click an item → **Properties / Permissions** (or **Alt+Enter**) to inspect

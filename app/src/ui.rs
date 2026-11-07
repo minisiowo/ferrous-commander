@@ -315,7 +315,7 @@ impl App {
                     modifiers: m,
                     ..
                 // Autorepeat must not act on file after file while a key is held down.
-                } if (!repeat || !matches!(key, Key::Delete | Key::D)) => { self.key(i, key, m, page) },
+                } if (!repeat || !matches!(key, Key::Delete | Key::D | Key::Enter)) => { self.key(i, key, m, page) },
                 _ => {}
             }
         }

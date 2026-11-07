@@ -944,7 +944,23 @@ impl App {
             }
         };
         let mut acts = Vec::new();
-        act(ui, "Open", Act::Open(i, e.path.clone()), &mut acts);
+        // The listing is temporarily outside the cache while rows are painted,
+        // so selection(i) cannot resolve its entries here.
+        let paths: Vec<PathBuf> = if self.panes[i].selected.contains(&e.path) {
+            self.panes[i].selected.iter().cloned().collect()
+        } else {
+            vec![e.path.clone()]
+        };
+        if !e.is_dir && crate::archive::is_archive(&e.path) {
+            let archives: Vec<PathBuf> = paths.iter().filter(|p| crate::archive::is_archive(p)).cloned().collect();
+            act(ui, "Extract here", Act::Extract(archives.clone(), None), &mut acts);
+            let other = self.panes[self.other(i)].path().to_path_buf();
+            if self.panes.len() > 1 && !crate::app::is_computer(&other) {
+                act(ui, "Extract to the other panel", Act::Extract(archives, Some(other)), &mut acts);
+            }
+        } else {
+            act(ui, "Open", Act::Open(i, e.path.clone()), &mut acts);
+        }
         if !e.is_dir {
             let apps = open_with_apps(&e.path, ui.ctx());
             ui.menu_button("Open with", |ui| {
@@ -1035,13 +1051,6 @@ impl App {
         act(ui, "Copy as path", Act::CopyPath(i), &mut acts);
         #[cfg(target_os = "linux")]
         act(ui, "Properties / Permissions   Alt+Enter", Act::Properties(e.path.clone()), &mut acts);
-        // The listing is temporarily outside the cache while rows are painted,
-        // so selection(i) cannot resolve its entries here.
-        let paths = if self.panes[i].selected.contains(&e.path) {
-            self.panes[i].selected.iter().cloned().collect()
-        } else {
-            vec![e.path.clone()]
-        };
         self.path_color_menu(ui, if e.is_dir { "Folder color" } else { "Tag (Color)" }, paths);
         if e.is_dir {
             let groups: Vec<String> = self.st.favorites.iter().map(|g| g.name.clone()).collect();

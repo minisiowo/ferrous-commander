@@ -17,6 +17,7 @@ pub enum OpKind {
     Trash,
     /// Delete what the user confirmed cannot go to the Recycle Bin.
     Destroy,
+    Extract,
     #[cfg(target_os = "linux")]
     Symlink,
     #[cfg(target_os = "linux")]
@@ -29,6 +30,7 @@ impl OpKind {
             OpKind::Copy => "Copying",
             OpKind::Move => "Moving",
             OpKind::Trash | OpKind::Destroy => "Deleting",
+            OpKind::Extract => "Extracting",
             #[cfg(target_os = "linux")]
             OpKind::Symlink | OpKind::Hardlink => "Creating links",
         }
@@ -76,6 +78,17 @@ pub fn start(kind: OpKind, sources: Vec<PathBuf>, dest: Option<PathBuf>, ctx: eg
                 (OpKind::Destroy, _) => destroy(&src),
                 (OpKind::Copy, Some(dir)) => copy_item(&src, dir, &c).map(Some),
                 (OpKind::Move, Some(dir)) => move_item(&src, dir, &c).map(Some),
+                (OpKind::Extract, Some(dir)) => {
+                    let mut report = |entry: String| p.lock().unwrap().current = entry;
+                    crate::archive::extract(&src, dir, &c, &mut report).map(|done| {
+                        if done.skipped > 0 {
+                            p.lock().unwrap().errors.push(format!(
+                                "{}: {} item(s) left out: links leading outside the archive, special files, or names this system can't use",
+                                fsx::display_name(&listed), done.skipped));
+                        }
+                        Some(done.path)
+                    })
+                }
                 #[cfg(target_os = "linux")]
                 (OpKind::Symlink | OpKind::Hardlink, Some(dir)) => create_link(&src, dir, kind == OpKind::Hardlink).map(Some),
                 _ => Err("No destination".into()),
@@ -96,7 +109,7 @@ pub fn start(kind: OpKind, sources: Vec<PathBuf>, dest: Option<PathBuf>, ctx: eg
         }
         // A copy counts as done once it is on the device: the job stays open until then.
         #[cfg(target_os = "linux")]
-        if let (OpKind::Copy, Some(dir)) = (kind, &exact_dest) {
+        if let (OpKind::Copy | OpKind::Extract, Some(dir)) = (kind, &exact_dest) {
             let wrote = !p.lock().unwrap().created.is_empty();
             if wrote {
                 p.lock().unwrap().current = "Writing to the drive".into();
@@ -282,7 +295,18 @@ fn copy_checked(src: &Path, dest_dir: &Path, cancel: &AtomicBool, check: impl Fn
     check_destination(src, dest_dir)?;
     let name = src.file_name().ok_or("Cannot copy a filesystem root")?;
     let target = fsx::unique_os_name(dest_dir, name, src.is_dir());
-    // Stage beside the destination so cancellation/failure never exposes a partial copy.
+    staged(dest_dir, |stage| {
+        let payload = stage.join("item");
+        copy_rec(src, &payload, cancel).and_then(|()| check(&payload)).and_then(|()| {
+            if cancel.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
+            publish(&payload, &target, cancel).map_err(|e| e.to_string())
+        })?;
+        Ok(target)
+    })
+}
+
+/// Stage beside the destination so cancellation/failure never exposes a partial result.
+pub(crate) fn staged<T>(dest_dir: &Path, work: impl FnOnce(&Path) -> Result<T, String>) -> Result<T, String> {
     let mut stage = None;
     for n in 0..1000 {
         let candidate = dest_dir.join(format!(".ferrous-copy-{}-{n}", std::process::id()));
@@ -293,11 +317,7 @@ fn copy_checked(src: &Path, dest_dir: &Path, cancel: &AtomicBool, check: impl Fn
         }
     }
     let stage = stage.ok_or("Could not reserve a temporary copy directory")?;
-    let payload = stage.join("item");
-    let result = copy_rec(src, &payload, cancel).and_then(|()| check(&payload)).and_then(|()| {
-        if cancel.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
-        publish(&payload, &target, cancel).map_err(|e| e.to_string())
-    });
+    let result = work(&stage);
     // Keep cleanup errors visible: restricted filesystems may refuse removal.
     #[cfg(windows)]
     let cleanup = crate::windows_fs::remove_staged(&stage);
@@ -306,7 +326,7 @@ fn copy_checked(src: &Path, dest_dir: &Path, cancel: &AtomicBool, check: impl Fn
     #[cfg(target_os = "linux")]
     proven::settle_freed_folders(dest_dir);
     match (result, cleanup) {
-        (Ok(()), Ok(())) => Ok(target),
+        (Ok(done), Ok(())) => Ok(done),
         (Err(e), Ok(())) => Err(e),
         // The drive was pulled out: what is left on it cannot be known from here.
         (Err(e), Err(gone)) if gone.kind() == std::io::ErrorKind::NotFound => Err(e),
@@ -317,7 +337,7 @@ fn copy_checked(src: &Path, dest_dir: &Path, cancel: &AtomicBool, check: impl Fn
 /// Give a finished copy its name. Windows refuses to rename a folder while anything inside
 /// is open, and antivirus, the search indexer and SMB all hold a new file for a moment, so
 /// a good copy could fail at the very end. Testing against a share hit this within a minute.
-fn publish(payload: &Path, target: &Path, _cancel: &AtomicBool) -> std::io::Result<()> {
+pub(crate) fn publish(payload: &Path, target: &Path, _cancel: &AtomicBool) -> std::io::Result<()> {
     #[cfg(windows)]
     for _ in 0..120 {
         match rename_no_replace(payload, target) {

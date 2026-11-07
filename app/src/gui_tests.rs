@@ -1338,3 +1338,57 @@ fn notice_buttons_do_what_they_say() {
     assert!(app.closing && cancel.load(Ordering::Relaxed));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn archives_unpack_by_double_click_and_from_the_menu() {
+    use crate::ops::OpKind;
+    let (root, _, ctx, mut app) = safety_app("archives");
+    let archive = root.join("pack.zip");
+    std::fs::write(&archive, include_bytes!("testdata/sample.zip")).unwrap();
+    app.reload_all();
+    let wait_for = |ctx: &egui::Context, app: &mut App, what: &str, done: &dyn Fn(&App) -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !done(app) {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            frame(ctx, app, vec![], Modifiers::NONE);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    wait_for(&ctx, &mut app, "the archive to be listed", &|app| app.panes[0].view.len() == 2);
+    let row = |ctx: &egui::Context, app: &mut App| {
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        out.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(t) if t.galley.job.text == "pack.zip" => Some(Rect::from_min_size(t.pos, t.galley.size()).center()),
+            _ => None,
+        }).expect("the archive's row is painted")
+    };
+
+    let pos = row(&ctx, &mut app);
+    click(&ctx, &mut app, pos, Modifiers::NONE);
+    click(&ctx, &mut app, pos, Modifiers::NONE);
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    assert!(app.jobs.first().is_none_or(|job| job.kind == OpKind::Extract));
+    wait_for(&ctx, &mut app, "the double click", &|app| app.jobs.is_empty());
+    let first = root.join("pack");
+    assert_eq!(std::fs::read(first.join("top.txt")).unwrap(), b"top\n");
+    assert!(app.notices.is_empty());
+    assert_eq!(app.panes[0].selected.iter().collect::<Vec<_>>(), [&first], "what arrived is selected");
+
+    // Let the earlier click expire, so the right click stands alone.
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    wait_for(&ctx, &mut app, "the new folder to be listed", &|app| app.panes[0].view.len() == 3);
+    let pos = row(&ctx, &mut app);
+    frame(&ctx, &mut app, vec![Event::PointerMoved(pos)], Modifiers::NONE);
+    for pressed in [true, false] {
+        frame(&ctx, &mut app, vec![Event::PointerButton {
+            pos, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE,
+        }], Modifiers::NONE);
+    }
+    click_text(&ctx, &mut app, "Extract here");
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    wait_for(&ctx, &mut app, "the menu's extraction", &|app| app.jobs.is_empty());
+    assert_eq!(std::fs::read(root.join("pack - Copy").join("top.txt")).unwrap(), b"top\n");
+    std::fs::remove_dir_all(root).unwrap();
+}

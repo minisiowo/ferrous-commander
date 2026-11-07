@@ -312,6 +312,8 @@ pub enum Act {
     ClosePanel(usize),
     ToggleSplit(usize),
     OpenWith(PathBuf, Option<crate::openwith::AppEntry>),
+    /// Unpack these archives into this folder, or next to each archive.
+    Extract(Vec<PathBuf>, Option<PathBuf>),
 }
 
 pub struct ShotState {
@@ -1430,6 +1432,11 @@ impl App {
         });
         if is_dir {
             self.navigate(i, p, None);
+        } else if crate::archive::is_archive(&p) {
+            // As in Nautilus: opening an archive unpacks it beside itself. "Open with" still
+            // reaches an archive manager.
+            self.acts.push(Act::Extract(vec![p], None));
+            if let Some(ctx) = self.wake.get() { ctx.request_repaint(); }
         } else if let Some(place) = run_warning(&p) {
             // A click behind the open window must not stack a second question.
             if !self.notices.iter().any(|n| matches!(n, Notice::ConfirmRun { path, .. } if *path == p)) {
@@ -1630,6 +1637,7 @@ impl App {
                     OpKind::Trash if cfg!(windows) => "Moved to Recycle Bin",
                     OpKind::Trash => "Moved to Trash",
                     OpKind::Destroy => "Permanently deleted",
+                    OpKind::Extract => "Extracted",
                     _ => "Finished processing",
                 };
                 self.toast(ToastKind::Success, format!("{word} {processed} item(s)"));
@@ -1749,6 +1757,20 @@ impl App {
                     let _ = tx.send(crate::openwith::launch(&p, app.as_ref()));
                     ctx.request_repaint();
                 });
+            }
+            Act::Extract(archives, dest) => {
+                // Search results can sit in different folders, and each job has one target.
+                let mut groups: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
+                for archive in archives {
+                    let Some(dir) = dest.clone().or_else(|| archive.parent().map(Path::to_path_buf)) else { continue };
+                    match groups.iter_mut().find(|(d, _)| *d == dir) {
+                        Some((_, group)) => group.push(archive),
+                        None => groups.push((dir, vec![archive])),
+                    }
+                }
+                for (dir, group) in groups {
+                    self.start_job(OpKind::Extract, group, Some(dir), ctx);
+                }
             }
             Act::NewTab(i) => self.new_tab(i, None, true),
             Act::CloseTab(i, t) => {
