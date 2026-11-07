@@ -47,6 +47,9 @@ when the user asks, by following `.claude/skills/linux-security-report/SKILL.md`
 The tag starts `.github/workflows/release.yml`, which tests and builds on Linux and
 Windows and publishes a pre-release. A tag that differs from `Cargo.toml` fails.
 Pushing a tag publishes to testers, so only do it when the user asks for a release.
+Before tagging, run the workflow on `main` by hand (`gh workflow run release.yml`)
+and wait for it to pass. If a tag's build still fails, leave the tag where it is and
+release the next version number.
 
 ## Packaging
 
