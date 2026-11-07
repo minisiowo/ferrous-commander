@@ -17,7 +17,7 @@ row buffer instead of cloning the entire tree; ordinary repaints only paint visi
 
 ## Download
 
-Ready-made builds are on the [Releases](../../releases) page: the Windows setup or
+Ready-made builds are on the [Releases](https://github.com/minisiowo/ferrous-commander/releases) page: the Windows setup or
 portable zip, and a Linux archive. `SHA256SUMS.txt` there lists their checksums.
 Windows may warn about an unknown publisher, because the builds are not signed.
 
