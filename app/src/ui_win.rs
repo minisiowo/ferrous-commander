@@ -38,6 +38,7 @@ impl App {
             Dialog::RenameFavorite { .. } => ("Rename shortcut", "Folder name", "Rename"),
             Dialog::RenameGroup { .. } => ("Rename group", "Group name", "Rename"),
             Dialog::NewGroup { .. } => ("New group", "New Group name", "Create"),
+            Dialog::Password { .. } => ("Password needed", "Password", "Extract"),
         };
         let pal = self.pal;
         let creates = matches!(d, Dialog::NewFolder { .. } | Dialog::NewFile { .. });
@@ -47,15 +48,21 @@ impl App {
             .anchor(Align2::CENTER_CENTER, vec2(0.0, -60.0))
             .default_width(360.0)
             .show(ctx, |ui| {
+                if let Dialog::Password { archive, wrong, .. } = &d {
+                    ui.label(RichText::new(fsx::display_name(archive)).color(pal.text).strong());
+                    if *wrong { ui.label(RichText::new("Wrong password. Try again.").color(hex("#ef7063"))); }
+                }
+                let secret = matches!(d, Dialog::Password { .. });
                 let (name, focus) = match &mut d {
                     Dialog::AddLocation { name, focus, .. }
                     | Dialog::RenameFavorite { name, focus, .. }
                     | Dialog::NewFolder { name, focus, .. }
                     | Dialog::NewFile { name, focus, .. }
                     | Dialog::RenameGroup { name, focus, .. }
-                    | Dialog::NewGroup { name, focus } => (name, focus),
+                    | Dialog::NewGroup { name, focus }
+                    | Dialog::Password { name, focus, .. } => (name, focus),
                 };
-                let resp = ui.add(egui::TextEdit::singleline(name).hint_text(hint).desired_width(340.0));
+                let resp = ui.add(egui::TextEdit::singleline(name).hint_text(hint).password(secret).desired_width(340.0));
                 if *focus {
                     resp.request_focus();
                     *focus = false;
@@ -71,7 +78,7 @@ impl App {
                 if matches!(d, Dialog::RenameFavorite { .. }) {
                     ui.label(RichText::new("Changes the name in the sidebar only; the folder is not renamed. Leave empty to use the folder's name.").color(pal.text_weak).size(11.0));
                 }
-                let valid = matches!(d, Dialog::RenameFavorite { .. }) || !name.trim().is_empty() && (!matches!(d, Dialog::AddLocation { .. }) || std::path::Path::new(name.trim()).is_absolute());
+                let valid = matches!(d, Dialog::RenameFavorite { .. }) || (secret && !name.is_empty()) || !name.trim().is_empty() && (!matches!(d, Dialog::AddLocation { .. }) || std::path::Path::new(name.trim()).is_absolute());
                 if !name.trim().is_empty() && !valid { ui.label("Enter a full folder path or network share."); }
 
                 let (enter, ctrl, shift, esc) = ui.input(|inp| {
@@ -138,6 +145,9 @@ impl App {
                         if !name.trim().is_empty() {
                             self.group_add_new(name.trim().to_string());
                         }
+                    }
+                    Dialog::Password { archive, dest, .. } => {
+                        self.extract_with_password(archive.clone(), dest.clone(), name.clone(), ui.ctx());
                     }
                 }
             });

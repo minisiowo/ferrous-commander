@@ -27,9 +27,9 @@ bzip2 = "0.6.1"
 flate2 = "1.1.10"
 lzma-rust2 = { version = "0.25.0", default-features = false, features = ["std", "xz"] }
 ruzstd = "0.9.1"
-sevenz-rust2 = { version = "0.25.0", default-features = false, features = ["bzip2", "deflate", "ppmd"] }
+sevenz-rust2 = { version = "0.25.0", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd"] }
 tar = { version = "0.4.46", default-features = false }
-zip = { version = "9.4.1", default-features = false, features = ["bzip2", "chrono", "deflate-flate2", "deflate64", "lzma", "ppmd", "xz"] }
+zip = { version = "9.4.1", default-features = false, features = ["aes-crypto", "bzip2", "chrono", "deflate-flate2", "deflate64", "lzma", "ppmd", "xz"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13.2"

@@ -181,8 +181,10 @@ Double-click an archive, press Enter on it, or right-click it and choose **Extra
 unpack it beside itself. **Extract to the other panel** sends it there, and **Open with** still
 reaches an archive manager. Supported: `.zip`, `.7z`, `.tar`, `.tar.gz`/`.tgz`,
 `.tar.bz2`/`.tbz2`, `.tar.xz`/`.txz`, `.tar.zst`/`.tzst`, and single `.gz`, `.bz2`, `.xz` and
-`.zst` files. Nothing else needs to be installed. RAR and password-protected archives are not
-supported; a `.rar` file still opens in its default application.
+`.zst` files, with nothing else to install. Password-protected `.zip` and `.7z` archives ask
+for the password, which is never saved. `.rar` needs [7-Zip](https://www.7-zip.org) or `unrar`
+to be installed when the app starts; without one, a `.rar` file opens in its default
+application.
 
 An archive with one top-level item unpacks as that item; anything else gets a folder named
 after the archive. Existing files are never replaced, and a damaged or cancelled archive

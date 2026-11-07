@@ -48,6 +48,8 @@ pub struct Progress {
     pub created: Vec<PathBuf>,
     /// Left untouched because deleting them could not be undone, and why.
     pub unrecoverable: Vec<(PathBuf, String)>,
+    /// Archives that want a password, and whether the one given was wrong.
+    pub locked: Vec<(PathBuf, bool)>,
 }
 
 pub struct Job {
@@ -58,6 +60,10 @@ pub struct Job {
 }
 
 pub fn start(kind: OpKind, sources: Vec<PathBuf>, dest: Option<PathBuf>, ctx: egui::Context) -> Job {
+    start_with_password(kind, sources, dest, None, ctx)
+}
+
+pub fn start_with_password(kind: OpKind, sources: Vec<PathBuf>, dest: Option<PathBuf>, password: Option<String>, ctx: egui::Context) -> Job {
     let progress = Arc::new(Mutex::new(Progress { total_items: sources.len(), ..Default::default() }));
     let cancel = Arc::new(AtomicBool::new(false));
     let (p, c, d) = (progress.clone(), cancel.clone(), dest.clone());
@@ -80,14 +86,20 @@ pub fn start(kind: OpKind, sources: Vec<PathBuf>, dest: Option<PathBuf>, ctx: eg
                 (OpKind::Move, Some(dir)) => move_item(&src, dir, &c).map(Some),
                 (OpKind::Extract, Some(dir)) => {
                     let mut report = |entry: String| p.lock().unwrap().current = entry;
-                    crate::archive::extract(&src, dir, &c, &mut report).map(|done| {
+                    match crate::archive::extract(&src, dir, password.as_deref(), &c, &mut report).map(|done| {
                         if done.skipped > 0 {
                             p.lock().unwrap().errors.push(format!(
                                 "{}: {} item(s) left out: links leading outside the archive, special files, or names this system can't use",
                                 fsx::display_name(&listed), done.skipped));
                         }
                         Some(done.path)
-                    })
+                    }) {
+                        Err(e) if e == crate::archive::PASSWORD_NEEDED || e == crate::archive::PASSWORD_WRONG => {
+                            p.lock().unwrap().locked.push((listed.clone(), e == crate::archive::PASSWORD_WRONG));
+                            Ok(None)
+                        }
+                        done => done,
+                    }
                 }
                 #[cfg(target_os = "linux")]
                 (OpKind::Symlink | OpKind::Hardlink, Some(dir)) => create_link(&src, dir, kind == OpKind::Hardlink).map(Some),

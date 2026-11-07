@@ -95,6 +95,7 @@ fn options(renderer: eframe::Renderer) -> eframe::NativeOptions {
 }
 
 fn run(renderer: eframe::Renderer, shot: Option<PathBuf>) -> eframe::Result {
+    archive::detect_tools();
     eframe::run_native(
         "Ferrous Commander",
         options(renderer),

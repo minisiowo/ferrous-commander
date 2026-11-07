@@ -1,6 +1,6 @@
 //! The application state and all actions. Drawing lives in `ui.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
@@ -124,6 +124,8 @@ pub struct Pane {
     pub list_offset: f32,
     pub list_h: f32,
     pub pending_select: Option<PathBuf>,
+    /// New items selected before the folder's fresh listing shows them.
+    arriving: HashSet<PathBuf>,
 }
 
 impl Pane {
@@ -140,6 +142,7 @@ impl Pane {
         self.anchor = None;
     }
     fn clear_view_state(&mut self) {
+        self.arriving.clear();
         self.expanded.clear();
         self.tree_entries.clear();
         self.tree_key = None;
@@ -188,6 +191,13 @@ pub enum Dialog {
         focus: bool,
     },
     NewGroup {
+        name: String,
+        focus: bool,
+    },
+    Password {
+        archive: PathBuf,
+        dest: Option<PathBuf>,
+        wrong: bool,
         name: String,
         focus: bool,
     },
@@ -353,6 +363,8 @@ pub struct App {
     /// Drives being ejected: mount point, name and the eventual outcome.
     pub ejecting: Vec<(PathBuf, String, mpsc::Receiver<Result<String, String>>)>,
     pub dialog: Option<Dialog>,
+    /// Archives waiting for a password, one question at a time.
+    locked: VecDeque<(PathBuf, Option<PathBuf>, bool)>,
     pub notices: Vec<Notice>,
     /// The window closes as soon as the cancelled operations have stopped.
     pub closing: bool,
@@ -581,6 +593,7 @@ impl App {
             open_with_pending: Vec::new(),
             ejecting: Vec::new(),
             dialog: None,
+            locked: VecDeque::new(),
             notices: Vec::new(),
             closing: false,
             #[cfg(target_os = "linux")]
@@ -760,6 +773,7 @@ impl App {
         }
         self.receive_drives(ctx);
         self.finish_jobs();
+        self.ask_for_password();
         self.receive_preview(ctx);
         for i in (0..self.ejecting.len()).rev() {
             let result = match self.ejecting[i].2.try_recv() {
@@ -1254,6 +1268,8 @@ impl App {
                 }
             }
             None => {
+                // Asked for, but the fresh listing has yet to show it.
+                if selecting && pane.arriving.contains(target.as_ref().unwrap()) { pane.pending_select = target; }
                 // The item went away (deleted, filtered): stay at the same row.
                 pane.cursor = pane
                     .cursor
@@ -1263,7 +1279,8 @@ impl App {
             }
         }
         let alive: HashSet<&PathBuf> = view.iter().map(|&k| &entries[k].path).collect();
-        pane.selected.retain(|s| alive.contains(s));
+        pane.arriving.retain(|s| !alive.contains(s));
+        pane.selected.retain(|s| alive.contains(s) || pane.arriving.contains(s));
         pane.view = view;
         pane.view_key = Some(key);
     }
@@ -1615,18 +1632,20 @@ impl App {
                     p.errors.clone(),
                     p.created.clone(),
                     p.unrecoverable.clone(),
+                    p.locked.clone(),
                 ));
                 false
             } else {
                 true
             }
         });
-        for (kind, dest, n, errors, created, unrecoverable) in finished {
+        for (kind, dest, n, errors, created, unrecoverable, locked) in finished {
             self.reload_all();
             for i in 0..self.panes.len() {
                 self.panes[i].view_key = None;
             }
-            let processed = n.saturating_sub(unrecoverable.len());
+            let processed = n.saturating_sub(unrecoverable.len() + locked.len());
+            self.locked.extend(locked.into_iter().map(|(archive, wrong)| (archive, dest.clone(), wrong)));
             if errors.iter().all(|e| e.ends_with("Cancelled")) && !errors.is_empty() {
                 self.toast(ToastKind::Info, "Cancelled");
             } else if !errors.is_empty() {
@@ -1649,6 +1668,7 @@ impl App {
             if let Some(d) = dest {
                 for i in 0..self.panes.len() {
                     if self.panes[i].path() == d {
+                        self.panes[i].arriving = created.iter().cloned().collect();
                         self.panes[i].selected = created.iter().cloned().collect();
                         if let Some(first) = created.first() {
                             self.panes[i].pending_select = Some(first.clone());
@@ -1657,6 +1677,18 @@ impl App {
                 }
             }
         }
+    }
+
+    fn ask_for_password(&mut self) {
+        if self.dialog.is_none()
+            && let Some((archive, dest, wrong)) = self.locked.pop_front() {
+            self.dialog = Some(Dialog::Password { archive, dest, wrong, name: String::new(), focus: true });
+        }
+    }
+
+    /// The password lives only in this job: it is never saved or shown.
+    pub fn extract_with_password(&mut self, archive: PathBuf, dest: Option<PathBuf>, password: String, ctx: &egui::Context) {
+        self.jobs.push(ops::start_with_password(OpKind::Extract, vec![archive], dest, Some(password), ctx.clone()));
     }
 
     // ---------------------------------------------------------------- preview

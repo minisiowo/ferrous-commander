@@ -18,7 +18,7 @@ impl Drop for Folder {
 }
 
 fn run(archive: &Path, dest: &Path) -> Result<Extracted, String> {
-    extract(archive, dest, &AtomicBool::new(false), &mut |_| {})
+    extract(archive, dest, None, &AtomicBool::new(false), &mut |_| {})
 }
 
 fn names(dir: &Path) -> Vec<String> {
@@ -187,7 +187,7 @@ fn damaged_and_cancelled_archives_leave_nothing() {
 
     fs::write(&archive, &packed).unwrap();
     let cancel = AtomicBool::new(true);
-    assert_eq!(extract(&archive, &dest, &cancel, &mut |_| {}).err().as_deref(), Some("Cancelled"));
+    assert_eq!(extract(&archive, &dest, None, &cancel, &mut |_| {}).err().as_deref(), Some("Cancelled"));
     assert!(names(&dest).is_empty(), "{:?}", names(&dest));
 
     let junk = folder.0.join("junk.zip");
@@ -208,7 +208,70 @@ fn password_protected_zip_says_so() {
         bytes[flags] |= 1;
     }
     fs::write(&archive, bytes).unwrap();
-    assert!(run(&archive, &folder.0).err().unwrap().contains("password"));
+    assert_eq!(run(&archive, &folder.0).err().as_deref(), Some(PASSWORD_NEEDED));
+}
+
+#[test]
+fn locked_archives_ask_refuse_and_open() {
+    let locked: &[(&str, &[u8])] = &[
+        ("locked.7z", include_bytes!("testdata/locked-p.7z")),
+        ("hidden-names.7z", include_bytes!("testdata/locked-phe.7z")),
+        ("aes.zip", include_bytes!("testdata/locked-aes.zip")),
+        ("old-style.zip", include_bytes!("testdata/locked-zc.zip")),
+    ];
+    for (name, bytes) in locked {
+        let folder = Folder::new("locked");
+        let dest = folder.0.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let archive = folder.0.join(name);
+        fs::write(&archive, bytes).unwrap();
+        let attempt = |password| extract(&archive, &dest, password, &AtomicBool::new(false), &mut |_| {});
+        assert_eq!(attempt(None).err().as_deref(), Some(PASSWORD_NEEDED), "{name}");
+        assert!(names(&dest).is_empty(), "{name}");
+        assert_eq!(attempt(Some("not it")).err().as_deref(), Some(PASSWORD_WRONG), "{name}");
+        assert!(names(&dest).is_empty(), "{name}");
+        let done = attempt(Some("secret")).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(fs::read(done.path.join("d/a.txt")).unwrap(), b"hello\n", "{name}");
+    }
+}
+
+/// Runs the tool the way `extract` does, but with a chosen tool.
+fn through_tool(tool: &tool::Tool, archive: &Path, password: Option<&str>, cancel: &AtomicBool) -> (Folder, Result<usize, String>) {
+    let folder = Folder::new("tool");
+    let mut report = |_: String| {};
+    let mut sink = Sink {
+        root: folder.0.clone(), cancel, report: &mut report, skipped: 0, unreadable: false, links: Vec::new(),
+        #[cfg(windows)]
+        zone: None,
+    };
+    let result = tool::unpack_with(tool, archive, password, &mut sink).map(|()| sink.skipped);
+    (folder, result)
+}
+
+/// Samples from the test files of the `rarfile` Python package. Each installed tool must
+/// handle them; a computer with neither has nothing to run this against.
+#[test]
+fn rar_samples_unpack_with_every_installed_tool() {
+    let tools = tool::installed();
+    if tools.is_empty() { eprintln!("no RAR tool installed: nothing checked"); }
+    let folder = Folder::new("rar");
+    let sample = |name: &str, bytes: &[u8]| { let path = folder.0.join(name); fs::write(&path, bytes).unwrap(); path };
+    let plain = sample("plain.rar", include_bytes!("testdata/seektest.rar"));
+    let data = sample("data.rar", include_bytes!("testdata/rar5-psw.rar"));
+    let hidden = sample("hidden.rar", include_bytes!("testdata/rar5-hpsw.rar"));
+    let cancel = AtomicBool::new(false);
+    for tool in &tools {
+        let (out, result) = through_tool(tool, &plain, None, &cancel);
+        assert_eq!(result, Ok(0), "{tool:?}");
+        assert_eq!(names(&out.0), ["stest1.txt", "stest2.txt"], "{tool:?}");
+        for archive in [&data, &hidden] {
+            assert_eq!(through_tool(tool, archive, None, &cancel).1.err().as_deref(), Some(PASSWORD_NEEDED), "{tool:?} {archive:?}");
+            assert_eq!(through_tool(tool, archive, Some("not it"), &cancel).1.err().as_deref(), Some(PASSWORD_WRONG), "{tool:?} {archive:?}");
+            let (out, result) = through_tool(tool, archive, Some("password"), &cancel);
+            assert_eq!(result, Ok(0), "{tool:?} {archive:?}");
+            assert_eq!(fs::read(out.0.join("stest1.txt")).unwrap(), fs::read(through_tool(tool, &plain, None, &cancel).0.0.join("stest1.txt")).unwrap(), "{tool:?}");
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -320,5 +383,92 @@ mod unix {
         let result = run(&archive, &dest);
         fs::set_permissions(&dest, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(result.is_err());
+    }
+
+    /// A stand-in that lists and unpacks whatever the script says.
+    fn fake(folder: &Path, script: &str) -> tool::Tool {
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = folder.join("fake-7z");
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o755).open(&path).unwrap();
+        file.write_all(format!("#!/bin/sh\n{script}\n").as_bytes()).unwrap();
+        drop(file);
+        // Another test's fork can briefly hold the file open for writing, which refuses exec.
+        std::thread::sleep(Duration::from_millis(100));
+        tool::Tool { kind: tool::Kind::SevenZip, path }
+    }
+
+    const LISTS_FINE: &str = "if [ \"$1\" = l ]; then echo ----------; echo 'Path = a.txt'; exit 0; fi";
+
+    #[test]
+    fn a_tool_never_runs_on_names_that_leave_the_archive() {
+        let folder = Folder::new("toolnames");
+        let ran = folder.0.join("ran");
+        let tool = fake(&folder.0, &format!(
+            "if [ \"$1\" = l ]; then echo ----------; echo 'Path = fine.txt'; echo 'Path = ..\\..\\evil.txt'; exit 0; fi\ntouch '{}'", ran.display()));
+        let cancel = AtomicBool::new(false);
+        let (_, result) = through_tool(&tool, Path::new("x.rar"), None, &cancel);
+        assert!(result.err().unwrap().contains("outside"));
+        assert!(!ran.exists());
+    }
+
+    #[test]
+    fn what_a_tool_leaves_is_held_to_the_same_rules() {
+        let folder = Folder::new("toolsweep");
+        fs::write(folder.0.join("secret"), b"outside").unwrap();
+        let outside = folder.0.join("secret");
+        let tool = fake(&folder.0, &format!(r#"{LISTS_FINE}
+dir=${{4#-o}}
+cd "$dir" || exit 9
+mkdir sub
+echo kept > sub/kept.txt
+chmod 4755 sub/kept.txt
+ln -s kept.txt sub/inside
+ln -s '{}' sub/outside
+mkfifo sub/pipe
+mkdir locked
+chmod 000 locked
+"#, outside.display()));
+        let cancel = AtomicBool::new(false);
+        let (out, result) = through_tool(&tool, Path::new("x.rar"), None, &cancel);
+        assert_eq!(result, Ok(2));
+        assert_eq!(names(&out.0.join("sub")), ["inside", "kept.txt"]);
+        assert_eq!(fs::metadata(out.0.join("sub/kept.txt")).unwrap().permissions().mode() & 0o7000, 0);
+        assert!(names(&out.0.join("locked")).is_empty());
+    }
+
+    #[test]
+    fn a_password_goes_by_stdin_and_never_on_the_command_line() {
+        let folder = Folder::new("toolpass");
+        let seen = folder.0.join("seen");
+        let tool = fake(&folder.0, &format!(r#"{LISTS_FINE}
+read answer
+echo "args: $* stdin: $answer" > '{}'
+"#, seen.display()));
+        let cancel = AtomicBool::new(false);
+        let (_, result) = through_tool(&tool, Path::new("x.rar"), Some("hunter2"), &cancel);
+        assert_eq!(result, Ok(0));
+        let seen = fs::read_to_string(seen).unwrap();
+        assert!(seen.contains("stdin: hunter2"), "{seen}");
+        assert_eq!(seen.matches("hunter2").count(), 1, "{seen}");
+    }
+
+    #[test]
+    fn cancelling_stops_a_running_tool() {
+        let folder = Folder::new("toolcancel");
+        let tool = fake(&folder.0, "exec sleep 30");
+        let cancel = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        let (_, result) = through_tool(&tool, Path::new("x.rar"), None, &cancel);
+        assert_eq!(result.err().as_deref(), Some("Cancelled"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn tool_errors_reach_the_user() {
+        let folder = Folder::new("toolerror");
+        let tool = fake(&folder.0, "echo noise; echo 'ERROR: Unexpected end of archive'; echo more; exit 2");
+        let cancel = AtomicBool::new(false);
+        let (_, result) = through_tool(&tool, Path::new("x.rar"), None, &cancel);
+        assert_eq!(result.err().as_deref(), Some("ERROR: Unexpected end of archive"));
     }
 }

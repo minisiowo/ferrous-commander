@@ -1392,3 +1392,36 @@ fn archives_unpack_by_double_click_and_from_the_menu() {
     assert_eq!(std::fs::read(root.join("pack - Copy").join("top.txt")).unwrap(), b"top\n");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn locked_archives_ask_again_until_the_password_fits() {
+    use crate::app::Dialog;
+    let (root, _, ctx, mut app) = safety_app("password");
+    let archive = root.join("locked.7z");
+    std::fs::write(&archive, include_bytes!("testdata/locked-p.7z")).unwrap();
+    let settle = |ctx: &egui::Context, app: &mut App, what: &str, done: &dyn Fn(&App) -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !done(app) {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            frame(ctx, app, vec![], Modifiers::NONE);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    let asked = |app: &App, expected: bool| matches!(&app.dialog, Some(Dialog::Password { wrong, .. }) if *wrong == expected);
+    app.open(0, archive);
+    settle(&ctx, &mut app, "the first question", &|app| asked(app, false));
+    assert!(app.notices.is_empty(), "a locked archive is not a failure");
+
+    let answer = |ctx: &egui::Context, app: &mut App, password: &str| {
+        if let Some(Dialog::Password { name, .. }) = &mut app.dialog { *name = password.into(); }
+        click_text(ctx, app, "Extract");
+    };
+    answer(&ctx, &mut app, "not it");
+    settle(&ctx, &mut app, "the second question", &|app| asked(app, true));
+    assert!(!root.join("in").exists());
+
+    answer(&ctx, &mut app, "secret");
+    settle(&ctx, &mut app, "the extraction", &|app| app.dialog.is_none() && app.jobs.is_empty());
+    assert_eq!(std::fs::read(root.join("in/d/a.txt")).unwrap(), b"hello\n");
+    std::fs::remove_dir_all(root).unwrap();
+}

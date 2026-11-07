@@ -12,6 +12,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{fsx, ops};
 
+#[path = "archive_tool.rs"]
+mod tool;
+
+pub use tool::detect_in_background as detect_tools;
+
+/// `extract` fails with these exactly when the archive should be tried again with a password.
+pub const PASSWORD_NEEDED: &str = "Password needed";
+pub const PASSWORD_WRONG: &str = "Wrong password";
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Packing { None, Gzip, Bzip2, Xz, Zstd }
 
@@ -19,6 +28,7 @@ enum Packing { None, Gzip, Bzip2, Xz, Zstd }
 enum Format {
     Zip,
     SevenZ,
+    Rar,
     Tar(Packing),
     /// One compressed file, such as `notes.txt.gz`.
     Single(Packing),
@@ -40,6 +50,7 @@ const SUFFIXES: &[(&str, Format)] = &[
     (".tar", Format::Tar(Packing::None)),
     (".zip", Format::Zip),
     (".7z", Format::SevenZ),
+    (".rar", Format::Rar),
     (".gz", Format::Single(Packing::Gzip)),
     (".bz2", Format::Single(Packing::Bzip2)),
     (".xz", Format::Single(Packing::Xz)),
@@ -56,7 +67,13 @@ fn identify(name: &str) -> Option<(Format, &str)> {
 }
 
 pub fn is_archive(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| identify(&name.to_string_lossy()).is_some())
+    let Some(name) = path.file_name() else { return false };
+    match identify(&name.to_string_lossy()) {
+        // Without a tool to unpack it, a RAR file stays with its default application.
+        Some((Format::Rar, _)) => tool::ready(),
+        Some(_) => true,
+        None => false,
+    }
 }
 
 pub struct Extracted {
@@ -67,21 +84,22 @@ pub struct Extracted {
 
 /// Unpack next to `dest_dir`'s other items. One top-level item keeps its own name; anything
 /// else gets a folder named after the archive, so it cannot scatter across the destination.
-pub fn extract(archive: &Path, dest_dir: &Path, cancel: &AtomicBool, report: &mut dyn FnMut(String)) -> Result<Extracted, String> {
+pub fn extract(archive: &Path, dest_dir: &Path, password: Option<&str>, cancel: &AtomicBool, report: &mut dyn FnMut(String)) -> Result<Extracted, String> {
     let name = archive.file_name().ok_or("Not an archive")?.to_string_lossy();
     let (format, stem) = identify(&name).ok_or("This archive format is not supported")?;
     ops::staged(dest_dir, |stage| {
         let root = stage.join("item");
         fs::create_dir(&root).map_err(|e| e.to_string())?;
         let mut sink = Sink {
-            root: root.clone(), cancel, report, skipped: 0, links: Vec::new(),
+            root: root.clone(), cancel, report, skipped: 0, unreadable: false, links: Vec::new(),
             #[cfg(windows)]
             zone: zone_of(archive),
         };
         let opened = File::open(archive).map_err(|e| fsx::friendly_err(&e))?;
         match format {
-            Format::Zip => unzip(opened, &mut sink)?,
-            Format::SevenZ => un7z(opened, &mut sink)?,
+            Format::Zip => unzip(opened, password, &mut sink)?,
+            Format::SevenZ => un7z(opened, password, &mut sink)?,
+            Format::Rar => tool::unpack(archive, password, &mut sink)?,
             Format::Tar(packing) => untar(unpacked(opened, packing)?, &mut sink)?,
             Format::Single(packing) => {
                 sink.file(Path::new(stem), None, None, &mut unpacked(opened, packing)?)?;
@@ -149,6 +167,9 @@ struct Sink<'a> {
     cancel: &'a AtomicBool,
     report: &'a mut dyn FnMut(String),
     skipped: usize,
+    /// The archive's data stopped making sense, which under a password means a wrong one.
+    /// Failing to write is a different matter, and says so.
+    unreadable: bool,
     /// Symbolic links wait until every file is written, so no entry can write through one.
     links: Vec<(PathBuf, PathBuf)>,
     #[cfg(windows)]
@@ -167,7 +188,7 @@ impl Sink<'_> {
                 Component::Normal(name) if fsx::valid_name(&name.to_string_lossy()) => rel.push(name),
                 // A name this system cannot hold: the rest of the archive is still good.
                 Component::Normal(_) => { self.skipped += 1; return Ok(None); }
-                _ => return Err(format!("Refused: this archive tries to write outside its folder ({})", raw.display())),
+                _ => return Err(refused(&raw.display())),
             }
         }
         if rel.as_os_str().is_empty() { return Ok(None); }
@@ -230,7 +251,7 @@ impl Sink<'_> {
             let n = match content.read(&mut buffer) {
                 Ok(n) => n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e.to_string()),
+                Err(e) => { self.unreadable = true; return Err(e.to_string()); }
             };
             if n == 0 { break; }
             output.write_all(&buffer[..n]).map_err(|e| fsx::friendly_err(&e))?;
@@ -274,9 +295,14 @@ impl Sink<'_> {
                 Err(_) => self.skipped += 1,
             }
         }
-        if placed.is_empty() { return Ok(()); }
+        self.keep_inside(placed)
+    }
+
+    #[cfg(unix)]
+    fn keep_inside(&mut self, links: Vec<PathBuf>) -> Result<(), String> {
+        if links.is_empty() { return Ok(()); }
         let root = fs::canonicalize(&self.root).map_err(|e| e.to_string())?;
-        for path in placed {
+        for path in links {
             if !fs::canonicalize(&path).is_ok_and(|target| target.starts_with(&root)) {
                 fs::remove_file(&path).map_err(|e| e.to_string())?;
                 self.skipped += 1;
@@ -290,6 +316,52 @@ impl Sink<'_> {
     fn place_links(&mut self) -> Result<(), String> {
         self.skipped += std::mem::take(&mut self.links).len();
         Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn keep_inside(&mut self, links: Vec<PathBuf>) -> Result<(), String> {
+        for path in links {
+            fs::remove_file(&path).or_else(|_| fs::remove_dir(&path)).map_err(|e| e.to_string())?;
+            self.skipped += 1;
+        }
+        Ok(())
+    }
+
+    /// Hold what an outside tool left to the rules every other format follows.
+    fn settle(&mut self) -> Result<(), String> {
+        let mut pending = vec![self.root.clone()];
+        let mut links = Vec::new();
+        while let Some(dir) = pending.pop() {
+            for item in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+                let path = item.map_err(|e| e.to_string())?.path();
+                let md = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+                if fsx::is_link_like(&md) {
+                    links.push(path);
+                } else if md.is_dir() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&path, fs::Permissions::from_mode(md.permissions().mode() & 0o777 | 0o700)).map_err(|e| e.to_string())?;
+                    }
+                    pending.push(path);
+                } else if md.is_file() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mode = md.permissions().mode();
+                        if mode & 0o7000 != 0 {
+                            fs::set_permissions(&path, fs::Permissions::from_mode(mode & 0o777)).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    #[cfg(windows)]
+                    self.mark_zone(&path);
+                } else {
+                    fs::remove_file(&path).map_err(|e| e.to_string())?;
+                    self.skipped += 1;
+                }
+            }
+        }
+        self.keep_inside(links)
     }
 
     #[cfg(windows)]
@@ -320,6 +392,10 @@ fn link_target(content: &mut dyn Read) -> Result<PathBuf, String> {
     Ok(PathBuf::from(String::from_utf8_lossy(&target).into_owned()))
 }
 
+fn refused(entry: &dyn std::fmt::Display) -> String {
+    format!("Refused: this archive tries to write outside its folder ({entry})")
+}
+
 fn is_link_mode(mode: u32) -> bool { mode & 0o170000 == 0o120000 }
 
 fn untar(reader: Box<dyn Read>, sink: &mut Sink) -> Result<(), String> {
@@ -348,14 +424,20 @@ fn untar(reader: Box<dyn Read>, sink: &mut Sink) -> Result<(), String> {
     Ok(())
 }
 
-fn unzip(file: File, sink: &mut Sink) -> Result<(), String> {
+fn unzip(file: File, password: Option<&str>, sink: &mut Sink) -> Result<(), String> {
     use chrono::TimeZone;
     let mut archive = zip::ZipArchive::new(BufReader::with_capacity(1 << 16, file)).map_err(|e| e.to_string())?;
     for i in 0..archive.len() {
-        if archive.by_index_raw(i).map_err(|e| e.to_string())?.encrypted() {
-            return Err("This archive is password-protected, which isn't supported yet".into());
-        }
-        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let encrypted = archive.by_index_raw(i).map_err(|e| e.to_string())?.encrypted();
+        let entry = match (encrypted, password) {
+            (true, None) => return Err(PASSWORD_NEEDED.into()),
+            (true, Some(password)) => archive.by_index_decrypt(i, password.as_bytes()),
+            (false, _) => archive.by_index(i),
+        };
+        let mut entry = match entry {
+            Err(zip::result::ZipError::InvalidPassword) => return Err(PASSWORD_WRONG.into()),
+            opened => opened.map_err(|e| e.to_string())?,
+        };
         // ZIP paths use forward slashes, yet some Windows tools write backslashes.
         let path = PathBuf::from(entry.name().map_err(|e| e.to_string())?.replace('\\', "/"));
         if entry.is_dir() {
@@ -369,7 +451,10 @@ fn unzip(file: File, sink: &mut Sink) -> Result<(), String> {
                 .and_then(|t| chrono::Local.from_local_datetime(&t).earliest())
                 .map(SystemTime::from);
             let mode = entry.unix_mode();
-            sink.file(&path, mode, modified, &mut entry)?;
+            // Old ZIP encryption lets one wrong password in 256 past its check, and only the
+            // finished file's checksum shows it.
+            sink.file(&path, mode, modified, &mut entry)
+                .map_err(|e| if encrypted && sink.unreadable { PASSWORD_WRONG.into() } else { e })?;
         }
     }
     Ok(())
@@ -378,14 +463,17 @@ fn unzip(file: File, sink: &mut Sink) -> Result<(), String> {
 /// The bit saying that a 7z entry's attributes carry Unix permissions in their upper half.
 const UNIX_EXTENSION: u32 = 0x8000;
 
-fn un7z(file: File, sink: &mut Sink) -> Result<(), String> {
+fn un7z(file: File, password: Option<&str>, sink: &mut Sink) -> Result<(), String> {
     use sevenz_rust2::{ArchiveReader, Error, Password};
     let describe = |e: Error| match e {
-        Error::PasswordRequired | Error::MaybeBadPassword(_) => "This archive is password-protected, which isn't supported yet".to_string(),
+        // A password is only ever given to an archive that asked for one, and a wrong one
+        // turns its data into noise that can fail in any way.
+        _ if password.is_some() => PASSWORD_WRONG.to_string(),
+        Error::PasswordRequired | Error::MaybeBadPassword(_) => PASSWORD_NEEDED.to_string(),
         Error::Other(message) => message.into_owned(),
         other => other.to_string(),
     };
-    let mut reader = ArchiveReader::new(BufReader::with_capacity(1 << 16, file), Password::empty()).map_err(describe)?;
+    let mut reader = ArchiveReader::new(BufReader::with_capacity(1 << 16, file), password.map_or_else(Password::empty, Password::new)).map_err(describe)?;
     let mut failure = None;
     let result = reader.for_each_entries(|entry, content| {
         let path = PathBuf::from(entry.name().replace('\\', "/"));
@@ -405,6 +493,7 @@ fn un7z(file: File, sink: &mut Sink) -> Result<(), String> {
         done.map(|()| true).map_err(|e| { failure = Some(e); Error::Other("".into()) })
     });
     match (failure, result) {
+        (Some(_), _) if sink.unreadable && password.is_some() => Err(PASSWORD_WRONG.into()),
         (Some(e), _) => Err(e),
         (None, result) => result.map_err(describe),
     }
