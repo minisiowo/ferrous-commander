@@ -1,0 +1,41 @@
+# Published to the AUR as ferrous-commander-bin. Before each publish: set pkgver to the
+# release, run updpkgsums, then makepkg --printsrcinfo > .SRCINFO.
+# Needs a release whose archive holds LICENSE, so one newer than 0.1.1.
+pkgname=ferrous-commander-bin
+pkgver=0.1.1
+pkgrel=1
+pkgdesc='A fast, light multi-pane file manager with tiled panels and column navigation'
+arch=('x86_64')
+url='https://github.com/minisiowo/ferrous-commander'
+license=('MIT')
+# The binary links only glibc and libgcc. The rest it loads while running, so they are
+# listed by hand: the graphics, Wayland and X11 libraries named inside the binary.
+depends=(
+  'gcc-libs'
+  'glibc'
+  'libglvnd'
+  'libx11'
+  'libxcursor'
+  'libxi'
+  'libxkbcommon'
+  'libxkbcommon-x11'
+  'libxrender'
+  'wayland'
+)
+optdepends=(
+  'glib2: open files with a chosen application'
+  'udisks2: eject drives'
+)
+provides=('ferrous-commander')
+conflicts=('ferrous-commander')
+options=('!strip' '!debug')
+source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/ferrous-commander-linux-x86_64.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd ferrous-commander
+  install -Dm755 ferrous-commander -t "$pkgdir/usr/bin"
+  install -Dm644 ferrous-commander.desktop -t "$pkgdir/usr/share/applications"
+  install -Dm644 ferrous-commander.png -t "$pkgdir/usr/share/icons/hicolor/64x64/apps"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
+}

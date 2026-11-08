@@ -21,7 +21,7 @@ arch=$(uname -m)
 mkdir -p dist/ferrous-commander
 cp "$target_dir/release/ferrous-commander" dist/ferrous-commander/
 cp packaging/linux/ferrous-commander.desktop packaging/linux/ferrous-commander.png dist/ferrous-commander/
-cp README.md dist/ferrous-commander/
+cp README.md ../LICENSE dist/ferrous-commander/
 cat > dist/ferrous-commander/install.sh <<'EOF'
 #!/usr/bin/env sh
 # Installs for the current user (no sudo): ~/.local/bin + app menu entry.

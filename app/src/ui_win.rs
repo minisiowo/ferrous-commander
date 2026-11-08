@@ -539,7 +539,9 @@ impl App {
             }
             settings_section(ui, "Application", accent);
             ui.horizontal(|ui| {
-                if crate::install::is_installed() {
+                if crate::install::installed_by_package_manager() {
+                    ui.label(RichText::new("✔ Installed by the system package manager").color(weak));
+                } else if crate::install::is_installed() {
                     ui.label(RichText::new("✔ Installed for this user").color(weak));
                     if ui.button("Uninstall").clicked() {
                         let result = crate::install::uninstall();

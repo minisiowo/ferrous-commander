@@ -49,6 +49,11 @@ pub fn installed_exe() -> Option<PathBuf> {
     }
 }
 
+/// True when a package manager put this binary in place, so it owns updates and removal.
+pub fn installed_by_package_manager() -> bool {
+    cfg!(target_os = "linux") && std::env::current_exe().is_ok_and(|exe| exe.starts_with("/usr/bin"))
+}
+
 pub fn is_installed() -> bool {
     installed_exe().is_some_and(|p| p.exists())
 }
