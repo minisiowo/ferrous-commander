@@ -33,9 +33,10 @@ const TILT: f32 = 28.0;
 /// Stops short of looking straight down, where "up" stops meaning anything.
 pub(super) const TILT_OFFSETS: (f32, f32) = (-85.0 - TILT, 85.0 - TILT);
 pub(super) const MIN_MODEL_ZOOM: f32 = 0.25;
-/// Above this many triangles, a model is drawn at half size while it moves.
-const QUICK_LIMIT: usize = 300_000;
+/// Above this many triangles for each worker, a model is drawn at half size while it moves.
+const QUICK_LIMIT: usize = 250_000;
 const MARGIN: f32 = 8.0;
+const MAX_WORKERS: usize = 8;
 
 const TOO_LARGE: &str = "This model is too large to preview";
 const NO_SHAPE: &str = "This file holds no model to show";
@@ -119,7 +120,7 @@ fn shown(triangles: &[Triangle], options: Options) -> Reply {
     let first_size = framing.reach.map(|reach| (((reach * first_scale + MARGIN) * 2.0).ceil() as usize).max(32));
     let Some(view) = options.view else {
         let centre = first_size.map(|v| v as f32 / 2.0);
-        let picture = paint(triangles, &framing, &camera(TURN, TILT), first_scale, centre, first_size, SAMPLES);
+        let picture = paint(triangles, &framing, &camera(TURN, TILT), first_scale, centre, first_size, SAMPLES, workers());
         // Half the drawn size: like vector art, it has no size of its own and fills the window.
         let orig = [picture.size[0].div_ceil(2), picture.size[1].div_ceil(2)];
         return (Loaded::Model(orig), Some(picture));
@@ -129,59 +130,99 @@ fn shown(triangles: &[Triangle], options: Options) -> Reply {
 
 fn look(triangles: &[Triangle], framing: &Framing, view: ModelView, side: f32, first_scale: f32, first_width: usize) -> Picture {
     let [width, height] = view.size.map(|v| v.clamp(16, 4096) as f32);
-    let quick = if !view.fine && triangles.len() > QUICK_LIMIT { 0.5 } else { 1.0 };
+    let quick = if !view.fine && triangles.len() > QUICK_LIMIT * workers() { 0.5 } else { 1.0 };
     let shrink = (side / width.max(height)).min(1.0) * quick;
     let zoom = view.zoom.clamp(10, 6400) as f32 / 100.0;
     let scale = first_scale * view.fit.max(1) as f32 / first_width as f32 * zoom * shrink;
     let size = [(width * shrink).ceil() as usize, (height * shrink).ceil() as usize];
     let centre = [size[0] as f32 / 2.0 + view.pan[0] as f32 * shrink, size[1] as f32 / 2.0 + view.pan[1] as f32 * shrink];
     let camera = camera(TURN - view.turn as f32 / 10.0, TILT + view.tilt as f32 / 10.0);
-    paint(triangles, framing, &camera, scale, centre, size, if view.fine { SAMPLES } else { 1 })
+    paint(triangles, framing, &camera, scale, centre, size, if view.fine { SAMPLES } else { 1 }, workers())
 }
 
-fn paint(triangles: &[Triangle], framing: &Framing, camera: &Camera, scale: f32, centre: [f32; 2], [width, height]: [usize; 2], samples: usize) -> Picture {
-    let Camera { right, up, to_camera } = *camera;
-    let key = unit(mix([(right, -0.4), (up, 0.7), (to_camera, 0.6)]));
-    let fill = unit(mix([(right, 0.7), (up, -0.1), (to_camera, 0.5)]));
-    let (columns, rows) = (width * samples, height * samples);
-    let fine = scale * samples as f32;
-    let shift = centre.map(|v| v * samples as f32);
+/// A triangle in picture coordinates, facing one way, and known to touch some sample.
+struct Flat {
+    a: Point,
+    b: Point,
+    c: Point,
+    inverse_area: f32,
+    shade: u8,
+    /// First and last column and row it touches.
+    columns: [u32; 2],
+    rows: [u32; 2],
+}
 
-    let mut depth = vec![f32::NEG_INFINITY; columns * rows];
-    let mut light = vec![0u8; columns * rows];
+fn edge(from: Point, to: Point, x: f32, y: f32) -> f32 {
+    (to[0] - from[0]) * (y - from[1]) - (to[1] - from[1]) * (x - from[0])
+}
+
+fn workers() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_WORKERS)
+}
+
+/// The samples a span from `low` to `high` covers, or `None` when it falls between them.
+fn covered(low: f32, high: f32, limit: usize) -> Option<[u32; 2]> {
+    let (first, last) = ((low - 0.5).ceil().max(0.0), (high - 0.5).floor().min(limit as f32 - 1.0));
+    (first <= last).then_some([first as u32, last as u32])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flatten(triangles: &[Triangle], pivot: Point, camera: &Camera, lights: [Point; 2], fine: f32, shift: [f32; 2], columns: usize, rows: usize) -> Vec<Flat> {
+    let Camera { right, up, to_camera } = *camera;
+    let mut flats = Vec::new();
     for triangle in triangles {
-        let [a, b, c] = triangle.map(|p| {
-            let from_pivot = minus(p, framing.pivot);
+        let [a, mut b, mut c] = triangle.map(|p| {
+            let from_pivot = minus(p, pivot);
             [dot(from_pivot, right) * fine + shift[0], shift[1] - dot(from_pivot, up) * fine, dot(from_pivot, to_camera)]
         });
-        let edge = |from: Point, to: Point, x: f32, y: f32| (to[0] - from[0]) * (y - from[1]) - (to[1] - from[1]) * (x - from[0]);
-        let area = edge(a, b, c[0], c[1]);
+        let span = |i: usize| (a[i].min(b[i]).min(c[i]), a[i].max(b[i]).max(c[i]));
+        let (x, y) = (span(0), span(1));
+        // Most triangles of a detailed model are smaller than a sample and end here.
+        let (Some(touched_columns), Some(touched_rows)) = (covered(x.0, x.1, columns), covered(y.0, y.1, rows)) else { continue };
+        let mut area = edge(a, b, c[0], c[1]);
         if area == 0.0 || !area.is_finite() { continue; }
+        if area < 0.0 {
+            std::mem::swap(&mut b, &mut c);
+            area = -area;
+        }
         let mut normal = unit(cross(minus(triangle[1], triangle[0]), minus(triangle[2], triangle[0])));
         // Models often have some faces inside out; these are lit like the rest.
         if dot(normal, to_camera) < 0.0 { normal = normal.map(|v| -v); }
-        let brightness = 0.30 + 0.60 * dot(normal, key).max(0.0) + 0.20 * dot(normal, fill).max(0.0);
-        let shade = (brightness.min(1.0) * 255.0) as u8;
-        let first = |values: [f32; 3]| values.into_iter().fold(f32::MAX, f32::min).floor().max(0.0) as usize;
-        let last = |values: [f32; 3], limit: usize| (values.into_iter().fold(f32::MIN, f32::max).ceil().max(0.0) as usize).min(limit - 1);
-        for y in first([a[1], b[1], c[1]])..=last([a[1], b[1], c[1]], rows) {
-            for x in first([a[0], b[0], c[0]])..=last([a[0], b[0], c[0]], columns) {
-                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-                let (u, v, w) = (edge(b, c, px, py) / area, edge(c, a, px, py) / area, edge(a, b, px, py) / area);
+        let brightness = 0.30 + 0.60 * dot(normal, lights[0]).max(0.0) + 0.20 * dot(normal, lights[1]).max(0.0);
+        let shade = ((brightness.min(1.0) * 255.0) as u8).max(1);
+        flats.push(Flat { a, b, c, inverse_area: 1.0 / area, shade, columns: touched_columns, rows: touched_rows });
+    }
+    flats
+}
+
+/// Fills the output rows starting at `first_row`, which `pixels` holds.
+fn fill_band(flats: &[Vec<Flat>], pixels: &mut [u8], first_row: usize, width: usize, samples: usize) {
+    let band_rows = pixels.len() / (width * 4);
+    let columns = width * samples;
+    let (top, end) = ((first_row * samples) as u32, ((first_row + band_rows) * samples) as u32);
+    let mut depth = vec![f32::NEG_INFINITY; columns * (end - top) as usize];
+    let mut light = vec![0u8; depth.len()];
+    for flat in flats.iter().flatten() {
+        if flat.rows[1] < top || flat.rows[0] >= end { continue; }
+        let Flat { a, b, c, inverse_area, shade, .. } = *flat;
+        for y in flat.rows[0].max(top)..=flat.rows[1].min(end - 1) {
+            let row_start = (y - top) as usize * columns;
+            let py = y as f32 + 0.5;
+            for x in flat.columns[0]..=flat.columns[1] {
+                let px = x as f32 + 0.5;
+                let (u, v, w) = (edge(b, c, px, py), edge(c, a, px, py), edge(a, b, px, py));
                 if u < 0.0 || v < 0.0 || w < 0.0 { continue; }
-                let z = u * a[2] + v * b[2] + w * c[2];
-                let at = y * columns + x;
+                let z = (u * a[2] + v * b[2] + w * c[2]) * inverse_area;
+                let at = row_start + x as usize;
                 if z > depth[at] {
                     depth[at] = z;
-                    light[at] = shade.max(1);
+                    light[at] = shade;
                 }
             }
         }
     }
-
-    let mut rgba = Vec::with_capacity(width * height * 4);
-    for y in 0..height {
-        for x in 0..width {
+    for (y, row) in pixels.chunks_exact_mut(width * 4).enumerate() {
+        for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
             let (mut sum, mut covered) = (0u32, 0u32);
             for sy in 0..samples {
                 for sx in 0..samples {
@@ -190,21 +231,47 @@ fn paint(triangles: &[Triangle], framing: &Framing, camera: &Camera, scale: f32,
                 }
             }
             let shade = sum as f32 / covered.max(1) as f32 / 255.0;
-            rgba.extend(MODEL_COLOR.map(|c| (c * shade) as u8));
-            rgba.push((covered * 255 / (samples * samples) as u32) as u8);
+            pixel[..3].copy_from_slice(&MODEL_COLOR.map(|c| (c * shade) as u8));
+            pixel[3] = (covered * 255 / (samples * samples) as u32) as u8;
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint(triangles: &[Triangle], framing: &Framing, camera: &Camera, scale: f32, centre: [f32; 2], [width, height]: [usize; 2], samples: usize, workers: usize) -> Picture {
+    let Camera { right, up, to_camera } = *camera;
+    let lights = [unit(mix([(right, -0.4), (up, 0.7), (to_camera, 0.6)])), unit(mix([(right, 0.7), (up, -0.1), (to_camera, 0.5)]))];
+    let (columns, rows) = (width * samples, height * samples);
+    let fine = scale * samples as f32;
+    let shift = centre.map(|v| v * samples as f32);
+    let workers = workers.clamp(1, height.max(1));
+    let pivot = framing.pivot;
+    let flats: Vec<Vec<Flat>> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = triangles.chunks(triangles.len().div_ceil(workers).max(1))
+            .map(|part| scope.spawn(move || flatten(part, pivot, camera, lights, fine, shift, columns, rows)))
+            .collect();
+        jobs.into_iter().map(|job| job.join().unwrap()).collect()
+    });
+    let mut rgba = vec![0u8; width * height * 4];
+    let band_rows = height.div_ceil(workers).max(1);
+    std::thread::scope(|scope| {
+        for (band, pixels) in rgba.chunks_mut(width * 4 * band_rows).enumerate() {
+            let flats = &flats;
+            scope.spawn(move || fill_band(flats, pixels, band * band_rows, width, samples));
+        }
+    });
     Picture { size: [width as u32, height as u32], delays: Vec::new(), rgba }
 }
 
-/// The last model read, so that each new look at it does not read the file again.
+/// The models read last, newest at the end, so that each new look at one, or going
+/// back to it, does not read the file again.
 struct Held {
     file: PathBuf,
     stamp: (u64, Option<SystemTime>),
     triangles: Arc<Vec<Triangle>>,
 }
 
-static HELD: Mutex<Option<Held>> = Mutex::new(None);
+static HELD: Mutex<Vec<Held>> = Mutex::new(Vec::new());
 
 fn stamp(file: &Path) -> Option<(u64, Option<SystemTime>)> {
     std::fs::metadata(file).ok().map(|m| (m.len(), m.modified().ok()))
@@ -212,13 +279,25 @@ fn stamp(file: &Path) -> Option<(u64, Option<SystemTime>)> {
 
 fn held(file: &Path) -> Option<Arc<Vec<Triangle>>> {
     let now = stamp(file);
-    HELD.lock().unwrap().as_ref().filter(|h| h.file == file && Some(h.stamp) == now).map(|h| h.triangles.clone())
+    let mut all = HELD.lock().unwrap();
+    let at = all.iter().position(|h| h.file == file)?;
+    let item = all.remove(at);
+    if Some(item.stamp) != now { return None; }
+    let triangles = item.triangles.clone();
+    all.push(item);
+    Some(triangles)
 }
 
 fn hold(file: &Path, triangles: Vec<Triangle>) -> Arc<Vec<Triangle>> {
     let triangles = Arc::new(triangles);
     if let Some(stamp) = stamp(file) {
-        *HELD.lock().unwrap() = Some(Held { file: file.to_path_buf(), stamp, triangles: triangles.clone() });
+        let mut all = HELD.lock().unwrap();
+        all.retain(|h| h.file != file);
+        all.push(Held { file: file.to_path_buf(), stamp, triangles: triangles.clone() });
+        let mut total: usize = all.iter().map(|h| h.triangles.len()).sum();
+        while all.len() > 1 && total > MAX_TRIANGLES {
+            total -= all.remove(0).triangles.len();
+        }
     }
     triangles
 }
@@ -543,6 +622,45 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         let again = load(&file, Options { view: Some(view), ..whole(256) }).0;
         assert!(matches!(again, Loaded::Error(_)), "a file that is gone is not shown from memory");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A ball of many facets, some big and some smaller than a pixel.
+    fn ball() -> Vec<Triangle> {
+        let at = |i: usize, j: usize| {
+            let (a, b) = (i as f32 * 0.021, j as f32 * 0.043);
+            [40.0 * a.sin() * b.cos(), 40.0 * a.sin() * b.sin(), 40.0 * a.cos()]
+        };
+        (0..150).flat_map(|i| (0..146).flat_map(move |j| [[at(i, j), at(i + 1, j), at(i, j + 1)], [at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)]])).collect()
+    }
+
+    #[test]
+    fn the_picture_does_not_depend_on_the_number_of_workers() {
+        let triangles = ball();
+        let framing = framing(&triangles).unwrap();
+        let view = camera(TURN, TILT);
+        for (size, samples) in [([301, 257], 2), ([96, 7], 1)] {
+            let centre = size.map(|v| v as f32 / 2.0);
+            let picture = |workers| paint(&triangles, &framing, &view, 1.3, centre, size, samples, workers).rgba;
+            let alone = picture(1);
+            assert!(alone.chunks_exact(4).any(|p| p[3] == 255), "the shape is drawn");
+            for workers in [2, 3, 8, 64] { assert_eq!(picture(workers), alone, "{workers} workers, {size:?}"); }
+        }
+    }
+
+    #[test]
+    fn the_last_models_stay_in_memory_within_a_limit() {
+        let root = scratch("held");
+        let (first, second) = (root.join("a.stl"), root.join("b.stl"));
+        std::fs::write(&first, binary_stl(&[0; 80])).unwrap();
+        std::fs::write(&second, binary_stl(&[0; 80])).unwrap();
+        hold(&first, TETRA.to_vec());
+        hold(&second, TETRA.to_vec());
+        assert!(held(&first).is_some() && held(&second).is_some(), "going back needs no new reading");
+        hold(&second, vec![TETRA[0]; MAX_TRIANGLES]);
+        assert!(held(&first).is_none(), "the oldest goes when the limit is passed");
+        assert!(held(&second).is_some());
+        HELD.lock().unwrap().retain(|h| h.file != second);
         std::fs::remove_dir_all(root).unwrap();
     }
 
