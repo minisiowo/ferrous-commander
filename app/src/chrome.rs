@@ -1,0 +1,153 @@
+//! The look every Ferrous window shares: a title bar, the content, and a strip of buttons.
+//!
+//! Inside `Panel::show`, call `body` or `scrolled_body`, then `footer` if the window has
+//! buttons. Each takes its own closure, one after the other, so they can all use `self`.
+
+use egui::{Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
+
+use crate::fsx::Kind;
+use crate::icons;
+use crate::theme::Palette;
+use crate::ui::fit_text;
+
+pub const BAR_H: f32 = 38.0;
+const FOOTER_H: f32 = 44.0;
+const MARGIN: i8 = 14;
+
+#[derive(Clone, Copy)]
+pub enum Icon<'a> {
+    /// A symbol from the font, in its own colour or the weak text colour.
+    Glyph(&'a str, Option<Color32>),
+    Folder(Color32),
+    /// A file icon: its kind and extension.
+    Entry(Kind, &'a str),
+}
+
+/// Paints the title bar into `r`; true when its close button was clicked. An empty `info`
+/// leaves the right side free. Anything else on `r`, such as dragging, is up to the caller.
+pub fn title_bar(ui: &mut Ui, pal: Palette, r: Rect, icon: Icon, title: &str, info: &str) -> bool {
+    let p = ui.painter_at(r);
+    let slot = Rect::from_center_size(pos2(r.min.x + 22.0, r.center().y), Vec2::splat(20.0));
+    match icon {
+        Icon::Glyph(glyph, color) => {
+            p.text(slot.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(14.0), color.unwrap_or(pal.text_weak));
+        }
+        Icon::Folder(color) => icons::folder(&p, slot, color),
+        Icon::Entry(kind, ext) => icons::entry(&p, slot, kind, ext, pal.dark, false),
+    }
+    let close = Rect::from_center_size(pos2(r.max.x - 22.0, r.center().y), Vec2::splat(26.0));
+    let hit = ui.interact(close, ui.scope_id().with("chrome_close"), Sense::click());
+    if hit.hovered() { p.rect_filled(close, CornerRadius::same(4), pal.hover); }
+    let x = close.shrink(8.0);
+    let stroke = Stroke::new(1.5, if hit.hovered() { pal.text } else { pal.text_weak });
+    p.line_segment([x.left_top(), x.right_bottom()], stroke);
+    p.line_segment([x.right_top(), x.left_bottom()], stroke);
+    let small = FontId::proportional(12.0);
+    let room = close.min.x - 10.0 - (r.min.x + 40.0);
+    let shown = fit_text(&p, info, &small, room * 0.6);
+    let right = pos2(close.min.x - 10.0, r.center().y);
+    let info_rect = if info.is_empty() { Rect::from_min_max(right, right) } else { p.text(right, Align2::RIGHT_CENTER, &shown, small, pal.text_weak) };
+    if shown != info { ui.interact(info_rect, ui.scope_id().with("chrome_info"), Sense::hover()).on_hover_text(info); }
+    let font = FontId::proportional(14.0);
+    let name = fit_text(&p, title, &font, (info_rect.min.x - r.min.x - 60.0).max(40.0));
+    p.text(pos2(r.min.x + 40.0, r.center().y), Align2::LEFT_CENTER, name, font, pal.text);
+    hit.clicked()
+}
+
+/// A window inside the application with the shared look.
+pub struct Panel<'a> {
+    window: egui::Window<'a>,
+    pal: Palette,
+    title: &'a str,
+    icon: Icon<'a>,
+    info: &'a str,
+    width: Option<f32>,
+}
+
+impl<'a> Panel<'a> {
+    pub fn new(title: &'a str, pal: Palette, icon: Icon<'a>) -> Self {
+        Panel { window: egui::Window::new(title), pal, title, icon, info: "", width: None }
+    }
+
+    pub fn info(mut self, info: &'a str) -> Self {
+        self.info = info;
+        self
+    }
+
+    /// One width, with the height following the content.
+    pub fn fixed_width(mut self, width: f32) -> Self {
+        self.width = Some(width);
+        self.window = self.window.resizable(false).default_width(width);
+        self
+    }
+
+    /// Resizable, centred, and never larger than the application's window.
+    pub fn fit_screen(mut self, ctx: &egui::Context, default: Vec2, min: Vec2) -> Self {
+        let available = (ctx.content_rect().size() - vec2(48.0, 64.0)).max(vec2(300.0, 240.0));
+        let size = default.min(available);
+        self.window = self.window.resizable(true).default_size(size).min_size(min.min(available)).max_size(available)
+            .default_pos(ctx.content_rect().center() - size * 0.5);
+        self
+    }
+
+    /// The remaining `egui::Window` settings: id, anchor, order and so on.
+    pub fn window(mut self, set: impl FnOnce(egui::Window<'a>) -> egui::Window<'a>) -> Self {
+        self.window = set(self.window);
+        self
+    }
+
+    /// Without egui's own title bar the window moves by any empty spot, so the bar
+    /// needs no drag handling of its own. True when the close button was clicked.
+    pub fn show(self, ctx: &egui::Context, add: impl FnOnce(&mut Ui)) -> bool {
+        let Panel { window, pal, title, icon, info, width } = self;
+        let frame = Frame::window(&ctx.global_style()).inner_margin(0.0).fill(pal.content_fill());
+        let mut closed = false;
+        window.collapsible(false).title_bar(false).frame(frame).show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            // The content's shade would swallow the usual, nearly equal field colour.
+            ui.visuals_mut().text_edit_bg_color = Some(pal.raised);
+            if let Some(width) = width { ui.set_width(width); }
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), BAR_H), Sense::hover());
+            let radius = ui.visuals().window_corner_radius;
+            ui.painter().rect_filled(r, CornerRadius { nw: radius.nw, ne: radius.ne, sw: 0, se: 0 }, pal.panel);
+            closed = title_bar(ui, pal, r, icon, title, info);
+            add(ui);
+        });
+        closed
+    }
+}
+
+/// The window's normal spacing, which the bars around the content do without.
+fn spaced(ui: &mut Ui) {
+    ui.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
+}
+
+/// Content with the usual margin.
+pub fn body<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    Frame::NONE.inner_margin(Margin::same(MARGIN)).show(ui, |ui| {
+        spaced(ui);
+        ui.set_min_width(ui.available_width());
+        add(ui)
+    }).inner
+}
+
+/// Content that fills the window and scrolls while the bars stay in place.
+/// `footer` leaves room for a `footer` call after it.
+pub fn scrolled_body<R>(ui: &mut Ui, footer: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let height = (ui.available_height() - if footer { FOOTER_H } else { 0.0 }).max(0.0);
+    egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(height).content_margin(Margin::same(MARGIN)).show(ui, |ui| {
+        spaced(ui);
+        add(ui)
+    }).inner
+}
+
+/// The strip of buttons at the bottom of a window.
+pub fn footer<R>(ui: &mut Ui, pal: Palette, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), FOOTER_H), Sense::hover());
+    let radius = ui.visuals().window_corner_radius;
+    ui.painter().rect_filled(r, CornerRadius { nw: 0, ne: 0, sw: radius.sw, se: radius.se }, pal.panel);
+    let inner = r.shrink2(vec2(MARGIN as f32, 0.0));
+    let mut strip = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)));
+    spaced(&mut strip);
+    add(&mut strip)
+}

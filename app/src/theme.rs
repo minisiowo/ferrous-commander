@@ -124,6 +124,11 @@ impl Palette {
         }
     }
 
+    /// Behind the content of a window, a shade away from its title bar.
+    pub fn content_fill(&self) -> Color32 {
+        blend(self.window, self.inactive, 0.5)
+    }
+
     /// The row the keyboard is on: a lighter tint than a selected row, or a stronger
     /// one on a selected row, so it can be told apart among several selected rows.
     pub fn cursor(&self, selected: bool) -> Color32 {
@@ -141,7 +146,7 @@ impl Palette {
         v.window_fill = self.panel;
         v.window_stroke = Stroke::new(1.0, blend(self.panel, self.text_weak, 0.28));
         v.window_corner_radius = CornerRadius::same(2);
-        v.menu_corner_radius = CornerRadius::same(6);
+        v.menu_corner_radius = CornerRadius::same(2);
         v.window_shadow = egui::epaint::Shadow::NONE;
         v.popup_shadow = egui::epaint::Shadow::NONE;
         v.extreme_bg_color = if self.dark { blend(self.window, self.panel, 0.5) } else { hex("#FFFFFF") };
@@ -267,6 +272,8 @@ mod tests {
         assert!(contrast(pal.cursor(false), pal.panel) > 1.15, "{name}: keyboard cursor is hard to see");
         assert_ne!(pal.cursor(false), pal.hover, "{name}");
         assert_ne!(pal.cursor(true), pal.selection(), "{name}");
+        // Small print in a window; soft themes cannot keep 4.5 here either.
+        assert!(contrast(pal.text_weak, pal.content_fill()) >= 4.0, "{name}: unreadable small print in a window");
     }
 
     #[test]

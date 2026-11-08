@@ -3,6 +3,7 @@
 
 mod app;
 mod archive;
+mod chrome;
 mod compress;
 mod drives;
 mod fsx;

@@ -1,6 +1,9 @@
 //! Linux properties use lstat; editing pins the selected inode and never follows links.
 use std::{fs, os::{fd::AsRawFd, unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}}, path::{Path, PathBuf}, sync::mpsc};
 use egui::{Context, RichText};
+use crate::chrome::{Icon, Panel};
+use crate::fsx::Kind;
+use crate::theme::Palette;
 
 pub struct Properties {
     path: PathBuf,
@@ -71,7 +74,7 @@ impl Properties {
         std::thread::spawn(move || { let _ = tx.send(inspect(&path)); ctx.request_repaint(); });
     }
     /// Returns (keep open, listing changed).
-    pub fn show(&mut self, ctx: &Context) -> (bool, bool) {
+    pub fn show(&mut self, ctx: &Context, pal: Palette) -> (bool, bool) {
         let mut changed = false;
         if let Some(result) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.rx = None;
@@ -86,10 +89,13 @@ impl Properties {
             }
             self.applying = false;
         }
-        let mut open = true;
-        egui::Window::new("Properties · Linux").id(egui::Id::unique("linux-properties")).open(&mut open)
-            .collapsible(false).default_width(520.0).show(ctx, |ui| {
-            ui.label(RichText::new(crate::fsx::display_name(&self.path)).strong());
+        let name = crate::fsx::display_name(&self.path);
+        let ext = self.path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+        let icon = if self.details.as_ref().is_some_and(|d| d.md.is_dir()) { Icon::Folder(Kind::Folder.color()) } else { Icon::Entry(Kind::from_ext(&ext), &ext) };
+        let mut open = !Panel::new(&name, pal, icon).info("Properties")
+            .window(|w| w.id(egui::Id::unique("linux-properties")))
+            .fit_screen(ctx, egui::vec2(520.0, 620.0), egui::vec2(420.0, 260.0))
+            .show(ctx, |ui| crate::chrome::scrolled_body(ui, false, |ui| {
             ui.label(self.path.display().to_string());
             if self.rx.is_some() { ui.spinner(); ui.label("Reading file information…"); }
             if let Some(d) = &self.details {
@@ -153,7 +159,7 @@ impl Properties {
                 });
             }
             if !self.message.is_empty() { ui.label(&self.message); }
-        });
+        }));
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) { open = false; }
         (open, changed)
     }

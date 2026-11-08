@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use egui::{Align2, CornerRadius, FontId, Frame, Key, Margin, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use crate::app::{Act, App, Dialog, DragPaths, DropTarget, Notice, ToastKind, is_computer};
+use crate::chrome::{self, Icon, Panel};
 use crate::fsx;
 use crate::icons;
 use crate::settings::Layout;
@@ -25,7 +26,7 @@ impl App {
         self.app_chooser_ui(ctx);
         #[cfg(target_os = "linux")]
         if let Some(mut properties) = self.properties.take() {
-            let (keep, changed) = properties.show(ctx);
+            let (keep, changed) = properties.show(ctx, self.pal);
             if changed { self.acts.push(Act::Refresh); }
             if keep { self.properties = Some(properties); }
         }
@@ -43,12 +44,17 @@ impl App {
         };
         let pal = self.pal;
         let creates = matches!(d, Dialog::NewFolder { .. } | Dialog::NewFile { .. });
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, -60.0))
-            .default_width(360.0)
+        let icon = match &d {
+            Dialog::NewFile { .. } => Icon::Entry(fsx::Kind::Other, ""),
+            Dialog::Password { .. } => Icon::Glyph("🔒", None),
+            Dialog::Compress { .. } => Icon::Entry(fsx::Kind::Archive, ""),
+            _ => Icon::Folder(fsx::Kind::Folder.color()),
+        };
+        let closed = Panel::new(title, pal, icon)
+            .fixed_width(360.0)
+            .window(|w| w.anchor(Align2::CENTER_CENTER, vec2(0.0, -60.0)))
             .show(ctx, |ui| {
+                let (resp, name, valid) = chrome::body(ui, |ui| {
                 if let Dialog::Password { archive, wrong, .. } = &d {
                     ui.label(RichText::new(fsx::display_name(archive)).color(pal.text).strong());
                     if *wrong { ui.label(RichText::new("Wrong password. Try again.").color(hex("#ef7063"))); }
@@ -64,7 +70,7 @@ impl App {
                     | Dialog::Compress { name, focus, .. }
                     | Dialog::Password { name, focus, .. } => (name, focus),
                 };
-                let resp = ui.add(egui::TextEdit::singleline(name).hint_text(hint).password(secret).desired_width(340.0));
+                let resp = ui.add(egui::TextEdit::singleline(name).hint_text(hint).password(secret).desired_width(f32::INFINITY));
                 if *focus {
                     resp.request_focus();
                     *focus = false;
@@ -94,13 +100,21 @@ impl App {
                 if !name.trim().is_empty() && !valid {
                     ui.label(if matches!(d, Dialog::Compress { .. }) { "This name can't be used here." } else { "Enter a full folder path or network share." });
                 }
+                if let Dialog::NewFolder { pane, .. } = &d {
+                    let n = self.panes[*pane].selected.len();
+                    if n > 0 {
+                        let t = format!("Shift + Enter: create and move {n} selected item(s) into it");
+                        ui.label(RichText::new(t).color(pal.text_weak).size(11.0));
+                    }
+                }
+                (resp, name, valid)
+                });
 
                 let (enter, ctrl, shift, esc) = ui.input(|inp| {
                     (inp.key_pressed(Key::Enter), inp.modifiers.command, inp.modifiers.shift, inp.key_pressed(Key::Escape))
                 });
-                ui.add_space(6.0);
                 let mut go: Option<bool> = None;
-                ui.horizontal(|ui| {
+                chrome::footer(ui, pal, |ui| {
                     if ui.add_enabled(valid, egui::Button::new(label)).on_hover_text("Enter").clicked() {
                         go = Some(false);
                     }
@@ -111,13 +125,6 @@ impl App {
                         keep = false;
                     }
                 });
-                if let Dialog::NewFolder { pane, .. } = &d {
-                    let n = self.panes[*pane].selected.len();
-                    if n > 0 {
-                        let t = format!("Shift + Enter: create and move {n} selected item(s) into it");
-                        ui.label(RichText::new(t).color(pal.text_weak).size(11.0));
-                    }
-                }
                 if valid && enter && resp.lost_focus() {
                     go = Some(ctrl);
                 }
@@ -168,7 +175,7 @@ impl App {
                     }
                 }
             });
-        if keep {
+        if keep && !closed {
             self.dialog = Some(d);
         }
     }
@@ -186,13 +193,13 @@ impl App {
         };
         let mut dismiss = ctx.input(|inp| inp.key_pressed(Key::Escape));
         let mut confirm = false;
-        egui::Window::new(title)
-            .id(egui::Id::unique("notice"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, -60.0))
-            .default_width(440.0)
-            .order(egui::Order::Foreground)
+        let icon = match notice {
+            Notice::ConfirmDestroy { .. } | Notice::ConfirmRun { .. } => Icon::Glyph("⚠", Some(hex("#ef7063"))),
+            Notice::ConfirmClose | Notice::Problems { .. } => Icon::Glyph("⚠", None),
+        };
+        dismiss |= Panel::new(&title, pal, icon)
+            .fixed_width(440.0)
+            .window(|w| w.id(egui::Id::unique("notice")).anchor(Align2::CENTER_CENTER, vec2(0.0, -60.0)).order(egui::Order::Foreground))
             .show(ctx, |ui| {
                 let list = |ui: &mut egui::Ui, lines: &[String]| {
                     egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
@@ -201,6 +208,7 @@ impl App {
                 };
                 match notice {
                     Notice::ConfirmDestroy { items } => {
+                        chrome::body(ui, |ui| {
                         let mut reasons: Vec<&str> = items.iter().map(|(_, reason)| reason.as_str()).filter(|reason| !reason.is_empty()).collect();
                         reasons.dedup();
                         let bin = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
@@ -214,37 +222,36 @@ impl App {
                         ui.add_space(6.0);
                         let names: Vec<String> = items.iter().map(|(path, _)| fsx::display_name(path)).collect();
                         list(ui, &names);
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
+                        });
+                        chrome::footer(ui, pal, |ui| {
                             dismiss |= ui.button("Keep the files").clicked();
                             confirm = ui.button(RichText::new("Delete permanently").color(hex("#ef7063"))).clicked();
                         });
                     }
                     Notice::ConfirmClose => {
-                        ui.label(RichText::new("Closing now would leave them unfinished. Cancelling stops safely: unfinished copies are discarded and source files stay in place.").color(pal.text));
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
+                        chrome::body(ui, |ui| ui.label(RichText::new("Closing now would leave them unfinished. Cancelling stops safely: unfinished copies are discarded and source files stay in place.").color(pal.text)));
+                        chrome::footer(ui, pal, |ui| {
                             dismiss |= ui.button("Keep working").clicked();
                             confirm = ui.button("Cancel operations and close").clicked();
                         });
                     }
                     Notice::ConfirmRun { path, place, link } => {
+                        chrome::body(ui, |ui| {
                         // The whole name, unshortened: the ending is what matters here.
                         ui.add(egui::Label::new(RichText::new(fsx::display_name(path)).color(pal.text).strong()).selectable(true));
                         if let Some(target) = link {
                             ui.add(egui::Label::new(RichText::new(format!("Link to {target}")).color(pal.text)).selectable(true));
                         }
                         ui.label(RichText::new(format!("This file is on {place} and can do anything you can do on this computer. Run it only if you trust where it came from.")).color(pal.text));
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
+                        });
+                        chrome::footer(ui, pal, |ui| {
                             dismiss |= ui.button("Keep closed").clicked();
                             confirm = ui.button(RichText::new("Run").color(hex("#ef7063"))).clicked();
                         });
                     }
                     Notice::Problems { lines, .. } => {
-                        list(ui, lines);
-                        ui.add_space(6.0);
-                        dismiss |= ui.button("Close").clicked();
+                        chrome::body(ui, |ui| list(ui, lines));
+                        chrome::footer(ui, pal, |ui| dismiss |= ui.button("Close").clicked());
                     }
                 }
             });
@@ -268,22 +275,23 @@ impl App {
     fn app_chooser_ui(&mut self, ctx: &egui::Context) {
         let Some(mut chooser) = self.app_chooser.take() else { return };
         chooser.poll();
-        let mut open = true;
         let mut selected = None;
         let mut cancel = false;
-        egui::Window::new("Choose another app")
-            .id(egui::Id::unique("linux_app_chooser"))
-            .open(&mut open).collapsible(false)
-            .default_size(vec2(420.0, 380.0))
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        let pal = self.pal;
+        let file = fsx::display_name(&chooser.path);
+        let ext = chooser.path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+        let closed = Panel::new("Open with", pal, Icon::Entry(fsx::Kind::from_ext(&ext), &ext))
+            .info(&file)
+            .fixed_width(420.0)
+            .window(|w| w.id(egui::Id::unique("linux_app_chooser")).anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0)))
             .show(ctx, |ui| {
-                ui.label(format!("Open {} with:", fsx::display_name(&chooser.path)));
-                let response = ui.add(egui::TextEdit::singleline(&mut chooser.query).hint_text("Find an installed application"));
+                chrome::body(ui, |ui| {
+                let response = ui.add(egui::TextEdit::singleline(&mut chooser.query).hint_text("Find an installed application").desired_width(f32::INFINITY));
                 if chooser.focus { response.request_focus(); chooser.focus = false; }
                 ui.separator();
                 if chooser.loading { ui.spinner(); }
                 let query = chooser.query.to_lowercase();
-                egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(280.0).show(ui, |ui| {
                     let mut count = 0;
                     for app in &chooser.apps {
                         if !app.name.to_lowercase().contains(&query) { continue; }
@@ -296,11 +304,12 @@ impl App {
                 });
                 ui.separator();
                 ui.label(RichText::new("Applies to this file; your default application stays the same.").small());
-                cancel = ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+                });
+                chrome::footer(ui, pal, |ui| cancel = ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)));
             });
         if let Some(app) = selected {
             self.acts.push(Act::OpenWith(chooser.path, Some(app)));
-        } else if open && !cancel {
+        } else if !closed && !cancel {
             if chooser.loading { ctx.request_repaint_after(std::time::Duration::from_millis(100)); }
             self.app_chooser = Some(chooser);
         }
@@ -308,11 +317,12 @@ impl App {
 
     pub fn search_window(&mut self, ctx: &egui::Context) {
         let Some(mut s) = self.search.take() else { return };
-        let mut open = true;
         let pal = self.pal;
         let i = self.active;
         let show_hidden = self.st.show_hidden;
-        egui::Window::new("Search").open(&mut open).default_size(vec2(560.0, 440.0)).collapsible(false).show(ctx, |ui| {
+        let root = s.root.display().to_string();
+        let closed = Panel::new("Search", pal, Icon::Glyph("🔍", None)).info(&root).fit_screen(ctx, vec2(560.0, 440.0), vec2(420.0, 240.0)).show(ctx, |ui| chrome::body(ui, |ui| {
+            ui.set_min_height(ui.available_height());
             ui.horizontal(|ui| {
                 let resp = ui.add(egui::TextEdit::singleline(&mut s.query).hint_text("Names").desired_width(300.0));
                 if s.focus {
@@ -331,7 +341,6 @@ impl App {
                     s.run = Some(crate::ops::search(s.root.clone(), s.query.clone(), show_hidden, ui.ctx().clone()));
                 }
             });
-            ui.label(RichText::new(format!("within  {}", s.root.display())).color(pal.text_weak).size(11.0));
             ui.separator();
             let Some(run) = &s.run else {
                 ui.label(RichText::new("Type part of a name and press Enter. All words must match.").color(pal.text_weak));
@@ -368,8 +377,8 @@ impl App {
                     }
                 }
             });
-        });
-        if open {
+        }));
+        if !closed {
             self.search = Some(s);
         } else if let Some(r) = &s.run {
             r.cancel.store(true, Ordering::Relaxed);
@@ -391,21 +400,18 @@ impl App {
         if !self.settings_open {
             return;
         }
-        let mut open = true;
         let before = serde_json::to_string(&self.st).unwrap_or_default();
-        let weak = self.pal.text_weak;
-        let accent = self.pal.accent;
+        let pal = self.pal;
+        let weak = pal.text_weak;
+        let accent = pal.accent;
         let mut install_result: Option<Result<String, String>> = None;
         let mut close_after_uninstall = false;
-        let available = (ctx.content_rect().size() - vec2(48.0, 64.0)).max(vec2(300.0, 240.0));
-        egui::Window::new("Settings")
-            .id(egui::Id::unique("settings_panel_v2"))
-            .open(&mut open).collapsible(false).resizable(true).vscroll(true)
-            .default_size(vec2(660.0, 620.0).min(available))
-            .min_size(vec2(420.0, 260.0).min(available))
-            .max_size(available)
-            .default_pos(ctx.content_rect().center() - vec2(688.0, 680.0).min(available) * 0.5)
+        let closed = Panel::new("Settings", pal, Icon::Glyph("⚙", None))
+            .info(concat!("Version ", env!("CARGO_PKG_VERSION")))
+            .window(|w| w.id(egui::Id::unique("settings_panel_v2")))
+            .fit_screen(ctx, vec2(660.0, 620.0), vec2(420.0, 260.0))
             .show(ctx, |ui| {
+            chrome::scrolled_body(ui, true, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
             ui.label(RichText::new("Appearance & layout").strong().color(accent));
             ui.add_space(4.0);
@@ -522,15 +528,14 @@ impl App {
                     install_result = Some(crate::install::install().map_err(|e| format!("Install failed: {e}")));
                 }
             });
-            ui.separator();
-            ui.horizontal(|ui| {
+            });
+            chrome::footer(ui, pal, |ui| {
                 if ui.button("Restore to default").clicked() {
                     let favorites = std::mem::take(&mut self.st.favorites);
                     let tags = std::mem::take(&mut self.st.tags);
                     self.st = crate::settings::Settings { favorites, tags, ..Default::default() };
                 }
                 ui.label(RichText::new("Settings are saved automatically").color(weak).size(11.0));
-                ui.label(RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION"))).color(weak).size(11.0));
             });
         });
         match install_result {
@@ -549,7 +554,7 @@ impl App {
                 p.view_key = None;
             }
         }
-        if !open {
+        if closed {
             self.settings_open = false;
         }
     }

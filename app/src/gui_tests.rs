@@ -1537,3 +1537,42 @@ fn space_opens_the_preview_arrows_change_its_file_and_escape_closes_it() {
     assert!(app.preview_window, "a preview closed from the list opens again at once");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Where the painted text `label` is, after the windows have settled.
+fn text_rect(ctx: &egui::Context, app: &mut App, label: &str) -> Rect {
+    let mut found = None;
+    for _ in 0..3 {
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        found = out.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(t) if t.galley.job.text == label => Some(Rect::from_min_size(t.pos, t.galley.size())),
+            _ => None,
+        });
+    }
+    found.unwrap_or_else(|| panic!("{label:?} is not on screen"))
+}
+
+#[test]
+fn window_title_bar_closes_it_and_stays_while_the_content_scrolls() {
+    let (root, _file, ctx, mut app) = safety_app("chrome");
+    app.settings_open = true;
+    let (title, heading) = (text_rect(&ctx, &mut app, "Settings"), text_rect(&ctx, &mut app, "Files & folders"));
+    let inside = pos2(title.center().x, title.center().y + 200.0);
+    frame(&ctx, &mut app, vec![Event::PointerMoved(inside)], Modifiers::NONE);
+    frame(&ctx, &mut app, vec![Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(0.0, -40.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: Modifiers::NONE,
+        source: egui::MouseWheelSource::Wheel,
+    }], Modifiers::NONE);
+    for _ in 0..30 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(text_rect(&ctx, &mut app, "Settings").min.y, title.min.y, "the title bar must not scroll");
+    assert!(text_rect(&ctx, &mut app, "Files & folders").min.y < heading.min.y, "the content must scroll");
+
+    let window = ctx.memory(|m| m.area_rect(egui::Id::unique("settings_panel_v2"))).unwrap();
+    click(&ctx, &mut app, pos2(window.max.x - 23.0, title.center().y), Modifiers::NONE);
+    assert!(!app.settings_open, "the X closes the window");
+    std::fs::remove_dir_all(root).unwrap();
+}

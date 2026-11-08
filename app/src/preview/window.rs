@@ -13,6 +13,7 @@ use super::text::{CLASS_COMMENT, CLASS_FUNCTION, CLASS_KEYWORD, CLASS_NUMBER, CL
 use super::load::ArchiveEntry;
 use super::{DocData, Key, PreviewContent, TableDoc, TextDoc};
 use crate::app::{Act, App};
+use crate::chrome::{self, BAR_H, Icon};
 use crate::fsx::{self, Entry, Kind};
 use crate::icons;
 use crate::theme::{Palette, blend};
@@ -26,7 +27,6 @@ const SWITCH_SECONDS: f32 = 0.09;
 const REOPEN_PAUSE: Duration = Duration::from_millis(300);
 /// The compositor has decided by then whether the window floats.
 const SIZE_LOCK: Duration = Duration::from_millis(400);
-const BAR_H: f32 = 38.0;
 const MAX_ZOOM: f32 = 32.0;
 /// Pause after zooming or moving before a sharper copy is worth making.
 const SHARPEN_AFTER: Duration = Duration::from_millis(150);
@@ -344,7 +344,7 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
     ui.painter().rect_filled(full, CornerRadius::ZERO, pal.panel);
     let (top, body) = (Rect::from_min_size(full.min, vec2(full.width(), BAR_H)), Rect::from_min_max(pos2(full.min.x, full.min.y + BAR_H), full.max));
     title_bar(ui, s, top, embedded);
-    ui.painter().rect_filled(body, CornerRadius::ZERO, blend(pal.window, pal.inactive, 0.5));
+    ui.painter().rect_filled(body, CornerRadius::ZERO, pal.content_fill());
     let t = (s.switched.elapsed().as_secs_f32() / SWITCH_SECONDS).min(1.0);
     if t < 1.0 { ctx.request_repaint(); } else { s.previous = None; }
     if let Some(PreviewContent::Image(tex, orig, _) | PreviewContent::Page { texture: tex, orig, .. }) = &s.previous {
@@ -404,23 +404,9 @@ fn title_bar(ui: &mut Ui, s: &mut Shared, r: Rect, embedded: bool) {
     let pal = s.pal;
     let response = ui.interact(r, ui.scope_id().with("preview_title"), Sense::click_and_drag());
     if response.drag_started() && !embedded { ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag); }
-    let p = ui.painter_at(r);
-    let icon = Rect::from_center_size(pos2(r.min.x + 22.0, r.center().y), Vec2::splat(20.0));
-    if s.is_dir { icons::folder(&p, icon, s.folder); } else { icons::entry(&p, icon, s.kind, &s.ext, pal.dark, false); }
-    let close = Rect::from_center_size(pos2(r.max.x - 22.0, r.center().y), Vec2::splat(26.0));
-    let hit = ui.interact(close, ui.scope_id().with("preview_close"), Sense::click());
-    if hit.hovered() { p.rect_filled(close, CornerRadius::same(4), pal.hover); }
-    let x = close.shrink(8.0);
-    let stroke = Stroke::new(1.5, if hit.hovered() { pal.text } else { pal.text_weak });
-    p.line_segment([x.left_top(), x.right_bottom()], stroke);
-    p.line_segment([x.right_top(), x.left_bottom()], stroke);
-    if hit.clicked() { s.send(Cmd::Close, ui.ctx()); }
-    let small = FontId::proportional(12.0);
+    let icon = if s.is_dir { Icon::Folder(s.folder) } else { Icon::Entry(s.kind, &s.ext) };
     let info = if s.size.is_empty() { format!("{} / {}", s.place.0, s.place.1) } else { format!("{}   ·   {} / {}", s.size, s.place.0, s.place.1) };
-    let info_rect = p.text(pos2(close.min.x - 10.0, r.center().y), Align2::RIGHT_CENTER, info, small, pal.text_weak);
-    let font = FontId::proportional(14.0);
-    let name = fit_text(&p, &s.name, &font, (info_rect.min.x - r.min.x - 60.0).max(40.0));
-    p.text(pos2(r.min.x + 40.0, r.center().y), Align2::LEFT_CENTER, name, font, pal.text);
+    if chrome::title_bar(ui, pal, r, icon, &s.name, &info) { s.send(Cmd::Close, ui.ctx()); }
 }
 
 fn unit_uv() -> Rect {
