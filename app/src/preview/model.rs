@@ -2,12 +2,14 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use super::load::{Loaded, Options, Picture, Reply, failed};
+use super::load::{Loaded, ModelView, Options, Picture, Reply, failed};
 use super::office::attribute;
 use super::picture::to_picture;
 use crate::fsx;
@@ -25,6 +27,15 @@ const MAX_RENDER_SIDE: u32 = 1600;
 /// Samples per pixel along each side, for smooth edges.
 const SAMPLES: usize = 2;
 const MODEL_COLOR: [f32; 3] = [176.0, 184.0, 196.0];
+/// Degrees of the first view: from the front, a little to the right and above.
+const TURN: f32 = 35.0;
+const TILT: f32 = 28.0;
+/// Stops short of looking straight down, where "up" stops meaning anything.
+pub(super) const TILT_OFFSETS: (f32, f32) = (-85.0 - TILT, 85.0 - TILT);
+pub(super) const MIN_MODEL_ZOOM: f32 = 0.25;
+/// Above this many triangles, a model is drawn at half size while it moves.
+const QUICK_LIMIT: usize = 300_000;
+const MARGIN: f32 = 8.0;
 
 const TOO_LARGE: &str = "This model is too large to preview";
 const NO_SHAPE: &str = "This file holds no model to show";
@@ -61,43 +72,88 @@ fn too_large(file: &Path) -> bool {
     std::fs::metadata(file).is_ok_and(|m| m.len() >= MAX_FILE)
 }
 
-fn shown(triangles: &[Triangle], options: Options) -> Reply {
-    let Some(picture) = draw(triangles, options.max_side.min(MAX_RENDER_SIDE)) else { return failed(NO_SHAPE) };
-    // Half the drawn size: like vector art, it has no size of its own and fills the window.
-    let orig = [picture.size[0].div_ceil(2), picture.size[1].div_ceil(2)];
-    (Loaded::Model(orig), Some(picture))
+/// The directions of a camera, with Z up as printers have it.
+struct Camera {
+    right: Point,
+    up: Point,
+    to_camera: Point,
 }
 
-/// Seen from the front, a little to the right and above, with Z up as printers have it.
-fn draw(triangles: &[Triangle], side: u32) -> Option<Picture> {
-    let (turn, tilt) = (35f32.to_radians(), 28f32.to_radians());
+fn camera(turn: f32, tilt: f32) -> Camera {
+    let (turn, tilt) = (turn.to_radians(), tilt.to_radians());
     let to_camera = [tilt.cos() * turn.sin(), -tilt.cos() * turn.cos(), tilt.sin()];
     let right = unit(cross([0.0, 0.0, 1.0], to_camera));
-    let up = cross(to_camera, right);
-    let key = unit(mix([(right, -0.4), (up, 0.7), (to_camera, 0.6)]));
-    let fill = unit(mix([(right, 0.7), (up, -0.1), (to_camera, 0.5)]));
+    Camera { right, up: cross(to_camera, right), to_camera }
+}
 
-    let (mut low, mut high) = ([f32::MAX; 2], [f32::MIN; 2]);
+/// What every view of a model shares: the point it turns around, and how far it
+/// reaches from there in the first view, which sets its size on the screen.
+struct Framing {
+    pivot: Point,
+    reach: [f32; 2],
+}
+
+fn framing(triangles: &[Triangle]) -> Option<Framing> {
+    let (mut low, mut high) = ([f32::MAX; 3], [f32::MIN; 3]);
     for point in triangles.iter().flatten() {
-        let at = [dot(*point, right), dot(*point, up)];
-        for i in 0..2 {
-            low[i] = low[i].min(at[i]);
-            high[i] = high[i].max(at[i]);
+        for i in 0..3 {
+            low[i] = low[i].min(point[i]);
+            high[i] = high[i].max(point[i]);
         }
     }
-    let span = [high[0] - low[0], high[1] - low[1]];
-    if triangles.is_empty() || !(span[0].max(span[1]) > 0.0) { return None; }
-    const MARGIN: f32 = 8.0;
-    let scale = (side.max(32) as f32 - MARGIN * 2.0) / span[0].max(span[1]);
-    let [width, height] = [0, 1].map(|i| ((span[i] * scale + MARGIN * 2.0).ceil() as usize).max(32));
-    let (columns, rows) = (width * SAMPLES, height * SAMPLES);
-    let fine = scale * SAMPLES as f32;
-    let shift = [(columns as f32 - span[0] * fine) / 2.0, (rows as f32 - span[1] * fine) / 2.0];
+    let pivot: Point = std::array::from_fn(|i| low[i] / 2.0 + high[i] / 2.0);
+    let first = camera(TURN, TILT);
+    let mut reach = [0f32; 2];
+    for point in triangles.iter().flatten() {
+        let from_pivot = minus(*point, pivot);
+        reach[0] = reach[0].max(dot(from_pivot, first.right).abs());
+        reach[1] = reach[1].max(dot(from_pivot, first.up).abs());
+    }
+    (reach[0].max(reach[1]) > 0.0).then_some(Framing { pivot, reach })
+}
+
+fn shown(triangles: &[Triangle], options: Options) -> Reply {
+    let Some(framing) = framing(triangles) else { return failed(NO_SHAPE) };
+    let side = options.max_side.min(MAX_RENDER_SIDE).max(32) as f32;
+    let first_scale = (side / 2.0 - MARGIN) / framing.reach[0].max(framing.reach[1]);
+    let first_size = framing.reach.map(|reach| (((reach * first_scale + MARGIN) * 2.0).ceil() as usize).max(32));
+    let Some(view) = options.view else {
+        let centre = first_size.map(|v| v as f32 / 2.0);
+        let picture = paint(triangles, &framing, &camera(TURN, TILT), first_scale, centre, first_size, SAMPLES);
+        // Half the drawn size: like vector art, it has no size of its own and fills the window.
+        let orig = [picture.size[0].div_ceil(2), picture.size[1].div_ceil(2)];
+        return (Loaded::Model(orig), Some(picture));
+    };
+    (Loaded::Detail, Some(look(triangles, &framing, view, side, first_scale, first_size[0])))
+}
+
+fn look(triangles: &[Triangle], framing: &Framing, view: ModelView, side: f32, first_scale: f32, first_width: usize) -> Picture {
+    let [width, height] = view.size.map(|v| v.clamp(16, 4096) as f32);
+    let quick = if !view.fine && triangles.len() > QUICK_LIMIT { 0.5 } else { 1.0 };
+    let shrink = (side / width.max(height)).min(1.0) * quick;
+    let zoom = view.zoom.clamp(10, 6400) as f32 / 100.0;
+    let scale = first_scale * view.fit.max(1) as f32 / first_width as f32 * zoom * shrink;
+    let size = [(width * shrink).ceil() as usize, (height * shrink).ceil() as usize];
+    let centre = [size[0] as f32 / 2.0 + view.pan[0] as f32 * shrink, size[1] as f32 / 2.0 + view.pan[1] as f32 * shrink];
+    let camera = camera(TURN - view.turn as f32 / 10.0, TILT + view.tilt as f32 / 10.0);
+    paint(triangles, framing, &camera, scale, centre, size, if view.fine { SAMPLES } else { 1 })
+}
+
+fn paint(triangles: &[Triangle], framing: &Framing, camera: &Camera, scale: f32, centre: [f32; 2], [width, height]: [usize; 2], samples: usize) -> Picture {
+    let Camera { right, up, to_camera } = *camera;
+    let key = unit(mix([(right, -0.4), (up, 0.7), (to_camera, 0.6)]));
+    let fill = unit(mix([(right, 0.7), (up, -0.1), (to_camera, 0.5)]));
+    let (columns, rows) = (width * samples, height * samples);
+    let fine = scale * samples as f32;
+    let shift = centre.map(|v| v * samples as f32);
 
     let mut depth = vec![f32::NEG_INFINITY; columns * rows];
     let mut light = vec![0u8; columns * rows];
     for triangle in triangles {
-        let [a, b, c] = triangle.map(|p| [(dot(p, right) - low[0]) * fine + shift[0], (high[1] - dot(p, up)) * fine + shift[1], dot(p, to_camera)]);
+        let [a, b, c] = triangle.map(|p| {
+            let from_pivot = minus(p, framing.pivot);
+            [dot(from_pivot, right) * fine + shift[0], shift[1] - dot(from_pivot, up) * fine, dot(from_pivot, to_camera)]
+        });
         let edge = |from: Point, to: Point, x: f32, y: f32| (to[0] - from[0]) * (y - from[1]) - (to[1] - from[1]) * (x - from[0]);
         let area = edge(a, b, c[0], c[1]);
         if area == 0.0 || !area.is_finite() { continue; }
@@ -127,24 +183,51 @@ fn draw(triangles: &[Triangle], side: u32) -> Option<Picture> {
     for y in 0..height {
         for x in 0..width {
             let (mut sum, mut covered) = (0u32, 0u32);
-            for sy in 0..SAMPLES {
-                for sx in 0..SAMPLES {
-                    let sample = light[(y * SAMPLES + sy) * columns + x * SAMPLES + sx];
+            for sy in 0..samples {
+                for sx in 0..samples {
+                    let sample = light[(y * samples + sy) * columns + x * samples + sx];
                     if sample > 0 { sum += sample as u32; covered += 1; }
                 }
             }
             let shade = sum as f32 / covered.max(1) as f32 / 255.0;
             rgba.extend(MODEL_COLOR.map(|c| (c * shade) as u8));
-            rgba.push((covered * 255 / (SAMPLES * SAMPLES) as u32) as u8);
+            rgba.push((covered * 255 / (samples * samples) as u32) as u8);
         }
     }
-    Some(Picture { size: [width as u32, height as u32], delays: Vec::new(), rgba })
+    Picture { size: [width as u32, height as u32], delays: Vec::new(), rgba }
+}
+
+/// The last model read, so that each new look at it does not read the file again.
+struct Held {
+    file: PathBuf,
+    stamp: (u64, Option<SystemTime>),
+    triangles: Arc<Vec<Triangle>>,
+}
+
+static HELD: Mutex<Option<Held>> = Mutex::new(None);
+
+fn stamp(file: &Path) -> Option<(u64, Option<SystemTime>)> {
+    std::fs::metadata(file).ok().map(|m| (m.len(), m.modified().ok()))
+}
+
+fn held(file: &Path) -> Option<Arc<Vec<Triangle>>> {
+    let now = stamp(file);
+    HELD.lock().unwrap().as_ref().filter(|h| h.file == file && Some(h.stamp) == now).map(|h| h.triangles.clone())
+}
+
+fn hold(file: &Path, triangles: Vec<Triangle>) -> Arc<Vec<Triangle>> {
+    let triangles = Arc::new(triangles);
+    if let Some(stamp) = stamp(file) {
+        *HELD.lock().unwrap() = Some(Held { file: file.to_path_buf(), stamp, triangles: triangles.clone() });
+    }
+    triangles
 }
 
 pub fn stl(file: &Path, options: Options) -> Reply {
+    if let Some(triangles) = held(file) { return shown(&triangles, options); }
     if too_large(file) { return failed(TOO_LARGE); }
     match read_stl(file) {
-        Ok(triangles) => shown(&triangles, options),
+        Ok(triangles) => shown(&hold(file, triangles), options),
         Err(message) => failed(message),
     }
 }
@@ -354,6 +437,7 @@ fn thumbnail(zip: &mut Zip, options: Options) -> Option<Reply> {
 }
 
 pub fn three_mf(file: &Path, options: Options) -> Reply {
+    if let Some(triangles) = held(file) { return shown(&triangles, options); }
     if too_large(file) { return failed(TOO_LARGE); }
     let opened = std::fs::File::open(file).map_err(|e| fsx::friendly_err(&e))
         .and_then(|f| zip::ZipArchive::new(BufReader::new(f)).map_err(|_| "This 3MF file could not be read".to_string()));
@@ -362,7 +446,7 @@ pub fn three_mf(file: &Path, options: Options) -> Reply {
         Err(message) => return failed(message),
     };
     match read_3mf(&mut zip) {
-        Ok(triangles) if !triangles.is_empty() => shown(&triangles, options),
+        Ok(triangles) if !triangles.is_empty() => shown(&hold(file, triangles), options),
         Ok(_) => thumbnail(&mut zip, options).unwrap_or_else(|| failed(NO_SHAPE)),
         Err(message) => failed(message),
     }
@@ -439,6 +523,26 @@ mod tests {
             assert_eq!(picture.rgba[3], 0, "{name}: nothing behind the model");
             assert!(picture.rgba.chunks_exact(4).any(|p| p[3] == 255 && p[0] > 0), "{name}: the model is drawn");
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_model_can_be_looked_at_from_elsewhere() {
+        let root = scratch("turn");
+        let file = root.join("shape.stl");
+        std::fs::write(&file, binary_stl(&[0; 80])).unwrap();
+        let view = ModelView { turn: 0, tilt: 0, zoom: 100, pan: [0; 2], size: [200, 150], fit: 100, fine: true };
+        let at = |view| { let options = Options { view: Some(view), ..whole(256) }; let (loaded, picture) = load(&file, options); assert!(matches!(loaded, Loaded::Detail), "{loaded:?}"); picture.unwrap() };
+        let plain = at(view);
+        assert_eq!(plain.size, [200, 150], "the size asked for");
+        assert_ne!(plain.rgba, at(ModelView { turn: 900, ..view }).rgba, "turning shows another side");
+        assert_ne!(plain.rgba, at(ModelView { zoom: 200, ..view }).rgba);
+        assert_eq!(at(ModelView { fine: false, ..view }).size, [200, 150], "a small model stays full size while moving");
+        let huge = at(ModelView { size: [u16::MAX, u16::MAX], zoom: u16::MAX, pan: [i16::MIN, i16::MAX], ..view });
+        assert!(huge.size[0] <= 256, "the helper keeps to its own limits");
+        std::fs::remove_file(&file).unwrap();
+        let again = load(&file, Options { view: Some(view), ..whole(256) }).0;
+        assert!(matches!(again, Loaded::Error(_)), "a file that is gone is not shown from memory");
         std::fs::remove_dir_all(root).unwrap();
     }
 

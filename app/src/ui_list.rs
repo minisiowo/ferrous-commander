@@ -1126,7 +1126,7 @@ impl App {
         let p = ui.painter_at(r);
         let current = e.is_some_and(|e| self.preview.path.as_ref() == Some(&e.path));
         match (&self.preview.content, current) {
-            (PreviewContent::Image(tex, ..) | PreviewContent::Page { texture: tex, .. }, true) => {
+            (PreviewContent::Image(tex, ..) | PreviewContent::Model(tex, _) | PreviewContent::Page { texture: tex, .. }, true) => {
                 let s = tex.size_vec2();
                 let scale = (r.width() / s.x).min(r.height() / s.y).min(1.0);
                 let ir = Rect::from_center_size(r.center(), s * scale);

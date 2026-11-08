@@ -99,13 +99,13 @@ mod tests {
         let first = first.unwrap();
         assert_eq!(first.size, [400, 200]);
         assert_eq!(&first.rgba[..4], &[255, 255, 255, 255], "an empty page is white");
-        let second = Options { max_side: 400, page: 1, crop: None };
+        let second = Options { max_side: 400, page: 1, crop: None, view: None };
         let (loaded, pixels) = load(&file, second);
         assert!(matches!(loaded, Loaded::Page { page: 1, .. }));
         assert_eq!(&pixels.unwrap().rgba[..4], &[255, 0, 0, 255]);
-        let past_the_end = Options { max_side: 400, page: 99, crop: None };
+        let past_the_end = Options { max_side: 400, page: 99, crop: None, view: None };
         assert!(matches!(load(&file, past_the_end).0, Loaded::Page { page: 1, .. }));
-        let part = Options { max_side: 64, page: 1, crop: Some([0, 0, 32768, 65535]) };
+        let part = Options { max_side: 64, page: 1, crop: Some([0, 0, 32768, 65535]), view: None };
         let (loaded, pixels) = load(&file, part);
         assert!(matches!(loaded, Loaded::Detail));
         assert_eq!(pixels.unwrap().size[0], 64);

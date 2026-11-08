@@ -223,7 +223,7 @@ mod tests {
         let root = scratch("markdown");
         let file = root.join("notes.md");
         std::fs::write(&file, "# Title\n\nSome *text*.\n\n- one\n- two\n\n> quoted\n\n```\ncode\n```\n\n---\n").unwrap();
-        let Loaded::Doc { blocks, source, .. } = load_file(&file, Options { max_side: 64, page: 0, crop: None }).0 else { panic!("not a document") };
+        let Loaded::Doc { blocks, source, .. } = load_file(&file, Options { max_side: 64, page: 0, crop: None, view: None }).0 else { panic!("not a document") };
         let kinds: Vec<_> = blocks.iter().map(|b| b.kind).collect();
         assert_eq!(kinds, [BlockKind::H1, BlockKind::Paragraph, BlockKind::Item, BlockKind::Item, BlockKind::Quote, BlockKind::Code, BlockKind::Rule]);
         assert_eq!(blocks[1].text, "Some text.");

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::app::App;
 use crate::fsx::Entry;
-use load::{ArchiveEntry, Block, Loaded, Options, Picture, Reply, Spans};
+use load::{ArchiveEntry, Block, Loaded, ModelView, Options, Picture, Reply, Spans};
 
 /// Longest side of a decoded picture; `MAX_TEXTURE_SIDE` in `main.rs` limits it from above.
 pub const MAX_SIDE: u32 = 2048;
@@ -48,15 +48,16 @@ pub struct Key {
     pub size: u64,
     pub page: u32,
     pub crop: Option<[u16; 4]>,
+    pub view: Option<ModelView>,
 }
 
 impl Key {
     fn options(&self) -> Options {
-        Options { max_side: MAX_SIDE, page: self.page, crop: self.crop }
+        Options { max_side: MAX_SIDE, page: self.page, crop: self.crop, view: self.view }
     }
 
     pub fn of(e: &Entry) -> Key {
-        Key { path: e.path.clone(), modified: e.modified, size: e.size, page: 0, crop: None }
+        Key { path: e.path.clone(), modified: e.modified, size: e.size, page: 0, crop: None, view: None }
     }
 }
 
@@ -130,6 +131,8 @@ pub enum PreviewContent {
     Info(Arc<Vec<(String, String)>>, Option<(Frames, [u32; 2])>, bool),
     /// The texture, the original size, and whether anything in it is see-through.
     Image(egui::TextureHandle, [u32; 2], bool),
+    /// The first picture of a 3D model, and its size in points.
+    Model(egui::TextureHandle, [u32; 2]),
     Folder { folders: usize, files: usize, size: u64 },
     Error(String),
 }
@@ -154,7 +157,7 @@ impl PreviewContent {
     fn bytes(&self) -> usize {
         match self {
             PreviewContent::Text(t) => t.text.len() + t.lines.len() * 8,
-            PreviewContent::Image(tex, ..) | PreviewContent::Page { texture: tex, .. } | PreviewContent::Detail(tex) => tex.byte_size(),
+            PreviewContent::Image(tex, ..) | PreviewContent::Model(tex, _) | PreviewContent::Page { texture: tex, .. } | PreviewContent::Detail(tex) => tex.byte_size(),
             PreviewContent::Animation(frames, _) => frames.iter().map(|(tex, _)| tex.byte_size()).sum(),
             PreviewContent::Doc(doc) => doc.blocks.iter().map(|b| b.text.len() + 32).sum(),
             PreviewContent::Hex(bytes, _) => bytes.len(),
@@ -256,7 +259,8 @@ fn run_lane(slot: Arc<Slot>, results: mpsc::Sender<(Key, PreviewContent)>, start
         let started = Instant::now();
         let reply = match start {
             Some(start) => {
-                let stale = || started.elapsed() > ABANDON_AFTER && slot.superseded(&job.key);
+                // The next look at a model needs this helper's copy of it, so it is not ended.
+                let stale = || job.key.view.is_none() && started.elapsed() > ABANDON_AFTER && slot.superseded(&job.key);
                 match helper::ask(&mut running, start, &job.key.path, job.key.options(), JOB_LIMIT, &stale) {
                     Some(reply) => reply,
                     None => continue,
@@ -298,8 +302,7 @@ fn content_of((loaded, picture): Reply, ctx: &egui::Context) -> PreviewContent {
     match (loaded, picture) {
         (Loaded::Text { text, trimmed, spans }, _) => PreviewContent::Text(Arc::new(TextDoc::new(text, trimmed, spans))),
         (Loaded::Image(orig), Some(p)) => picture_content(p, orig, ctx),
-        // See-through around the shape on purpose, so no checkerboard behind it.
-        (Loaded::Model(orig), Some(p)) => PreviewContent::Image(texture(&p.rgba, p.size, ctx), orig, false),
+        (Loaded::Model(orig), Some(p)) => PreviewContent::Model(texture(&p.rgba, p.size, ctx), orig),
         (Loaded::Page { orig, page, pages }, Some(p)) => PreviewContent::Page { texture: texture(&p.rgba, p.size, ctx), orig, page, pages },
         (Loaded::Detail, Some(p)) => PreviewContent::Detail(texture(&p.rgba, p.size, ctx)),
         (Loaded::Image(_) | Loaded::Model(_) | Loaded::Page { .. } | Loaded::Detail, None) => PreviewContent::Error("The picture is missing".into()),
@@ -447,6 +450,13 @@ impl App {
         self.preview.send(0, vec![Job { key, ctx: ctx.clone(), prefetch: false }]);
     }
 
+    /// Asks for another look at the shown 3D model.
+    pub fn want_model_view(&mut self, view: ModelView, ctx: &egui::Context) {
+        let Some(mut key) = self.preview.key.clone() else { return };
+        key.view = Some(view);
+        self.preview.send(0, vec![Job { key, ctx: ctx.clone(), prefetch: false }]);
+    }
+
     /// Loads the files around the shown one, once the selection has settled on it.
     pub fn prefetch_preview(&mut self, neighbours: Vec<Key>, ctx: &egui::Context) {
         let preview = &mut self.preview;
@@ -465,6 +475,12 @@ impl App {
     pub(crate) fn receive_preview(&mut self) {
         let preview = &mut self.preview;
         while let Ok((key, content)) = preview.rx.try_recv() {
+            if key.view.is_some() {
+                // A failed look leaves the last good one on screen.
+                let current = preview.key.as_ref().is_some_and(|k| k.path == key.path);
+                if let (true, PreviewContent::Detail(texture)) = (current, &content) { preview.detail = Some((texture.clone(), [0, 0, 65535, 65535])); }
+                continue;
+            }
             if let (Some(crop), PreviewContent::Detail(texture)) = (key.crop, &content) {
                 let current = preview.key.as_ref().is_some_and(|k| k.path == key.path && k.page == key.page);
                 if current { preview.detail = Some((texture.clone(), crop)); }
@@ -496,7 +512,7 @@ mod tests {
     use super::*;
 
     fn key(name: &str) -> Key {
-        Key { path: PathBuf::from(name), modified: None, size: 0, page: 0, crop: None }
+        Key { path: PathBuf::from(name), modified: None, size: 0, page: 0, crop: None, view: None }
     }
 
     fn job(name: &str, ctx: &egui::Context) -> Job {

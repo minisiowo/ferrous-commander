@@ -401,7 +401,7 @@ mod tests {
         let Loaded::Table { rows, sheets, page: 0, .. } = load(&file, whole(64)).0 else { panic!("not a table") };
         assert_eq!(sheets, ["Dane", "Inne"]);
         assert_eq!(rows, [["żółw", "7"]]);
-        let Loaded::Table { rows, page: 1, .. } = load(&file, Options { max_side: 64, page: 1, crop: None }).0 else { panic!("not a table") };
+        let Loaded::Table { rows, page: 1, .. } = load(&file, Options { max_side: 64, page: 1, crop: None, view: None }).0 else { panic!("not a table") };
         assert_eq!(rows[0][0], "drugi");
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -455,7 +455,7 @@ mod tests {
         for name in ["a.docx", "a.odt", "a.pptx", "a.epub", "a.xlsx", "a.ods"] {
             let file = root.join(name);
             std::fs::write(&file, b"PK\x03\x04 not really").unwrap();
-            let options = Options { max_side: 64, page: 0, crop: None };
+            let options = Options { max_side: 64, page: 0, crop: None, view: None };
             assert!(matches!(load(&file, options).0, Loaded::Error(_)), "{name}");
         }
         std::fs::remove_dir_all(root).unwrap();

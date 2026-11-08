@@ -153,7 +153,7 @@ mod tests {
         let mut img = image::RgbaImage::new(100, 100);
         for x in 50..100 { for y in 0..100 { img.put_pixel(x, y, image::Rgba([255, 0, 0, 255])); } }
         img.save(&file).unwrap();
-        let (loaded, pixels) = load(&file, Options { max_side: 64, page: 0, crop: Some([32768, 0, 65535, 65535]) });
+        let (loaded, pixels) = load(&file, Options { max_side: 64, page: 0, crop: Some([32768, 0, 65535, 65535]), view: None });
         assert!(matches!(loaded, Loaded::Detail));
         let pixels = pixels.unwrap();
         assert_eq!(pixels.size[1], 64);

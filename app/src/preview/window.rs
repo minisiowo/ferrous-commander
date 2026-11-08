@@ -11,6 +11,8 @@ use egui::{Align2, Color32, CornerRadius, FontId, Key as K, Pos2, Rect, Sense, S
 use super::load::BlockKind;
 use super::text::{CLASS_COMMENT, CLASS_FUNCTION, CLASS_KEYWORD, CLASS_NUMBER, CLASS_STRING, CLASS_TAG, CLASS_TYPE};
 use super::load::ArchiveEntry;
+use super::load::ModelView;
+use super::model::{MIN_MODEL_ZOOM, TILT_OFFSETS};
 use super::{DocData, Key, PreviewContent, TableDoc, TextDoc};
 use crate::app::{Act, App};
 use crate::chrome::{self, BAR_H, Icon};
@@ -31,6 +33,8 @@ const SIZE_LOCK: Duration = Duration::from_millis(520);
 /// The smallest window a preview opens at: room for the control bar and a card.
 const MIN_OPEN: Vec2 = vec2(480.0, 320.0);
 const MAX_ZOOM: f32 = 32.0;
+/// Degrees a 3D model turns for each point the pointer moves.
+const TURN_PER_POINT: f32 = 0.4;
 /// Pause after zooming or moving before a sharper copy is worth making.
 const SHARPEN_AFTER: Duration = Duration::from_millis(150);
 const READING_WIDTH: f32 = 760.0;
@@ -49,6 +53,7 @@ enum Cmd {
     Step(i32),
     Page(i32),
     Detail([u16; 4]),
+    Turn(ModelView),
     Open,
 }
 
@@ -72,6 +77,12 @@ struct View {
     sent: Option<[u16; 4]>,
     wheel: f32,
     started: Option<Instant>,
+    /// Showing a 3D model, which may also get smaller than its first picture.
+    model: bool,
+    /// Degrees a 3D model is turned and tilted from its first view.
+    turn: f32,
+    tilt: f32,
+    sent_view: Option<ModelView>,
 }
 
 struct Shared {
@@ -148,6 +159,7 @@ fn fitting_size(ctx: &egui::Context, content: &PreviewContent, largest: Vec2) ->
     let body = match content {
         // Drawn larger than its nominal size means vector art, which has no size of its own.
         PreviewContent::Image(tex, orig, _) if tex.size()[0] > orig[0] as usize => page_body(*orig, largest),
+        PreviewContent::Model(_, orig) => page_body(*orig, largest),
         PreviewContent::Image(_, orig, _) | PreviewContent::Animation(_, orig) => picture_body(*orig, ctx.pixels_per_point()),
         PreviewContent::Page { orig, .. } => page_body(*orig, largest),
         PreviewContent::Text(doc) if !doc.text.is_empty() => {
@@ -201,6 +213,7 @@ impl App {
                     }
                 }
                 Cmd::Detail(crop) => self.want_detail(crop, ctx),
+                Cmd::Turn(view) => self.want_model_view(view, ctx),
                 Cmd::Step(by) => self.key(i, if by > 0 { K::ArrowDown } else { K::ArrowUp }, egui::Modifiers::NONE, 1),
                 Cmd::Open => {
                     if let Some(e) = self.cursor_entry(i) {
@@ -382,7 +395,7 @@ fn keys(ctx: &egui::Context, s: &mut Shared, page: f32) {
             K::End => s.view.scroll_to = Some(SCROLL_TO_END),
             K::Plus | K::Equals => zoom_by(&mut s.view, 1.25),
             K::Minus => zoom_by(&mut s.view, 0.8),
-            K::Num0 => { s.view.zoom = 1.0; s.view.pan = Vec2::ZERO; }
+            K::Num0 => reset_look(&mut s.view),
             K::W if !repeat => { s.view.wrap = !s.view.wrap; s.view.rows_for = (0, 0); }
             K::M if !repeat => { s.view.source = !s.view.source; s.view.rows_for = (0, 0); }
             _ => {}
@@ -400,8 +413,15 @@ fn pages_of(content: &PreviewContent) -> Option<(u32, u32)> {
 }
 
 fn zoom_by(view: &mut View, factor: f32) {
-    view.zoom = (view.zoom * factor).clamp(1.0, MAX_ZOOM);
-    if view.zoom <= 1.0 { view.pan = Vec2::ZERO; }
+    view.zoom = (view.zoom * factor).clamp(if view.model { MIN_MODEL_ZOOM } else { 1.0 }, MAX_ZOOM);
+    if view.zoom <= 1.0 && !view.model { view.pan = Vec2::ZERO; }
+}
+
+fn reset_look(view: &mut View) {
+    view.zoom = 1.0;
+    view.pan = Vec2::ZERO;
+    view.turn = 0.0;
+    view.tilt = 0.0;
 }
 
 fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
@@ -417,7 +437,7 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
     ui.painter().rect_filled(body, CornerRadius::ZERO, pal.content_fill());
     let t = (s.switched.elapsed().as_secs_f32() / SWITCH_SECONDS).min(1.0);
     if t < 1.0 { ctx.request_repaint(); } else { s.previous = None; }
-    if let Some(PreviewContent::Image(tex, orig, _) | PreviewContent::Page { texture: tex, orig, .. }) = &s.previous {
+    if let Some(PreviewContent::Image(tex, orig, _) | PreviewContent::Model(tex, orig) | PreviewContent::Page { texture: tex, orig, .. }) = &s.previous {
         let paged = matches!(s.previous, Some(PreviewContent::Page { .. }));
         let r = fitted_rect(body, tex, *orig, 1.0, paged, ctx.pixels_per_point());
         ui.painter_at(body).image(tex.id(), r, unit_uv(), Color32::WHITE.gamma_multiply(1.0 - t));
@@ -429,6 +449,7 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
     match &content {
         PreviewContent::Text(doc) if doc.text.is_empty() => card(&child, s, body, "This file is empty"),
         PreviewContent::Text(doc) => text_view(&mut child, s, doc, body),
+        PreviewContent::Model(tex, orig) => model_view(&mut child, s, tex, *orig, body),
         PreviewContent::Image(tex, orig, alpha) => {
             let sharpen = tex.size()[0] < orig[0] as usize;
             image_view(&mut child, s, tex, *orig, *alpha, body, sharpen, false);
@@ -464,7 +485,7 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
             ctx.request_repaint_after(SPINNER_AFTER);
         }
     }
-    let zoomable = matches!(content, PreviewContent::Image(..) | PreviewContent::Page { .. } | PreviewContent::Animation(..));
+    let zoomable = matches!(content, PreviewContent::Image(..) | PreviewContent::Model(..) | PreviewContent::Page { .. } | PreviewContent::Animation(..));
     let pages = pages_of(&content);
     control_bar(ui, s, body, &ctx, zoomable, pages);
     if cfg!(windows) { ui.painter().rect_stroke(full, CornerRadius::ZERO, Stroke::new(1.0, pal.border), egui::StrokeKind::Inside); }
@@ -533,6 +554,66 @@ fn visible_part(r: Rect, frame: Rect) -> [u16; 4] {
     let seen = r.intersect(frame);
     let along = |v: f32| (v.clamp(0.0, 1.0) * 65535.0) as u16;
     [along((seen.min.x - r.min.x) / r.width()), along((seen.min.y - r.min.y) / r.height()), along((seen.max.x - r.min.x) / r.width()), along((seen.max.y - r.min.y) / r.height())]
+}
+
+/// A 3D model: the pointer changes the look, and the helper draws each new one.
+fn model_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32; 2], body: Rect) {
+    s.view.model = true;
+    let ctx = ui.ctx().clone();
+    let response = ui.interact(body, ui.scope_id().with("preview_model"), Sense::click_and_drag());
+    let (wheel, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+    if response.contains_pointer() && (wheel != 0.0 || pinch != 1.0) {
+        s.view.zoom = (s.view.zoom * pinch * (wheel * 0.002).exp()).clamp(MIN_MODEL_ZOOM, MAX_ZOOM);
+    }
+    let delta = response.drag_delta();
+    if response.dragged_by(egui::PointerButton::Primary) {
+        s.view.turn = (s.view.turn + delta.x * TURN_PER_POINT).rem_euclid(360.0);
+        s.view.tilt = (s.view.tilt + delta.y * TURN_PER_POINT).clamp(TILT_OFFSETS.0, TILT_OFFSETS.1);
+    } else if response.dragged_by(egui::PointerButton::Secondary) || response.dragged_by(egui::PointerButton::Middle) {
+        s.view.pan += delta;
+    }
+    if response.double_clicked() { reset_look(&mut s.view); }
+    let cursor = if response.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
+    if response.hovered() || response.dragged() { ctx.set_cursor_icon(cursor); }
+
+    let ppp = ctx.pixels_per_point();
+    let first = page_rect(body, orig, 1.0);
+    let resting = s.view.turn == 0.0 && s.view.tilt == 0.0 && s.view.zoom == 1.0 && s.view.pan == Vec2::ZERO;
+    let look = ModelView {
+        turn: (s.view.turn * 10.0) as i16,
+        tilt: (s.view.tilt * 10.0) as i16,
+        zoom: (s.view.zoom * 100.0) as u16,
+        pan: [(s.view.pan.x * ppp).clamp(-32000.0, 32000.0) as i16, (s.view.pan.y * ppp).clamp(-32000.0, 32000.0) as i16],
+        size: [(body.width() * ppp) as u16, (body.height() * ppp) as u16],
+        fit: (first.width() * ppp) as u16,
+        fine: false,
+    };
+    let sent = s.view.sent_view;
+    if sent.map(|view| ModelView { fine: false, ..view }) != Some(look) {
+        if sent.is_some() || !resting {
+            s.send(Cmd::Turn(look), &ctx);
+            s.view.sent_view = Some(look);
+            s.view.moved = Some(Instant::now());
+            ctx.request_repaint_after(SHARPEN_AFTER);
+        }
+    } else if sent.is_some_and(|view| !view.fine) && let Some(moved) = s.view.moved {
+        if moved.elapsed() < SHARPEN_AFTER {
+            ctx.request_repaint_after(SHARPEN_AFTER);
+        } else {
+            let fine = ModelView { fine: true, ..look };
+            s.send(Cmd::Turn(fine), &ctx);
+            s.view.sent_view = Some(fine);
+        }
+    }
+
+    let p = ui.painter_at(body);
+    if let Some((drawn, _)) = &s.detail {
+        let size = vec2(drawn.size()[0] as f32, drawn.size()[1] as f32);
+        let fit = (body.width() / size.x).min(body.height() / size.y);
+        p.image(drawn.id(), Rect::from_center_size(body.center(), size * fit), unit_uv(), Color32::WHITE);
+    } else {
+        p.image(tex.id(), first, unit_uv(), Color32::WHITE);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -930,6 +1011,71 @@ fn control_bar(ui: &mut Ui, s: &mut Shared, body: Rect, ctx: &egui::Context, ima
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model_on_screen(ctx: &egui::Context) -> Shared {
+        let texture = ctx.load_texture("model", egui::ColorImage::filled([64, 64], Color32::WHITE), Default::default());
+        Shared {
+            pal: Palette::get(crate::theme::ThemeName::Dark, Color32::WHITE),
+            name: "shape.stl".into(), kind: Kind::Other, ext: "stl".into(), is_dir: false, folder: Color32::WHITE,
+            size: String::new(), place: (1, 1), mebibytes: false,
+            content: PreviewContent::Model(texture, [32, 32]),
+            previous: None, switched: Instant::now() - Duration::from_secs(1), loading: None, commands: Vec::new(),
+            view: View { zoom: 1.0, ..Default::default() }, detail: None,
+        }
+    }
+
+    fn turns(s: &mut Shared) -> Vec<ModelView> {
+        s.commands.drain(..).filter_map(|c| if let Cmd::Turn(view) = c { Some(view) } else { None }).collect()
+    }
+
+    #[test]
+    fn dragging_a_model_asks_for_new_looks_and_a_sharp_one_at_rest() {
+        use egui::{Event, Modifiers, PointerButton, RawInput};
+        let ctx = egui::Context::default();
+        let mut s = model_on_screen(&ctx);
+        let mut run = |s: &mut Shared, events: Vec<Event>| {
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| draw(ui, s, ViewportClass::Deferred));
+            out.textures_delta.clear();
+        };
+        let button = |pos, pressed, button| Event::PointerButton { pos, button, pressed, modifiers: Modifiers::NONE };
+        let (from, to) = (pos2(300.0, 300.0), pos2(350.0, 300.0));
+        run(&mut s, vec![Event::PointerMoved(from)]);
+        run(&mut s, vec![]);
+        assert!(turns(&mut s).is_empty(), "the first picture needs nothing more");
+
+        run(&mut s, vec![button(from, true, PointerButton::Primary)]);
+        run(&mut s, vec![Event::PointerMoved(to)]);
+        run(&mut s, vec![Event::PointerMoved(pos2(375.0, 300.0))]);
+        let moving = *turns(&mut s).last().expect("a drag asks for a new look");
+        assert!(moving.turn > 0 && moving.tilt == 0 && !moving.fine, "{moving:?}");
+        run(&mut s, vec![button(pos2(375.0, 300.0), false, PointerButton::Primary)]);
+        turns(&mut s);
+
+        std::thread::sleep(SHARPEN_AFTER + Duration::from_millis(20));
+        run(&mut s, vec![]);
+        let at_rest = turns(&mut s);
+        assert_eq!(at_rest.len(), 1);
+        assert!(at_rest[0].fine && at_rest[0].turn == moving.turn, "{at_rest:?}");
+        run(&mut s, vec![]);
+        assert!(turns(&mut s).is_empty(), "asked once");
+
+        let (pan_from, pan_to) = (pos2(200.0, 200.0), pos2(260.0, 200.0));
+        run(&mut s, vec![Event::PointerMoved(pan_from)]);
+        run(&mut s, vec![button(pan_from, true, PointerButton::Secondary)]);
+        run(&mut s, vec![Event::PointerMoved(pan_to)]);
+        run(&mut s, vec![Event::PointerMoved(pos2(280.0, 200.0))]);
+        run(&mut s, vec![button(pos2(280.0, 200.0), false, PointerButton::Secondary)]);
+        let moved = *turns(&mut s).last().expect("the other button moves the model");
+        assert!(moved.pan[0] > 0 && moved.turn == moving.turn, "{moved:?}");
+
+        zoom_by(&mut s.view, 0.1);
+        assert_eq!(s.view.zoom, MIN_MODEL_ZOOM, "a model can get smaller than its first picture");
+        reset_look(&mut s.view);
+        run(&mut s, vec![]);
+        let back = *turns(&mut s).last().expect("the way back is drawn too");
+        assert!(back.turn == 0 && back.tilt == 0 && back.zoom == 100 && back.pan == [0, 0], "{back:?}");
+    }
 
     #[test]
     fn the_window_opens_at_the_size_of_its_content() {

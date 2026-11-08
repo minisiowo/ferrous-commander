@@ -10,7 +10,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::load::{self, Loaded, Options, Picture, Reply};
+use super::load::{self, Loaded, ModelView, Options, Picture, Reply};
 
 pub const FLAG: &str = "--preview-helper";
 const MAX_PATH_BYTES: usize = 256 * 1024;
@@ -73,6 +73,9 @@ fn write_request(to: &mut impl Write, path: &Path, options: Options) -> io::Resu
     to.write_all(&options.page.to_le_bytes())?;
     let [l, t, r, b] = options.crop.unwrap_or([0; 4]);
     for v in [l, t, r, b] { to.write_all(&v.to_le_bytes())?; }
+    to.write_all(&[options.view.map_or(0, |view| 1 + view.fine as u8)])?;
+    let view = options.view.unwrap_or(ModelView { turn: 0, tilt: 0, zoom: 0, pan: [0; 2], size: [0; 2], fit: 0, fine: false });
+    for v in [view.turn as u16, view.tilt as u16, view.zoom, view.pan[0] as u16, view.pan[1] as u16, view.size[0], view.size[1], view.fit] { to.write_all(&v.to_le_bytes())?; }
     to.write_all(&(bytes.len() as u32).to_le_bytes())?;
     to.write_all(&bytes)?;
     to.flush()
@@ -83,9 +86,13 @@ fn read_request(from: &mut impl Read) -> io::Result<(PathBuf, Options)> {
     let mut raw = [0; 8];
     from.read_exact(&mut raw)?;
     let crop: [u16; 4] = std::array::from_fn(|i| u16::from_le_bytes([raw[i * 2], raw[i * 2 + 1]]));
+    let mut raw_view = [0; 17];
+    from.read_exact(&mut raw_view)?;
+    let v: [u16; 8] = std::array::from_fn(|i| u16::from_le_bytes([raw_view[1 + i * 2], raw_view[2 + i * 2]]));
+    let view = (raw_view[0] != 0).then_some(ModelView { turn: v[0] as i16, tilt: v[1] as i16, zoom: v[2], pan: [v[3] as i16, v[4] as i16], size: [v[5], v[6]], fit: v[7], fine: raw_view[0] == 2 });
     let len = read_u32(from)? as usize;
     if len > MAX_PATH_BYTES { return Err(invalid("path too long")); }
-    let options = Options { max_side, page, crop: (crop != [0; 4]).then_some(crop) };
+    let options = Options { max_side, page, crop: (crop != [0; 4]).then_some(crop), view };
     Ok((path_from(read_bytes(from, len)?), options))
 }
 
@@ -261,7 +268,7 @@ pub fn ask(
 mod tests {
     use super::*;
 
-    const ANY: Options = Options { max_side: 64, page: 0, crop: None };
+    const ANY: Options = Options { max_side: 64, page: 0, crop: None, view: None };
 
     fn frame(reply: &Reply) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -273,7 +280,8 @@ mod tests {
     fn requests_and_replies_survive_the_pipe() {
         let path = Path::new("/tmp/zażółć file.pdf");
         let mut bytes = Vec::new();
-        let options = Options { max_side: 2048, page: 3, crop: Some([1, 2, 3, 4]) };
+        let view = Some(ModelView { turn: -1800, tilt: 45, zoom: 250, pan: [-3, 7], size: [640, 480], fit: 512, fine: true });
+        let options = Options { max_side: 2048, page: 3, crop: Some([1, 2, 3, 4]), view };
         write_request(&mut bytes, path, options).unwrap();
         assert_eq!(read_request(&mut bytes.as_slice()).unwrap(), (path.to_path_buf(), options));
         let mut bytes = Vec::new();

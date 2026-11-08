@@ -15,6 +15,26 @@ pub struct Options {
     pub page: u32,
     /// Part of the picture, as left, top, right, bottom out of 65535.
     pub crop: Option<[u16; 4]>,
+    /// Another look at a 3D model, instead of the first picture of it.
+    pub view: Option<ModelView>,
+}
+
+/// How to show a 3D model. Whole numbers, so that equal views compare equal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ModelView {
+    /// Tenths of a degree away from the first view.
+    pub turn: i16,
+    pub tilt: i16,
+    /// Percent of the first view's size.
+    pub zoom: u16,
+    /// Pixels the model is moved by.
+    pub pan: [i16; 2],
+    /// Pixels of the picture wanted.
+    pub size: [u16; 2],
+    /// Pixels the first picture is wide on the screen, which sets the scale.
+    pub fit: u16,
+    /// Full quality, after the movement has stopped.
+    pub fine: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -149,7 +169,7 @@ mod tests {
     use super::*;
 
     pub(in crate::preview) fn whole(max_side: u32) -> Options {
-        Options { max_side, page: 0, crop: None }
+        Options { max_side, page: 0, crop: None, view: None }
     }
 
     pub(in crate::preview) fn scratch(name: &str) -> std::path::PathBuf {
