@@ -3,8 +3,11 @@
 //! Files are parsed in a helper process (see `helper.rs`), so a file that breaks a parser
 //! costs one preview and not the application with its running copies.
 
+mod archive_list;
 pub mod helper;
 pub mod load;
+mod media;
+mod office;
 mod pdf;
 mod picture;
 pub mod text;
@@ -17,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::app::App;
 use crate::fsx::Entry;
-use load::{Block, Loaded, Options, Picture, Reply, Spans};
+use load::{ArchiveEntry, Block, Loaded, Options, Picture, Reply, Spans};
 
 /// Longest side of a decoded picture; `MAX_TEXTURE_SIDE` in `main.rs` limits it from above.
 pub const MAX_SIDE: u32 = 2048;
@@ -115,6 +118,9 @@ pub enum PreviewContent {
     Detail(egui::TextureHandle),
     Doc(Arc<DocData>),
     Hex(Arc<Vec<u8>>, u64),
+    Table(Arc<TableDoc>),
+    Archive(Arc<Vec<ArchiveEntry>>, u64, bool),
+    Info(Arc<Vec<(String, String)>>, Option<(egui::TextureHandle, [u32; 2])>),
     /// The texture, the original size, and whether anything in it is see-through.
     Image(egui::TextureHandle, [u32; 2], bool),
     Folder { folders: usize, files: usize, size: u64 },
@@ -124,6 +130,16 @@ pub enum PreviewContent {
 pub struct DocData {
     pub blocks: Vec<Block>,
     pub source: Option<Arc<TextDoc>>,
+    pub trimmed: bool,
+    pub cover: Option<(egui::TextureHandle, [u32; 2])>,
+}
+
+pub struct TableDoc {
+    pub rows: Vec<Vec<String>>,
+    /// Width in characters, kept within reason.
+    pub widths: Vec<usize>,
+    pub sheets: Vec<String>,
+    pub page: u32,
     pub trimmed: bool,
 }
 
@@ -135,6 +151,9 @@ impl PreviewContent {
             PreviewContent::Animation(frames, _) => frames.iter().map(|(tex, _)| tex.byte_size()).sum(),
             PreviewContent::Doc(doc) => doc.blocks.iter().map(|b| b.text.len() + 32).sum(),
             PreviewContent::Hex(bytes, _) => bytes.len(),
+            PreviewContent::Table(table) => table.rows.iter().flatten().map(|c| c.len() + 24).sum(),
+            PreviewContent::Archive(entries, ..) => entries.iter().map(|e| e.name.len() + 48).sum(),
+            PreviewContent::Info(_, cover) => cover.as_ref().map_or(256, |(tex, _)| tex.byte_size()),
             _ => 64,
         }
     }
@@ -270,10 +289,21 @@ fn content_of((loaded, picture): Reply, ctx: &egui::Context) -> PreviewContent {
         (Loaded::Page { orig, page, pages }, Some(p)) => PreviewContent::Page { texture: texture(&p.rgba, p.size, ctx), orig, page, pages },
         (Loaded::Detail, Some(p)) => PreviewContent::Detail(texture(&p.rgba, p.size, ctx)),
         (Loaded::Image(_) | Loaded::Page { .. } | Loaded::Detail, None) => PreviewContent::Error("The picture is missing".into()),
-        (Loaded::Doc { blocks, source, trimmed }, _) => {
+        (Loaded::Doc { blocks, source, trimmed }, picture) => {
             let source = source.map(|s| Arc::new(TextDoc::new(s, trimmed, Vec::new())));
-            PreviewContent::Doc(Arc::new(DocData { blocks, source, trimmed }))
+            let cover = picture.map(|p| (texture(&p.rgba, p.size, ctx), p.size));
+            PreviewContent::Doc(Arc::new(DocData { blocks, source, trimmed, cover }))
         }
+        (Loaded::Table { rows, sheets, page, trimmed }, _) => {
+            let mut widths: Vec<usize> = Vec::new();
+            for row in &rows {
+                if row.len() > widths.len() { widths.resize(row.len(), 3); }
+                for (width, cell) in widths.iter_mut().zip(row) { *width = (*width).max(cell.chars().count().min(40)); }
+            }
+            PreviewContent::Table(Arc::new(TableDoc { rows, widths, sheets, page, trimmed }))
+        }
+        (Loaded::Archive { entries, total, trimmed }, _) => PreviewContent::Archive(Arc::new(entries), total, trimmed),
+        (Loaded::Info { rows }, picture) => PreviewContent::Info(Arc::new(rows), picture.map(|p| (texture(&p.rgba, p.size, ctx), p.size))),
         (Loaded::Hex { bytes, total }, _) => PreviewContent::Hex(Arc::new(bytes), total),
         (Loaded::Folder { folders, files, size }, _) => PreviewContent::Folder { folders, files, size },
         (Loaded::Error(e), _) => PreviewContent::Error(e),

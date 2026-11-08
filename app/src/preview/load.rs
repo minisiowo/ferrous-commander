@@ -4,8 +4,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::{pdf, picture, text};
-use crate::fsx;
+use super::{archive_list, media, office, pdf, picture, text};
+use crate::fsx::{self, Kind};
 
 /// What part of a file to prepare, and how large.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -26,6 +26,13 @@ pub struct Block {
     pub text: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ArchiveEntry {
+    pub name: String,
+    pub size: u64,
+    pub folder: bool,
+}
+
 /// Length in bytes and colour class of each stretch of a line.
 pub type Spans = Vec<(u32, u8)>;
 
@@ -39,6 +46,11 @@ pub enum Loaded {
     Detail,
     Doc { blocks: Vec<Block>, source: Option<String>, trimmed: bool },
     Hex { bytes: Vec<u8>, total: u64 },
+    /// Spreadsheet rows; `sheets` lists the workbook's sheets and `page` the one shown.
+    Table { rows: Vec<Vec<String>>, sheets: Vec<String>, page: u32, trimmed: bool },
+    Archive { entries: Vec<ArchiveEntry>, total: u64, trimmed: bool },
+    /// Facts about a file, with a cover or a video frame as the `Picture` when there is one.
+    Info { rows: Vec<(String, String)> },
     Folder { folders: usize, files: usize, size: u64 },
     Error(String),
 }
@@ -84,6 +96,23 @@ pub fn load(p: &Path, options: Options) -> Reply {
     if head.windows(5).any(|w| w == b"%PDF-") { return pdf::load(p, options); }
     if ext == "svg" || ext == "svgz" { return picture::svg(p, options); }
     if picture::is_picture(&head, &ext) { return picture::load(p, options); }
+    let name = fsx::display_name(p);
+    match ext.as_str() {
+        "xlsx" | "xlsm" | "xlsb" | "xls" | "ods" => return office::workbook(p, options),
+        "csv" | "tsv" => return office::separated(p, &ext, md.len()),
+        "docx" | "docm" => return office::word(p),
+        "odt" => return office::opendocument(p),
+        "pptx" | "pptm" => return office::slides(p),
+        "epub" => return office::epub(p),
+        "rar" => return plain(Loaded::Info { rows: vec![("Archive".into(), "RAR contents are shown after unpacking".into())] }),
+        _ => {}
+    }
+    if let Some(listed) = archive_list::load(p, &name, head.starts_with(b"PK\x03\x04")) { return plain(listed); }
+    match Kind::from_ext(&ext) {
+        Kind::Audio => return media::audio(p),
+        Kind::Video => return media::video(p),
+        _ => {}
+    }
     plain(text::load(p, &ext, md.len()))
 }
 
@@ -140,6 +169,8 @@ mod tests {
                 Loaded::Text { text, trimmed, spans } => format!("text {} chars, trimmed {trimmed}, {} lines coloured", text.chars().count(), spans.len()),
                 Loaded::Doc { blocks, .. } => format!("doc of {} blocks", blocks.len()),
                 Loaded::Hex { bytes, total } => format!("hex {} of {total}", bytes.len()),
+                Loaded::Table { rows, sheets, .. } => format!("table {} rows, {} sheets", rows.len(), sheets.len()),
+                Loaded::Archive { entries, .. } => format!("archive {} entries", entries.len()),
                 other => format!("{other:?}"),
             };
             let size = picture.map(|p| (p.size, p.delays.len()));

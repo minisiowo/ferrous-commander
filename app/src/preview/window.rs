@@ -10,7 +10,8 @@ use egui::{Align2, Color32, CornerRadius, FontId, Key as K, Pos2, Rect, Sense, S
 
 use super::load::BlockKind;
 use super::text::{CLASS_COMMENT, CLASS_FUNCTION, CLASS_KEYWORD, CLASS_NUMBER, CLASS_STRING, CLASS_TAG, CLASS_TYPE};
-use super::{DocData, Key, PreviewContent, TextDoc};
+use super::load::ArchiveEntry;
+use super::{DocData, Key, PreviewContent, TableDoc, TextDoc};
 use crate::app::{Act, App};
 use crate::fsx::{self, Entry, Kind};
 use crate::icons;
@@ -128,10 +129,7 @@ impl App {
                     ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
                 }
                 Cmd::Page(by) => {
-                    let last = match self.preview.content {
-                        PreviewContent::Page { pages, .. } => pages.saturating_sub(1),
-                        _ => 0,
-                    };
+                    let last = pages_of(&self.preview.content).map_or(0, |(_, pages)| pages.saturating_sub(1));
                     self.preview.page = self.preview.page.saturating_add_signed(by).min(last);
                 }
                 Cmd::Detail(crop) => self.want_detail(crop, ctx),
@@ -297,6 +295,15 @@ fn keys(ctx: &egui::Context, s: &mut Shared, page: f32) {
     }
 }
 
+/// The shown page and the page count of content that has pages or sheets.
+fn pages_of(content: &PreviewContent) -> Option<(u32, u32)> {
+    match content {
+        PreviewContent::Page { page, pages, .. } => Some((*page, *pages)),
+        PreviewContent::Table(table) if table.sheets.len() > 1 => Some((table.page, table.sheets.len() as u32)),
+        _ => None,
+    }
+}
+
 fn zoom_by(view: &mut View, factor: f32) {
     view.zoom = (view.zoom * factor).clamp(1.0, MAX_ZOOM);
     if view.zoom <= 1.0 { view.pan = Vec2::ZERO; }
@@ -347,6 +354,9 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
             _ => doc_view(&mut child, s, doc, body),
         },
         PreviewContent::Hex(bytes, total) => hex_view(&mut child, s, bytes, *total, body),
+        PreviewContent::Table(table) => table_view(&mut child, s, table, body),
+        PreviewContent::Archive(entries, total, trimmed) => archive_view(&mut child, s, entries, *total, *trimmed, body),
+        PreviewContent::Info(rows, cover) => info_view(&child, s, rows, cover.as_ref(), body),
         PreviewContent::Folder { folders, files, size } => {
             let text = format!("{folders} folders, {files} files\n{}", fsx::fmt_size(*size, false));
             card(&child, s, body, &text);
@@ -363,7 +373,7 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
         }
     }
     let zoomable = matches!(content, PreviewContent::Image(..) | PreviewContent::Page { .. } | PreviewContent::Animation(..));
-    let pages = if let PreviewContent::Page { page, pages, .. } = content { Some((page, pages)) } else { None };
+    let pages = pages_of(&content);
     control_bar(ui, s, body, &ctx, zoomable, pages);
     if cfg!(windows) { ui.painter().rect_stroke(full, CornerRadius::ZERO, Stroke::new(1.0, pal.border), egui::StrokeKind::Inside); }
 }
@@ -592,7 +602,8 @@ fn doc_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<DocData>, body: Rect) {
     if s.view.laid_out_for != key {
         s.view.laid_out_for = key;
         let p = ui.painter();
-        let (mut y, mut laid) = (24.0, Vec::with_capacity(doc.blocks.len()));
+        let cover_h = doc.cover.as_ref().map_or(0.0, |(_, size)| cover_height(*size, width) + 24.0);
+        let (mut y, mut laid) = (24.0 + cover_h, Vec::with_capacity(doc.blocks.len()));
         for block in &doc.blocks {
             let (font, color, indent, before, after) = match block.kind {
                 BlockKind::H1 => (FontId::proportional(26.0), pal.text, 0.0, 14.0, 10.0),
@@ -625,6 +636,11 @@ fn doc_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<DocData>, body: Rect) {
     let output = area.show_viewport(ui, |ui, viewport| {
         let (r, _) = ui.allocate_exact_size(vec2(body.width(), height), Sense::hover());
         let p = ui.painter();
+        if let Some((cover, size)) = &doc.cover {
+            let h = cover_height(*size, width);
+            let w = h * size[0] as f32 / size[1].max(1) as f32;
+            p.image(cover.id(), Rect::from_min_size(r.min + vec2((body.width() - w) / 2.0, 24.0), vec2(w, h)), unit_uv(), Color32::WHITE);
+        }
         for (galley, at, kind) in &laid {
             let size = galley.size();
             if at.y + size.y + 16.0 < viewport.min.y || at.y - 16.0 > viewport.max.y { continue; }
@@ -641,6 +657,115 @@ fn doc_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<DocData>, body: Rect) {
     });
     s.view.offset = output.state.clamped_offset().y;
     s.view.laid_out = laid;
+}
+
+fn cover_height(size: [u32; 2], width: f32) -> f32 {
+    let aspect = size[0].max(1) as f32 / size[1].max(1) as f32;
+    (width / aspect).min(420.0)
+}
+
+fn table_view(ui: &mut Ui, s: &mut Shared, table: &Arc<TableDoc>, body: Rect) {
+    let pal = s.pal;
+    let font = FontId::proportional(13.0);
+    let digit = ui.ctx().fonts_mut(|f| f.glyph_width(&font, '0'));
+    let row_h = 24.0;
+    let columns: Vec<f32> = table.widths.iter().map(|w| *w as f32 * digit * 1.15 + 20.0).collect();
+    let numbers = table.rows.len().max(1).ilog10() as f32 * digit + digit + 24.0;
+    let width = numbers + columns.iter().sum::<f32>() + 16.0;
+    let mut area = egui::ScrollArea::both().id_salt("preview_table").auto_shrink(false);
+    if let Some(y) = s.view.scroll_to.take() { area = area.vertical_scroll_offset(y); }
+    let total = table.rows.len() + table.trimmed as usize;
+    let output = area.show_rows(ui, row_h, total, |ui, range| {
+        let top = ui.min_rect().min;
+        let step = row_h + ui.spacing().item_spacing.y;
+        let (r, _) = ui.allocate_exact_size(vec2(width.max(body.width() - 16.0), range.len() as f32 * step), Sense::hover());
+        let p = ui.painter_at(r.expand(2.0));
+        for (at, row) in range.enumerate() {
+            let band = Rect::from_min_size(top + vec2(0.0, at as f32 * step), vec2(r.width(), row_h));
+            let Some(cells) = table.rows.get(row) else {
+                p.text(pos2(top.x + numbers, band.center().y), Align2::LEFT_CENTER, "Only the beginning of this table is shown", FontId::proportional(12.0), pal.text_weak);
+                continue;
+            };
+            if row == 0 { p.rect_filled(band, CornerRadius::ZERO, blend(pal.raised, pal.window, 0.3)); }
+            else if row % 2 == 0 { p.rect_filled(band, CornerRadius::ZERO, blend(pal.window, pal.raised, 0.25)); }
+            p.text(pos2(top.x + numbers - 12.0, band.center().y), Align2::RIGHT_CENTER, (row + 1).to_string(), FontId::monospace(11.0), pal.text_weak);
+            let mut x = top.x + numbers;
+            for (cell, column) in cells.iter().zip(&columns) {
+                if !cell.is_empty() {
+                    let clip = Rect::from_min_size(pos2(x, band.min.y), vec2(*column - 10.0, row_h));
+                    let shown = fit_text(&p, cell.lines().next().unwrap_or(""), &font, clip.width());
+                    p.with_clip_rect(clip.intersect(p.clip_rect())).text(pos2(x, band.center().y), Align2::LEFT_CENTER, shown, font.clone(), pal.text);
+                }
+                x += column;
+            }
+        }
+    });
+    s.view.offset = output.state.clamped_offset().y;
+}
+
+fn archive_view(ui: &mut Ui, s: &mut Shared, entries: &[ArchiveEntry], total: u64, trimmed: bool, body: Rect) {
+    let pal = s.pal;
+    let font = FontId::proportional(13.0);
+    let row_h = 24.0;
+    let mut area = egui::ScrollArea::vertical().id_salt("preview_archive").auto_shrink(false);
+    if let Some(y) = s.view.scroll_to.take() { area = area.vertical_scroll_offset(y); }
+    let output = area.show_rows(ui, row_h, entries.len() + 1, |ui, range| {
+        let top = ui.min_rect().min;
+        let step = row_h + ui.spacing().item_spacing.y;
+        let width = body.width() - 16.0;
+        let (r, _) = ui.allocate_exact_size(vec2(width, range.len() as f32 * step), Sense::hover());
+        let p = ui.painter_at(r.expand(2.0));
+        for (at, row) in range.enumerate() {
+            let y = top.y + at as f32 * step + row_h / 2.0;
+            let Some(entry) = entries.get(row) else {
+                let note = if trimmed { format!("The first {} items are shown", entries.len()) } else { format!("{total} items") };
+                p.text(pos2(top.x + 16.0, y), Align2::LEFT_CENTER, note, FontId::proportional(12.0), pal.text_weak);
+                continue;
+            };
+            let icon = Rect::from_center_size(pos2(top.x + 26.0, y), Vec2::splat(16.0));
+            if entry.folder {
+                icons::folder(&p, icon, Kind::Folder.color());
+            } else {
+                let ext = fsx::split_ext(&entry.name, false);
+                icons::entry(&p, icon, Kind::from_ext(&ext), &ext, pal.dark, false);
+            }
+            let size = if entry.folder { String::new() } else { fsx::fmt_size(entry.size, false) };
+            let size_rect = p.text(pos2(top.x + width - 16.0, y), Align2::RIGHT_CENTER, size, FontId::proportional(12.0), pal.text_weak);
+            let name = fit_text(&p, &entry.name, &font, (size_rect.min.x - top.x - 60.0).max(40.0));
+            p.text(pos2(top.x + 44.0, y), Align2::LEFT_CENTER, name, font.clone(), pal.text);
+        }
+    });
+    s.view.offset = output.state.clamped_offset().y;
+}
+
+fn info_view(ui: &Ui, s: &Shared, rows: &[(String, String)], cover: Option<&(egui::TextureHandle, [u32; 2])>, body: Rect) {
+    let pal = s.pal;
+    let p = ui.painter_at(body);
+    let (row_h, table_h) = (24.0, rows.len() as f32 * 24.0);
+    let area = body.shrink(28.0);
+    let picture_h = (area.height() - table_h - 24.0).max(64.0);
+    let top = if let Some((tex, size)) = cover {
+        let aspect = size[0].max(1) as f32 / size[1].max(1) as f32;
+        let h = picture_h.min(area.width() / aspect);
+        let total = h + 24.0 + table_h;
+        let at = body.center().y - total / 2.0;
+        p.image(tex.id(), Rect::from_center_size(pos2(body.center().x, at + h / 2.0), vec2(h * aspect, h)), unit_uv(), Color32::WHITE);
+        at + h + 24.0
+    } else {
+        let side = 96.0;
+        let total = side + 24.0 + table_h;
+        let at = body.center().y - total / 2.0;
+        icons::entry(&p, Rect::from_center_size(pos2(body.center().x, at + side / 2.0), Vec2::splat(side)), s.kind, &s.ext, pal.dark, true);
+        at + side + 24.0
+    };
+    let font = FontId::proportional(13.0);
+    let middle = body.center().x;
+    for (i, (key, value)) in rows.iter().enumerate() {
+        let y = top + i as f32 * row_h + row_h / 2.0;
+        p.text(pos2(middle - 10.0, y), Align2::RIGHT_CENTER, key, font.clone(), pal.text_weak);
+        let shown = fit_text(&p, value, &font, body.max.x - middle - 40.0);
+        p.text(pos2(middle + 10.0, y), Align2::LEFT_CENTER, shown, font.clone(), pal.text);
+    }
 }
 
 fn hex_view(ui: &mut Ui, s: &mut Shared, bytes: &[u8], total: u64, body: Rect) {
