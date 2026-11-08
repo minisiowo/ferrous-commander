@@ -23,7 +23,7 @@ pub const FILM_PAGE: u32 = 1;
 fn to_picture(bytes: &[u8]) -> Option<Picture> {
     let img = image::load_from_memory(bytes).ok()?;
     // `thumbnail` also enlarges, which only blurs a small cover.
-    let img = if img.width().max(img.height()) > MAX_SIDE { img.thumbnail(MAX_SIDE, MAX_SIDE) } else { img }.to_rgba8();
+    let img = if img.width().max(img.height()) > MAX_SIDE { img.thumbnail(MAX_SIDE, MAX_SIDE) } else { img }.into_rgba8();
     Some(Picture { size: [img.width(), img.height()], delays: Vec::new(), rgba: img.into_raw() })
 }
 
@@ -134,7 +134,9 @@ fn film(frames: Vec<Picture>) -> Option<Picture> {
     // Positions that landed on one key frame would only make the film stand still.
     same.dedup_by(|a, b| a.rgba == b.rgba);
     let delays = if same.len() > 1 { vec![FRAME_MS; same.len()] } else { Vec::new() };
-    Some(Picture { size, delays, rgba: same.into_iter().flat_map(|f| f.rgba).collect() })
+    let mut rgba = Vec::with_capacity(same.iter().map(|f| f.rgba.len()).sum());
+    for frame in same { rgba.extend_from_slice(&frame.rgba); }
+    Some(Picture { size, delays, rgba })
 }
 
 /// The film's length, from ffmpeg's "Duration: 00:01:23.45".

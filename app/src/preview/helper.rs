@@ -58,6 +58,8 @@ fn read_u32(from: &mut impl Read) -> io::Result<u32> {
 
 fn read_bytes(from: &mut impl Read, len: usize) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
+    // Whole at once, not doubled as it arrives. Untouched pages cost nothing if the sender lied.
+    bytes.try_reserve_exact(len).map_err(|_| invalid("too large"))?;
     from.take(len as u64).read_to_end(&mut bytes)?;
     if bytes.len() != len { return Err(io::ErrorKind::UnexpectedEof.into()); }
     Ok(bytes)
@@ -96,7 +98,14 @@ fn read_request(from: &mut impl Read) -> io::Result<(PathBuf, Options)> {
     Ok((path_from(read_bytes(from, len)?), options))
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize)]
+struct OutgoingHeader<'a> {
+    loaded: &'a Loaded,
+    size: Option<[u32; 2]>,
+    delays: &'a [u32],
+}
+
+#[derive(serde::Deserialize)]
 struct Header {
     loaded: Loaded,
     size: Option<[u32; 2]>,
@@ -105,11 +114,11 @@ struct Header {
 }
 
 fn write_reply(to: &mut impl Write, (loaded, picture): &Reply) -> io::Result<()> {
-    let header = serde_json::to_vec(&serde_json::json!({
-        "loaded": loaded,
-        "size": picture.as_ref().map(|p| p.size),
-        "delays": picture.as_ref().map(|p| p.delays.clone()).unwrap_or_default(),
-    }))?;
+    let header = serde_json::to_vec(&OutgoingHeader {
+        loaded,
+        size: picture.as_ref().map(|p| p.size),
+        delays: picture.as_ref().map_or(&[], |p| &p.delays),
+    })?;
     to.write_all(&(header.len() as u32).to_le_bytes())?;
     to.write_all(&header)?;
     if let Some(p) = picture { to.write_all(&p.rgba)?; }
@@ -294,7 +303,7 @@ mod tests {
         let animation: Reply = (Loaded::Image([2, 1]), Some(Picture { size: [2, 1], delays: vec![50, 60], rgba: vec![1; 16] }));
         let picture = read_reply(&mut frame(&animation).as_slice()).unwrap().1.unwrap();
         assert_eq!((picture.delays, picture.rgba.len()), (vec![50, 60], 16));
-        let text: Reply = (Loaded::Text { text: "żółw".into(), trimmed: true, spans: vec![vec![(7, 1)]] }, None);
+        let text: Reply = (Loaded::Text { text: "żółw".into(), trimmed: true, spans: load::Colours { spans: vec![(7, 1)], ends: vec![1] } }, None);
         assert!(matches!(read_reply(&mut frame(&text).as_slice()).unwrap(), (Loaded::Text { text, trimmed: true, .. }, None) if text == "żółw"));
     }
 

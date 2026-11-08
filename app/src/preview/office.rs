@@ -334,7 +334,7 @@ pub fn epub(p: &Path) -> Reply {
     let picture = cover.and_then(|href| {
         let bytes = entry_bytes(&mut zip, &beside(&package, &href))?;
         let img = image::load_from_memory(&bytes).ok()?;
-        let img = if img.width().max(img.height()) > MAX_COVER { img.thumbnail(MAX_COVER, MAX_COVER) } else { img }.to_rgba8();
+        let img = if img.width().max(img.height()) > MAX_COVER { img.thumbnail(MAX_COVER, MAX_COVER) } else { img }.into_rgba8();
         Some(Picture { size: [img.width(), img.height()], delays: Vec::new(), rgba: img.into_raw() })
     });
     let mut out = empty();

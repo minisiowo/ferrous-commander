@@ -21,7 +21,7 @@ pub fn is_picture(head: &[u8], ext: &str) -> bool {
 
 pub(super) fn to_picture(img: DynamicImage, max_side: u32) -> Picture {
     let small = if img.width() > max_side || img.height() > max_side { img.thumbnail(max_side, max_side) } else { img };
-    let rgba = small.to_rgba8();
+    let rgba = small.into_rgba8();
     Picture { size: [rgba.width(), rgba.height()], delays: Vec::new(), rgba: rgba.into_raw() }
 }
 
@@ -124,7 +124,11 @@ pub fn svg(p: &Path, options: Options) -> Reply {
     let (tw, th) = (((w * scale).ceil() as u32).max(1), ((h * scale).ceil() as u32).max(1));
     let Some(mut pixmap) = tiny_skia::Pixmap::new(tw, th) else { return failed("This SVG has an impossible size") };
     resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
-    let rgba = pixmap.pixels().iter().flat_map(|c| { let c = c.demultiply(); [c.red(), c.green(), c.blue(), c.alpha()] }).collect();
+    let mut rgba = Vec::with_capacity(pixmap.pixels().len() * 4);
+    for c in pixmap.pixels() {
+        let c = c.demultiply();
+        rgba.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+    }
     (Loaded::Image([w.round() as u32, h.round() as u32]), Some(Picture { size: [tw, th], delays: Vec::new(), rgba }))
 }
 

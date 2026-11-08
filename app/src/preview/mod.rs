@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::app::App;
 use crate::fsx::Entry;
-use load::{ArchiveEntry, Block, Loaded, ModelView, Options, Picture, Reply, Spans};
+use load::{ArchiveEntry, Block, Colours, Loaded, ModelView, Options, Picture, Reply};
 
 /// Longest side of a decoded picture; `MAX_TEXTURE_SIDE` in `main.rs` limits it from above.
 pub const MAX_SIDE: u32 = 2048;
@@ -37,6 +37,11 @@ const ABANDON_AFTER: Duration = Duration::from_millis(200);
 const JOB_LIMIT: Duration = Duration::from_secs(15);
 /// A lane without work gives its helper's memory back.
 const IDLE_LIMIT: Duration = Duration::from_secs(30);
+/// Sooner for the neighbours, whose helper has nothing to come back to.
+const NEIGHBOURS_IDLE_LIMIT: Duration = Duration::from_secs(10);
+/// Files read ahead of being asked for stay below this, and 3D models are not read at all:
+/// a neighbour may never be looked at.
+const PREFETCH_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Neighbours wait until the selection stops moving.
 pub const PREFETCH_DELAY: Duration = Duration::from_millis(150);
 /// Arrowing past videos should not start ffmpeg several times for each of them.
@@ -55,6 +60,12 @@ pub struct Key {
 }
 
 impl Key {
+    /// Worth reading before it is known to be wanted.
+    fn light(&self) -> bool {
+        let model = self.path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("stl") || ext.eq_ignore_ascii_case("3mf"));
+        self.size <= PREFETCH_MAX_BYTES && !model
+    }
+
     fn options(&self) -> Options {
         Options { max_side: MAX_SIDE, page: self.page, crop: self.crop, view: self.view }
     }
@@ -76,15 +87,15 @@ pub struct TextDoc {
     pub longest: usize,
     pub trimmed: bool,
     /// Colours per line; lines beyond the end of this have none.
-    pub spans: Vec<Spans>,
+    pub spans: Colours,
 }
 
 impl TextDoc {
     fn bytes(&self) -> usize {
-        self.text.len() + self.lines.len() * 8 + self.spans.iter().map(|line| 24 + line.len() * 8).sum::<usize>()
+        self.text.len() + self.lines.len() * 8 + self.spans.spans.len() * 8 + self.spans.ends.len() * 4
     }
 
-    pub fn new(text: String, trimmed: bool, spans: Vec<Spans>) -> TextDoc {
+    pub fn new(text: String, trimmed: bool, spans: Colours) -> TextDoc {
         let mut lines = Vec::new();
         let mut longest = 0;
         let mut at = 0;
@@ -270,14 +281,14 @@ const START: Option<Start> = Some(helper::Helper::start);
 #[cfg(test)]
 const START: Option<Start> = None;
 
-fn run_lane(slot: Arc<Slot>, results: mpsc::Sender<(Key, PreviewContent)>, start: Option<Start>) {
+fn run_lane(slot: Arc<Slot>, results: mpsc::Sender<(Key, PreviewContent)>, start: Option<Start>, idle: Duration) {
     let mut running: Option<helper::Helper> = None;
     loop {
         let job = {
             let mut jobs = slot.jobs.lock().unwrap();
             loop {
                 if let Some(job) = jobs.pop_front() { break job; }
-                let (guard, wait) = slot.wake.wait_timeout(jobs, IDLE_LIMIT).unwrap();
+                let (guard, wait) = slot.wake.wait_timeout(jobs, idle).unwrap();
                 jobs = guard;
                 if wait.timed_out() && jobs.is_empty() {
                     running = None;
@@ -338,7 +349,7 @@ fn content_of((loaded, picture): Reply, ctx: &egui::Context) -> PreviewContent {
         (Loaded::Detail, Some(p)) => PreviewContent::Detail(texture(&p.rgba, p.size, ctx)),
         (Loaded::Image(_) | Loaded::Model(_) | Loaded::Page { .. } | Loaded::Detail, None) => PreviewContent::Error("The picture is missing".into()),
         (Loaded::Doc { blocks, source, trimmed }, picture) => {
-            let source = source.map(|s| Arc::new(TextDoc::new(s, trimmed, Vec::new())));
+            let source = source.map(|s| Arc::new(TextDoc::new(s, trimmed, Colours::default())));
             let cover = picture.map(|p| (texture(&p.rgba, p.size, ctx), p.size));
             PreviewContent::Doc(Arc::new(DocData { blocks, source, trimmed, cover }))
         }
@@ -429,7 +440,8 @@ impl Preview {
         let slot = if lane == 0 { &self.current } else { &self.neighbours };
         if !std::mem::replace(&mut self.started[lane], true) {
             let (slot, tx) = (slot.clone(), self.tx.clone());
-            std::thread::spawn(move || run_lane(slot, tx, START));
+            let idle = if lane == 0 { IDLE_LIMIT } else { NEIGHBOURS_IDLE_LIMIT };
+            std::thread::spawn(move || run_lane(slot, tx, START, idle));
         }
         slot.replace(jobs);
     }
@@ -503,7 +515,7 @@ impl App {
             return;
         }
         preview.prefetched = preview.key.clone();
-        let jobs = neighbours.into_iter().filter(|k| !preview.cache.contains(k))
+        let jobs = neighbours.into_iter().filter(|k| k.light() && !preview.cache.contains(k))
             .map(|key| Job { key, ctx: ctx.clone(), prefetch: true }).collect();
         preview.send(1, jobs);
     }
@@ -576,7 +588,7 @@ mod tests {
         assert!(cache.get(&key("f5")).is_some());
         cache.insert(key("new"), PreviewContent::Hex(Arc::default(), 0));
         assert!(cache.contains(&key("f5")), "using an item keeps it");
-        let huge = Arc::new(TextDoc::new("x".repeat(CACHE_BYTES), false, Vec::new()));
+        let huge = Arc::new(TextDoc::new("x".repeat(CACHE_BYTES), false, Colours::default()));
         cache.insert(key("huge"), PreviewContent::Text(huge));
         assert!(!cache.contains(&key("huge")), "an oversized preview is not remembered");
         assert!(cache.contains(&key("f5")), "and does not push out the others");
@@ -595,14 +607,14 @@ mod tests {
 
     #[test]
     fn the_budget_counts_colours() {
-        let plain = PreviewContent::Text(Arc::new(TextDoc::new("a\n".into(), false, Vec::new())));
-        let coloured = PreviewContent::Text(Arc::new(TextDoc::new("a\n".into(), false, vec![vec![(1, 1); 1000]])));
+        let plain = PreviewContent::Text(Arc::new(TextDoc::new("a\n".into(), false, Colours::default())));
+        let coloured = PreviewContent::Text(Arc::new(TextDoc::new("a\n".into(), false, Colours { spans: vec![(1, 1); 1000], ends: vec![1000] })));
         assert!(coloured.bytes() >= plain.bytes() + 8000);
     }
 
     #[test]
     fn text_rows_follow_lines_and_wrap_on_characters() {
-        let doc = TextDoc::new("żółw\r\n\nabcdef".into(), false, Vec::new());
+        let doc = TextDoc::new("żółw\r\n\nabcdef".into(), false, Colours::default());
         assert_eq!(doc.lines.len(), 3);
         assert_eq!(doc.longest, 6);
         let piece = |r: &(u32, u32, u32)| doc.text[r.1 as usize..r.2 as usize].to_string();
@@ -610,6 +622,14 @@ mod tests {
         let wrapped = doc.rows(Some(4));
         assert_eq!(wrapped.iter().map(piece).collect::<Vec<_>>(), ["żółw", "", "abcd", "ef"]);
         assert_eq!(wrapped.iter().map(|r| r.0).collect::<Vec<_>>(), [0, 1, 2, 2]);
+    }
+
+    #[test]
+    fn heavy_neighbours_are_not_read_ahead() {
+        assert!(key("photo.jpg").light());
+        assert!(!key("part.STL").light());
+        assert!(!key("part.3mf").light());
+        assert!(!Key { size: PREFETCH_MAX_BYTES + 1, ..key("film.jpg") }.light());
     }
 
     #[test]
@@ -627,7 +647,7 @@ mod tests {
         app.receive_preview();
         assert!(!app.preview.cache.contains(&key("broken")));
         app.want_preview(None, &ctx);
-        app.preview.tx.send((key("old"), PreviewContent::Text(Arc::new(TextDoc::new("old".into(), false, Vec::new()))))).unwrap();
+        app.preview.tx.send((key("old"), PreviewContent::Text(Arc::new(TextDoc::new("old".into(), false, Colours::default()))))).unwrap();
         app.receive_preview();
         assert!(matches!(app.preview.content, PreviewContent::None));
         assert!(app.preview.cache.contains(&key("old")), "a finished read still serves the next visit");

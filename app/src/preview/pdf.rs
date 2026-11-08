@@ -7,6 +7,7 @@ use hayro::hayro_interpret::util::TransformExt;
 use hayro::hayro_syntax::Pdf;
 use hayro::kurbo::Affine;
 use hayro::vello_cpu::color::palette::css::WHITE;
+use hayro::vello_cpu::peniko::ImageAlphaType;
 use hayro::vello_cpu::{Pixmap, RasterizerSettings, RenderContext, Resources, TargetInit};
 use hayro::{PixmapSettings, RenderCache, RenderSettings};
 
@@ -18,7 +19,7 @@ const MAX_FILE: u64 = 512 * 1024 * 1024;
 fn to_picture(pixmap: Pixmap) -> Picture {
     let size = [pixmap.width() as u32, pixmap.height() as u32];
     // Drawn over a white page, so nothing is see-through and no alpha needs undoing.
-    Picture { size, delays: Vec::new(), rgba: pixmap.data_as_u8_slice().to_vec() }
+    Picture { size, delays: Vec::new(), rgba: pixmap.take_rgba8(ImageAlphaType::AlphaPremultiplied) }
 }
 
 pub fn load(p: &Path, options: Options) -> Reply {

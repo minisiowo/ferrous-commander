@@ -710,7 +710,7 @@ fn class_color(class: u8, pal: Palette) -> Color32 {
 fn coloured_row(doc: &TextDoc, line: u32, start: u32, end: u32, font: &FontId, pal: Palette) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let format = |color| egui::TextFormat::simple(font.clone(), color);
-    let Some(spans) = doc.spans.get(line as usize) else {
+    let Some(spans) = doc.spans.line(line as usize) else {
         job.append(&doc.text[start as usize..end as usize], 0.0, format(pal.text));
         return job;
     };
@@ -1087,7 +1087,7 @@ mod tests {
             out.textures_delta.clear();
             size
         };
-        let text = |lines: usize, width: usize| PreviewContent::Text(Arc::new(TextDoc::new(vec!["x".repeat(width); lines].join("\n"), false, Vec::new())));
+        let text = |lines: usize, width: usize| PreviewContent::Text(Arc::new(TextDoc::new(vec!["x".repeat(width); lines].join("\n"), false, Default::default())));
         assert_eq!(fit(&text(3, 10)), MIN_OPEN, "a few short lines need no more than the smallest window");
         let middling = fit(&text(30, 90));
         assert!(middling.x > MIN_OPEN.x && middling.x < largest.x && middling.y > MIN_OPEN.y && middling.y < largest.y, "{middling:?}");

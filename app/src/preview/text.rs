@@ -5,7 +5,7 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use super::load::{Block, BlockKind, Loaded, Spans};
+use super::load::{Block, BlockKind, Colours, Loaded};
 use crate::fsx;
 
 pub const TEXT_MAX: usize = 2 * 1024 * 1024;
@@ -93,29 +93,31 @@ fn classes() -> &'static syntect::highlighting::Theme {
     })
 }
 
-fn colours(text: &str, ext: &str, budget: Duration) -> Vec<Spans> {
+fn colours(text: &str, ext: &str, budget: Duration) -> Colours {
     use syntect::easy::HighlightLines;
     let set = syntaxes();
     let first = text.lines().next().unwrap_or("");
-    let Some(syntax) = set.find_syntax_by_extension(ext).or_else(|| set.find_syntax_by_first_line(first)) else { return Vec::new() };
-    if syntax.name == "Plain Text" { return Vec::new(); }
+    let Some(syntax) = set.find_syntax_by_extension(ext).or_else(|| set.find_syntax_by_first_line(first)) else { return Colours::default() };
+    if syntax.name == "Plain Text" { return Colours::default(); }
     let mut highlighter = HighlightLines::new(syntax, classes());
     let started = Instant::now();
-    let mut lines = Vec::new();
+    let mut colours = Colours::default();
     for line in text.split_inclusive('\n') {
         if started.elapsed() > budget || line.len() > COLOUR_LINE_MAX { break; }
         let Ok(pieces) = highlighter.highlight_line(line, set) else { break };
-        let mut spans: Spans = Vec::new();
+        let line_start = colours.spans.len();
         for (style, piece) in pieces {
             let class = style.foreground.r;
-            match spans.last_mut() {
+            match colours.spans[line_start..].last_mut() {
                 Some(last) if last.1 == class => last.0 += piece.len() as u32,
-                _ => spans.push((piece.len() as u32, class)),
+                _ => colours.spans.push((piece.len() as u32, class)),
             }
         }
-        lines.push(spans);
+        colours.ends.push(colours.spans.len() as u32);
     }
-    lines
+    colours.spans.shrink_to_fit();
+    colours.ends.shrink_to_fit();
+    colours
 }
 
 fn markdown(text: &str) -> (Vec<Block>, bool) {
@@ -203,11 +205,15 @@ mod tests {
         // The time limit depends on the machine and on what else is running.
         let text = std::fs::read_to_string(&code).unwrap();
         let spans = colours(&text, "rs", Duration::from_secs(120));
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans.iter().flatten().map(|s| s.0 as usize).sum::<usize>(), text.len(), "spans cover the text");
-        assert!(spans[0].iter().any(|s| s.1 == CLASS_COMMENT));
-        assert!(spans[1].iter().any(|s| s.1 == CLASS_KEYWORD));
-        assert!(spans[1].iter().any(|s| s.1 == CLASS_STRING));
+        assert_eq!(spans.ends.len(), 2);
+        assert_eq!(spans.spans.iter().map(|s| s.0 as usize).sum::<usize>(), text.len(), "spans cover the text");
+        let (first, second) = (spans.line(0).unwrap(), spans.line(1).unwrap());
+        assert!(first.iter().any(|s| s.1 == CLASS_COMMENT));
+        assert!(second.iter().any(|s| s.1 == CLASS_KEYWORD));
+        assert!(second.iter().any(|s| s.1 == CLASS_STRING));
+        assert!(spans.line(2).is_none());
+        let lying = Colours { spans: vec![(1, 1)], ends: vec![5, 0] };
+        assert!(lying.line(0).is_none() && lying.line(1).is_none(), "numbers from the helper are not trusted");
         std::fs::remove_dir_all(root).unwrap();
     }
 
