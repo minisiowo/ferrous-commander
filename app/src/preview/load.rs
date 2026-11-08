@@ -72,7 +72,7 @@ impl Colours {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Loaded {
-    Text { text: String, trimmed: bool, spans: Colours },
+    Text { text: String, trimmed: bool, colours: Colours },
     /// Original width and height; the pixels travel beside it as a `Picture`.
     Image([u32; 2]),
     /// A drawn 3D model, with nothing behind it; its size in points, as for `Image`.
@@ -123,7 +123,7 @@ pub fn load(p: &Path, options: Options) -> Reply {
     };
     if md.is_dir() { return plain(folder(p)); }
     if !md.is_file() { return failed("Preview is unavailable for pipes, sockets and device files"); }
-    if md.len() == 0 { return plain(Loaded::Text { text: String::new(), trimmed: false, spans: Colours::default() }); }
+    if md.len() == 0 { return plain(Loaded::Text { text: String::new(), trimmed: false, colours: Colours::default() }); }
     let head = match head(p) {
         Ok(head) => head,
         Err(e) => return failed(fsx::friendly_err(&e)),
@@ -205,7 +205,7 @@ mod tests {
             let started = std::time::Instant::now();
             let (loaded, picture) = load(&file, whole(crate::preview::MAX_SIDE));
             let summary = match loaded {
-                Loaded::Text { text, trimmed, spans } => format!("text {} chars, trimmed {trimmed}, {} lines coloured", text.chars().count(), spans.ends.len()),
+                Loaded::Text { text, trimmed, colours } => format!("text {} chars, trimmed {trimmed}, {} lines coloured", text.chars().count(), colours.ends.len()),
                 Loaded::Doc { blocks, .. } => format!("doc of {} blocks", blocks.len()),
                 Loaded::Hex { bytes, total } => format!("hex {} of {total}", bytes.len()),
                 Loaded::Table { rows, sheets, .. } => format!("table {} rows, {} sheets", rows.len(), sheets.len()),

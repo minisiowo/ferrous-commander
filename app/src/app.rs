@@ -14,14 +14,15 @@ use crate::settings::{FavGroup, Layout, PaneSession, Settings};
 use crate::theme::{Palette, ThemeName, hex};
 use crate::tiles::Tile;
 
+/// Forgetting old listings and renewing the watch list need no doing on every frame.
+const EVICT_EVERY: Duration = Duration::from_secs(1);
+
 /// Folder refresh poll.
 pub const REFRESH_MS: u64 = crate::defaults::REFRESH_MS;
 /// One unresponsive network share occupies one worker; the others keep loading.
 const FOLDER_WORKERS: usize = 4;
 /// Slowest redraw while nothing happens, for the drive list, sidebar and clipboard.
 /// Everything that needs the window sooner wakes it.
-/// Looking for what to forget needs no doing on every frame.
-const EVICT_EVERY: Duration = Duration::from_secs(1);
 const IDLE_HEARTBEAT: Duration = Duration::from_secs(5);
 /// Longest the interface waits to learn what a path is. A sleeping share can take
 /// half a minute; past this limit the background folder loader takes over.
@@ -362,6 +363,7 @@ pub struct App {
     dirty: bool,
     last_save: Instant,
     last_evict: Instant,
+    watched_generation: u64,
     applied: Option<(ThemeName, String, u32, Option<crate::omarchy::Colors>)>,
     omarchy_watch: Option<crate::omarchy::Watch>,
     omarchy_colors: Option<crate::omarchy::Colors>,
@@ -597,6 +599,7 @@ impl App {
             dirty: false,
             last_save: Instant::now(),
             last_evict: Instant::now(),
+            watched_generation: 0,
             applied: None,
             omarchy_watch: None,
             omarchy_colors: None,
@@ -827,12 +830,17 @@ impl App {
             }
             self.update_view(i);
         }
-        if self.last_evict.elapsed() >= EVICT_EVERY {
+        let due = self.last_evict.elapsed() >= EVICT_EVERY;
+        if due {
             self.last_evict = Instant::now();
             self.evict();
             self.preview.expire();
         }
-        self.publish_watch_list();
+        // A new listing changes what the watcher should compare with.
+        if due || self.generation != self.watched_generation {
+            self.watched_generation = self.generation;
+            self.publish_watch_list();
+        }
     }
 
     /// Closing kills worker threads, so a running operation would stop at a random
@@ -1799,18 +1807,18 @@ impl App {
                 }
                 #[cfg(windows)]
                 let clipboard = match crate::file_transfer::read() {
-                    Ok(value) => value,
+                    Ok(value) => value.map(|(paths, cut)| (std::sync::Arc::<[PathBuf]>::from(paths), cut)),
                     Err(e) => { self.toast(ToastKind::Error, e); return; }
                 };
                 #[cfg(not(windows))]
-                let clipboard = self.clip.take().map(|(paths, cut)| (paths.to_vec(), cut));
+                let clipboard = self.clip.take();
                 match clipboard {
                     Some((paths, cut)) => {
                         let kind = if cut { OpKind::Move } else { OpKind::Copy };
                         if !cut {
-                            self.clip = Some((paths.as_slice().into(), false));
+                            self.clip = Some((paths.clone(), false));
                         }
-                        self.start_job(kind, paths, Some(dest), ctx);
+                        self.start_job(kind, paths.to_vec(), Some(dest), ctx);
                     }
                     None => self.toast(ToastKind::Info, "Clipboard doesn't contain files"),
                 }

@@ -111,8 +111,6 @@ pub struct Entry {
     lower: Option<Box<str>>,
     /// Where the name starts in the path.
     name_at: u32,
-    /// Bytes of the extension, which is the end of the name.
-    ext_len: u16,
     pub is_dir: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
@@ -124,14 +122,16 @@ pub struct Entry {
 
 impl Entry {
     /// A row called `name`, with nothing else known about it yet.
-    pub fn named(path: PathBuf, name: String, is_dir: bool, kind: Kind) -> Entry {
+    pub fn named(mut path: PathBuf, name: String, is_dir: bool, kind: Kind) -> Entry {
+        // `DirEntry::path` leaves room for growing, and listings hold many of these.
+        path.shrink_to_fit();
         let bytes = path.as_os_str().as_encoded_bytes();
         let name_at = bytes.len().checked_sub(name.len())
             .filter(|&at| at <= u32::MAX as usize && &bytes[at..] == name.as_bytes());
-        let lowered = name.to_lowercase();
+        let already_lower = name.is_ascii() && !name.bytes().any(|b| b.is_ascii_uppercase());
+        let lowered = (!already_lower).then(|| name.to_lowercase()).filter(|lowered| *lowered != name);
         Entry {
-            ext_len: u16::try_from(split_ext(&name, is_dir).len()).unwrap_or(0),
-            lower: (lowered != name).then(|| lowered.into_boxed_str()),
+            lower: lowered.map(String::into_boxed_str),
             name_at: name_at.unwrap_or(0) as u32,
             custom_name: name_at.is_none().then(|| name.into_boxed_str()),
             path,
@@ -156,8 +156,13 @@ impl Entry {
     }
 
     pub fn ext(&self) -> &str {
-        let name = self.name();
-        name.get(name.len().saturating_sub(self.ext_len as usize)..).unwrap_or_default()
+        split_ext(self.name(), self.is_dir)
+    }
+
+    /// The name without its extension.
+    pub fn stem(&self) -> &str {
+        let (name, ext) = (self.name(), self.ext());
+        if ext.is_empty() { name } else { &name[..name.len() - ext.len() - 1] }
     }
 }
 
@@ -634,6 +639,7 @@ mod tests {
         assert_eq!((drive.name(), drive.ext()), ("Data (D:)", ""));
         let folder = super::Entry::named(PathBuf::from("/x/a.d"), "a.d".into(), true, super::Kind::Folder);
         assert_eq!(folder.ext(), "", "a folder has no extension");
+        assert_eq!((plain.stem(), folder.stem()), ("notes", "a.d"));
     }
 
     #[test]

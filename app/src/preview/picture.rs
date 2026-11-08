@@ -124,11 +124,7 @@ pub fn svg(p: &Path, options: Options) -> Reply {
     let (tw, th) = (((w * scale).ceil() as u32).max(1), ((h * scale).ceil() as u32).max(1));
     let Some(mut pixmap) = tiny_skia::Pixmap::new(tw, th) else { return failed("This SVG has an impossible size") };
     resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
-    let mut rgba = Vec::with_capacity(pixmap.pixels().len() * 4);
-    for c in pixmap.pixels() {
-        let c = c.demultiply();
-        rgba.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
-    }
+    let rgba = pixmap.take_demultiplied();
     (Loaded::Image([w.round() as u32, h.round() as u32]), Some(Picture { size: [tw, th], delays: Vec::new(), rgba }))
 }
 

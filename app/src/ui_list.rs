@@ -815,11 +815,7 @@ impl App {
                         icons::entry(&p, ir, e.kind, e.ext(), pal.dark, false);
                     }
                     if !renaming {
-                        let name = if !self.st.show_extensions && !e.is_dir && !e.ext().is_empty() {
-                            &e.name()[..e.name().len() - e.ext().len() - 1]
-                        } else {
-                            e.name()
-                        };
+                        let name = if self.st.show_extensions { e.name() } else { e.stem() };
                         let tx = ir.max.x + 8.0;
                         p.text(
                             pos2(tx, cr.center().y),

@@ -29,6 +29,7 @@ pub const MAX_SIDE: u32 = 2048;
 /// integrated graphics they are ordinary memory.
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
 const CACHE_ITEMS: usize = 64;
+const TOO_LARGE_KEPT: usize = 16;
 /// A preview left alone this long gives its memory back.
 const CACHE_IDLE: Duration = Duration::from_secs(60);
 /// A running job is allowed to finish, for the cache, unless it is this slow.
@@ -87,15 +88,15 @@ pub struct TextDoc {
     pub longest: usize,
     pub trimmed: bool,
     /// Colours per line; lines beyond the end of this have none.
-    pub spans: Colours,
+    pub colours: Colours,
 }
 
 impl TextDoc {
     fn bytes(&self) -> usize {
-        self.text.len() + self.lines.len() * 8 + self.spans.spans.len() * 8 + self.spans.ends.len() * 4
+        self.text.len() + self.lines.len() * 8 + self.colours.spans.len() * 8 + self.colours.ends.len() * 4
     }
 
-    pub fn new(text: String, trimmed: bool, spans: Colours) -> TextDoc {
+    pub fn new(text: String, trimmed: bool, mut colours: Colours) -> TextDoc {
         let mut lines = Vec::new();
         let mut longest = 0;
         let mut at = 0;
@@ -105,7 +106,11 @@ impl TextDoc {
             lines.push((at as u32, (at + shown.len()) as u32));
             at += line.len();
         }
-        TextDoc { text, lines, longest, trimmed, spans }
+        // These stay for as long as the preview does, and arrive with room to spare.
+        lines.shrink_to_fit();
+        colours.spans.shrink_to_fit();
+        colours.ends.shrink_to_fit();
+        TextDoc { text, lines, longest, trimmed, colours }
     }
 
     /// One row per line, or several rows per line when wrapped to `columns`.
@@ -213,6 +218,8 @@ struct Item {
 #[derive(Default)]
 struct Cache {
     items: Vec<Item>,
+    /// The last few too large to remember, so that reading ahead does not keep redoing them.
+    too_large: VecDeque<Key>,
 }
 
 impl Cache {
@@ -233,7 +240,13 @@ impl Cache {
         self.items.retain(|item| item.key != key);
         let bytes = content.bytes();
         // Remembering it would push out everything else; the shown copy stays on screen.
-        if bytes > CACHE_BYTES / 2 { return; }
+        if bytes > CACHE_BYTES / 2 {
+            if !self.too_large.contains(&key) {
+                if self.too_large.len() == TOO_LARGE_KEPT { self.too_large.pop_front(); }
+                self.too_large.push_back(key);
+            }
+            return;
+        }
         self.items.push(Item { key, content, bytes, used: Instant::now() });
         let mut total: usize = self.items.iter().map(|item| item.bytes).sum();
         while self.items.len() > CACHE_ITEMS || total > CACHE_BYTES {
@@ -241,8 +254,17 @@ impl Cache {
         }
     }
 
-    fn expire(&mut self) {
-        self.items.retain(|item| item.used.elapsed() < CACHE_IDLE);
+    /// Worth reading ahead of being asked for.
+    fn wanted_ahead(&self, key: &Key) -> bool {
+        key.light() && !self.contains(key) && !self.too_large.contains(key)
+    }
+
+    /// What is on screen counts as being used.
+    fn expire(&mut self, shown: Option<&Key>) {
+        self.items.retain_mut(|item| {
+            if shown == Some(&item.key) { item.used = Instant::now(); }
+            item.used.elapsed() < CACHE_IDLE
+        });
     }
 }
 
@@ -342,7 +364,7 @@ fn frames_of(p: &Picture, ctx: &egui::Context) -> Frames {
 
 fn content_of((loaded, picture): Reply, ctx: &egui::Context) -> PreviewContent {
     match (loaded, picture) {
-        (Loaded::Text { text, trimmed, spans }, _) => PreviewContent::Text(Arc::new(TextDoc::new(text, trimmed, spans))),
+        (Loaded::Text { text, trimmed, colours }, _) => PreviewContent::Text(Arc::new(TextDoc::new(text, trimmed, colours))),
         (Loaded::Image(orig), Some(p)) => picture_content(p, orig, ctx),
         (Loaded::Model(orig), Some(p)) => PreviewContent::Model(texture(&p.rgba, p.size, ctx), orig),
         (Loaded::Page { orig, page, pages }, Some(p)) => PreviewContent::Page { texture: texture(&p.rgba, p.size, ctx), orig, page, pages },
@@ -420,7 +442,7 @@ impl Preview {
 
     /// Lets go of what has not been looked at for a while.
     pub fn expire(&mut self) {
-        self.cache.expire();
+        self.cache.expire(self.key.as_ref());
     }
 
     #[cfg(test)]
@@ -515,7 +537,7 @@ impl App {
             return;
         }
         preview.prefetched = preview.key.clone();
-        let jobs = neighbours.into_iter().filter(|k| k.light() && !preview.cache.contains(k))
+        let jobs = neighbours.into_iter().filter(|k| preview.cache.wanted_ahead(k))
             .map(|key| Job { key, ctx: ctx.clone(), prefetch: true }).collect();
         preview.send(1, jobs);
     }
@@ -591,6 +613,7 @@ mod tests {
         let huge = Arc::new(TextDoc::new("x".repeat(CACHE_BYTES), false, Colours::default()));
         cache.insert(key("huge"), PreviewContent::Text(huge));
         assert!(!cache.contains(&key("huge")), "an oversized preview is not remembered");
+        assert!(!cache.wanted_ahead(&key("huge")), "or read ahead again");
         assert!(cache.contains(&key("f5")), "and does not push out the others");
     }
 
@@ -599,10 +622,13 @@ mod tests {
         let mut cache = Cache::default();
         cache.insert(key("old"), PreviewContent::Hex(Arc::default(), 0));
         cache.insert(key("new"), PreviewContent::Hex(Arc::default(), 0));
+        cache.insert(key("shown"), PreviewContent::Hex(Arc::default(), 0));
         cache.items[0].used = Instant::now() - CACHE_IDLE;
-        cache.expire();
+        cache.items[2].used = Instant::now() - CACHE_IDLE;
+        cache.expire(Some(&key("shown")));
         assert!(!cache.contains(&key("old")));
         assert!(cache.contains(&key("new")));
+        assert!(cache.contains(&key("shown")), "what is on screen stays");
     }
 
     #[test]

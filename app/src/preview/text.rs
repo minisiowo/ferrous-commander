@@ -60,8 +60,8 @@ pub fn load(p: &Path, ext: &str, len: u64) -> Loaded {
         let (blocks, cut) = markdown(&text);
         return Loaded::Doc { blocks, source: Some(text), trimmed: trimmed || cut };
     }
-    let spans = colours(&text, ext, COLOUR_BUDGET);
-    Loaded::Text { text, trimmed, spans }
+    let colours = colours(&text, ext, COLOUR_BUDGET);
+    Loaded::Text { text, trimmed, colours }
 }
 
 fn syntaxes() -> &'static syntect::parsing::SyntaxSet {
@@ -115,8 +115,6 @@ fn colours(text: &str, ext: &str, budget: Duration) -> Colours {
         }
         colours.ends.push(colours.spans.len() as u32);
     }
-    colours.spans.shrink_to_fit();
-    colours.ends.shrink_to_fit();
     colours
 }
 

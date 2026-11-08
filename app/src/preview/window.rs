@@ -710,7 +710,7 @@ fn class_color(class: u8, pal: Palette) -> Color32 {
 fn coloured_row(doc: &TextDoc, line: u32, start: u32, end: u32, font: &FontId, pal: Palette) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let format = |color| egui::TextFormat::simple(font.clone(), color);
-    let Some(spans) = doc.spans.line(line as usize) else {
+    let Some(spans) = doc.colours.line(line as usize) else {
         job.append(&doc.text[start as usize..end as usize], 0.0, format(pal.text));
         return job;
     };
