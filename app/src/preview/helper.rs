@@ -10,12 +10,14 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::load::{self, Loaded, Picture, Reply};
+use super::load::{self, Loaded, Options, Picture, Reply};
 
 pub const FLAG: &str = "--preview-helper";
 const MAX_PATH_BYTES: usize = 256 * 1024;
 const MAX_HEADER_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SIDE_ACCEPTED: u32 = 16384;
+const MAX_FRAMES_ACCEPTED: usize = 1024;
+const MAX_PIXEL_BYTES: usize = 1 << 31;
 /// The helper ends itself if one file takes this long, even with nobody left to kill it.
 const SELF_LIMIT_SECONDS: u64 = 30;
 
@@ -65,29 +67,42 @@ fn invalid(what: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, what)
 }
 
-fn write_request(to: &mut impl Write, path: &Path, max_side: u32) -> io::Result<()> {
+fn write_request(to: &mut impl Write, path: &Path, options: Options) -> io::Result<()> {
     let bytes = path_bytes(path);
-    to.write_all(&max_side.to_le_bytes())?;
+    to.write_all(&options.max_side.to_le_bytes())?;
+    to.write_all(&options.page.to_le_bytes())?;
+    let [l, t, r, b] = options.crop.unwrap_or([0; 4]);
+    for v in [l, t, r, b] { to.write_all(&v.to_le_bytes())?; }
     to.write_all(&(bytes.len() as u32).to_le_bytes())?;
     to.write_all(&bytes)?;
     to.flush()
 }
 
-fn read_request(from: &mut impl Read) -> io::Result<(PathBuf, u32)> {
-    let max_side = read_u32(from)?;
+fn read_request(from: &mut impl Read) -> io::Result<(PathBuf, Options)> {
+    let (max_side, page) = (read_u32(from)?, read_u32(from)?);
+    let mut raw = [0; 8];
+    from.read_exact(&mut raw)?;
+    let crop: [u16; 4] = std::array::from_fn(|i| u16::from_le_bytes([raw[i * 2], raw[i * 2 + 1]]));
     let len = read_u32(from)? as usize;
     if len > MAX_PATH_BYTES { return Err(invalid("path too long")); }
-    Ok((path_from(read_bytes(from, len)?), max_side))
+    let options = Options { max_side, page, crop: (crop != [0; 4]).then_some(crop) };
+    Ok((path_from(read_bytes(from, len)?), options))
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Header {
     loaded: Loaded,
     size: Option<[u32; 2]>,
+    #[serde(default)]
+    delays: Vec<u32>,
 }
 
 fn write_reply(to: &mut impl Write, (loaded, picture): &Reply) -> io::Result<()> {
-    let header = serde_json::to_vec(&serde_json::json!({ "loaded": loaded, "size": picture.as_ref().map(|p| p.size) }))?;
+    let header = serde_json::to_vec(&serde_json::json!({
+        "loaded": loaded,
+        "size": picture.as_ref().map(|p| p.size),
+        "delays": picture.as_ref().map(|p| p.delays.clone()).unwrap_or_default(),
+    }))?;
     to.write_all(&(header.len() as u32).to_le_bytes())?;
     to.write_all(&header)?;
     if let Some(p) = picture { to.write_all(&p.rgba)?; }
@@ -101,7 +116,10 @@ fn read_reply(from: &mut impl Read) -> io::Result<Reply> {
     let picture = match header.size {
         Some([w, h]) => {
             if w == 0 || h == 0 || w > MAX_SIDE_ACCEPTED || h > MAX_SIDE_ACCEPTED { return Err(invalid("bad picture size")); }
-            Some(Picture { size: [w, h], rgba: read_bytes(from, w as usize * h as usize * 4)? })
+            if header.delays.len() > MAX_FRAMES_ACCEPTED { return Err(invalid("too many frames")); }
+            let bytes = w as usize * h as usize * 4 * header.delays.len().max(1);
+            if bytes > MAX_PIXEL_BYTES { return Err(invalid("too many pixels")); }
+            Some(Picture { size: [w, h], delays: header.delays, rgba: read_bytes(from, bytes)? })
         }
         None => None,
     };
@@ -138,9 +156,9 @@ pub fn serve() {
     });
     let (stdin, stdout) = (io::stdin(), io::stdout());
     let (mut input, mut output) = (stdin.lock(), BufWriter::with_capacity(1 << 20, stdout.lock()));
-    while let Ok((path, max_side)) = read_request(&mut input) {
+    while let Ok((path, options)) = read_request(&mut input) {
         WORKING_SINCE.store(start.elapsed().as_secs() + 1, Ordering::Relaxed);
-        let reply = load::load(&path, max_side);
+        let reply = load::load(&path, options);
         WORKING_SINCE.store(0, Ordering::Relaxed);
         if write_reply(&mut output, &reply).is_err() { return; }
     }
@@ -198,7 +216,7 @@ pub fn ask(
     running: &mut Option<Helper>,
     start: fn() -> io::Result<Helper>,
     path: &Path,
-    max_side: u32,
+    options: Options,
     limit: Duration,
     stale: &dyn Fn() -> bool,
 ) -> Option<Reply> {
@@ -210,7 +228,7 @@ pub fn ask(
         }
     }
     let helper = running.as_mut()?;
-    if write_request(&mut helper.stdin, path, max_side).is_err() {
+    if write_request(&mut helper.stdin, path, options).is_err() {
         *running = None;
         return failed(FAILED);
     }
@@ -240,6 +258,8 @@ pub fn ask(
 mod tests {
     use super::*;
 
+    const ANY: Options = Options { max_side: 64, page: 0, crop: None };
+
     fn frame(reply: &Reply) -> Vec<u8> {
         let mut bytes = Vec::new();
         write_reply(&mut bytes, reply).unwrap();
@@ -250,21 +270,30 @@ mod tests {
     fn requests_and_replies_survive_the_pipe() {
         let path = Path::new("/tmp/zażółć file.pdf");
         let mut bytes = Vec::new();
-        write_request(&mut bytes, path, 2048).unwrap();
-        assert_eq!(read_request(&mut bytes.as_slice()).unwrap(), (path.to_path_buf(), 2048));
-        let reply: Reply = (Loaded::Image([9, 9]), Some(Picture { size: [2, 1], rgba: vec![7; 8] }));
+        let options = Options { max_side: 2048, page: 3, crop: Some([1, 2, 3, 4]) };
+        write_request(&mut bytes, path, options).unwrap();
+        assert_eq!(read_request(&mut bytes.as_slice()).unwrap(), (path.to_path_buf(), options));
+        let mut bytes = Vec::new();
+        write_request(&mut bytes, path, ANY).unwrap();
+        assert_eq!(read_request(&mut bytes.as_slice()).unwrap().1, ANY);
+        let reply: Reply = (Loaded::Image([9, 9]), Some(Picture { size: [2, 1], delays: Vec::new(), rgba: vec![7; 8] }));
         let (loaded, picture) = read_reply(&mut frame(&reply).as_slice()).unwrap();
         assert!(matches!(loaded, Loaded::Image([9, 9])));
         assert_eq!(picture.unwrap().rgba, vec![7; 8]);
-        let text: Reply = (Loaded::Text("żółw".into(), true), None);
-        assert!(matches!(read_reply(&mut frame(&text).as_slice()).unwrap(), (Loaded::Text(t, true), None) if t == "żółw"));
+        let animation: Reply = (Loaded::Image([2, 1]), Some(Picture { size: [2, 1], delays: vec![50, 60], rgba: vec![1; 16] }));
+        let picture = read_reply(&mut frame(&animation).as_slice()).unwrap().1.unwrap();
+        assert_eq!((picture.delays, picture.rgba.len()), (vec![50, 60], 16));
+        let text: Reply = (Loaded::Text { text: "żółw".into(), trimmed: true, spans: vec![vec![(7, 1)]] }, None);
+        assert!(matches!(read_reply(&mut frame(&text).as_slice()).unwrap(), (Loaded::Text { text, trimmed: true, .. }, None) if text == "żółw"));
     }
 
     #[test]
     fn replies_that_lie_are_refused() {
-        let reply: Reply = (Loaded::Binary, Some(Picture { size: [100000, 100000], rgba: Vec::new() }));
+        let reply: Reply = (Loaded::Detail, Some(Picture { size: [100000, 100000], delays: Vec::new(), rgba: Vec::new() }));
         assert!(read_reply(&mut frame(&reply).as_slice()).is_err(), "impossible picture size");
-        let short: Reply = (Loaded::Binary, Some(Picture { size: [2, 2], rgba: vec![0; 4] }));
+        let many: Reply = (Loaded::Detail, Some(Picture { size: [16000, 16000], delays: vec![1; 1000], rgba: Vec::new() }));
+        assert!(read_reply(&mut frame(&many).as_slice()).is_err(), "too much memory promised");
+        let short: Reply = (Loaded::Detail, Some(Picture { size: [2, 2], delays: Vec::new(), rgba: vec![0; 4] }));
         assert!(read_reply(&mut frame(&short).as_slice()).is_err(), "fewer pixels than promised");
         assert!(read_reply(&mut u32::MAX.to_le_bytes().as_slice()).is_err(), "oversized header");
         let mut garbage = 3u32.to_le_bytes().to_vec();
@@ -285,7 +314,7 @@ mod tests {
         let mut running = None;
         let dying = || shell("exit 3");
         let never_stale = || false;
-        let reply = ask(&mut running, dying, Path::new("/x"), 64, Duration::from_secs(5), &never_stale).unwrap();
+        let reply = ask(&mut running, dying, Path::new("/x"), ANY, Duration::from_secs(5), &never_stale).unwrap();
         assert!(matches!(reply.0, Loaded::Error(ref m) if m == FAILED));
         assert!(running.is_none(), "the next file starts a new helper");
     }
@@ -296,12 +325,12 @@ mod tests {
         let stuck = || shell("sleep 30");
         let never_stale = || false;
         let mut running = None;
-        let reply = ask(&mut running, stuck, Path::new("/x"), 64, Duration::from_millis(50), &never_stale).unwrap();
+        let reply = ask(&mut running, stuck, Path::new("/x"), ANY, Duration::from_millis(50), &never_stale).unwrap();
         assert!(matches!(reply.0, Loaded::Error(ref m) if m.contains("too long")));
         assert!(running.is_none());
         let stale = || true;
         let started = Instant::now();
-        assert!(ask(&mut running, stuck, Path::new("/x"), 64, Duration::from_secs(20), &stale).is_none());
+        assert!(ask(&mut running, stuck, Path::new("/x"), ANY, Duration::from_secs(20), &stale).is_none());
         assert!(running.is_none());
         assert!(started.elapsed() < Duration::from_secs(2));
     }

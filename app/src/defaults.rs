@@ -38,4 +38,3 @@ pub const AGE_LUMA: f32 = 190.0;
 pub const REFRESH_MS: u64 = 600;
 pub const TOAST_MS: u64 = 6000;
 pub const HISTORY_MAX: usize = 8;
-pub const PREVIEW_TEXT_MAX: usize = 10000;

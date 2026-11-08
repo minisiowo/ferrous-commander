@@ -19,7 +19,9 @@ pub fn is_text_extension(ext: &str) -> bool {
     crate::defaults::TEXT_EXTENSIONS.contains(&ext) || EXTRA_TEXT_EXTS.contains(&ext)
 }
 /// Decoder allowlist for preview; classification can recognize more formats.
-pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tif", "tiff"];
+pub const IMAGE_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tif", "tiff", "tga", "pnm", "ppm", "pgm", "pbm", "pam", "qoi", "hdr", "dds", "exr",
+];
 const VIDEO_EXTS: &[&str] = &["mkv", "avi", "mp4", "mov", "webm", "m4v", "wmv", "mpeg", "mpg", "3gp"];
 const AUDIO_EXTS: &[&str] = &["mp3", "wav", "aiff", "flac", "aac", "m4a", "ape", "ogg", "opus", "wma"];
 const DOC_EXTS: &[&str] = &[

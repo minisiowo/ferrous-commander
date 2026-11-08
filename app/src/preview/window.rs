@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, CornerRadius, FontId, Key as K, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, ViewportBuilder, ViewportClass, ViewportCommand, ViewportId, pos2, vec2};
 
-use super::{Key, PreviewContent, TextDoc};
+use super::load::BlockKind;
+use super::text::{CLASS_COMMENT, CLASS_FUNCTION, CLASS_KEYWORD, CLASS_NUMBER, CLASS_STRING, CLASS_TAG, CLASS_TYPE};
+use super::{DocData, Key, PreviewContent, TextDoc};
 use crate::app::{Act, App};
 use crate::fsx::{self, Entry, Kind};
 use crate::icons;
@@ -25,6 +27,9 @@ const REOPEN_PAUSE: Duration = Duration::from_millis(300);
 const SIZE_LOCK: Duration = Duration::from_millis(400);
 const BAR_H: f32 = 38.0;
 const MAX_ZOOM: f32 = 32.0;
+/// Pause after zooming or moving before a sharper copy is worth making.
+const SHARPEN_AFTER: Duration = Duration::from_millis(150);
+const READING_WIDTH: f32 = 760.0;
 
 fn viewport() -> ViewportId {
     ViewportId::from_hash_of("ferrous_commander_preview")
@@ -34,6 +39,8 @@ fn viewport() -> ViewportId {
 enum Cmd {
     Close,
     Step(i32),
+    Page(i32),
+    Detail([u16; 4]),
     Open,
 }
 
@@ -47,6 +54,16 @@ struct View {
     /// Visual rows of wrapped text: (line, start, end), and the width they were made for.
     rows: Vec<(u32, u32, u32)>,
     rows_for: (usize, usize),
+    /// Show the source of a document instead of its layout.
+    source: bool,
+    laid_out: Vec<(Arc<egui::Galley>, Pos2, BlockKind)>,
+    laid_out_for: (usize, usize),
+    laid_out_height: f32,
+    moved: Option<Instant>,
+    last_look: (f32, Vec2),
+    sent: Option<[u16; 4]>,
+    wheel: f32,
+    started: Option<Instant>,
 }
 
 struct Shared {
@@ -64,6 +81,7 @@ struct Shared {
     loading: Option<Instant>,
     commands: Vec<Cmd>,
     view: View,
+    detail: Option<(egui::TextureHandle, [u16; 4])>,
 }
 
 pub struct Quick {
@@ -109,6 +127,14 @@ impl App {
                     self.preview_closed = Some(Instant::now());
                     ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
                 }
+                Cmd::Page(by) => {
+                    let last = match self.preview.content {
+                        PreviewContent::Page { pages, .. } => pages.saturating_sub(1),
+                        _ => 0,
+                    };
+                    self.preview.page = self.preview.page.saturating_add_signed(by).min(last);
+                }
+                Cmd::Detail(crop) => self.want_detail(crop, ctx),
                 Cmd::Step(by) => self.key(i, if by > 0 { K::ArrowDown } else { K::ArrowUp }, egui::Modifiers::NONE, 1),
                 Cmd::Open => {
                     if let Some(e) = self.cursor_entry(i) {
@@ -131,9 +157,13 @@ impl App {
             return;
         };
         self.want_preview(Some(Key::of(&e)), ctx);
-        let neighbours = self.panes[i].cursor.map_or_else(Vec::new, |row| {
+        let mut neighbours: Vec<Key> = self.panes[i].cursor.map_or_else(Vec::new, |row| {
             [row.wrapping_sub(1), row + 1].into_iter().filter_map(|r| self.entry_at(i, r)).filter(|n| !n.is_dir).map(Key::of).collect()
         });
+        if let PreviewContent::Page { page, pages, .. } = self.preview.content {
+            let around = [page.checked_sub(1), (page + 1 < pages).then_some(page + 1)];
+            neighbours.splice(0..0, around.into_iter().flatten().filter_map(|n| self.preview.page_key(n)));
+        }
         self.prefetch_preview(neighbours, ctx);
         self.hand_over(ctx, &e, i);
         let quick = self.quick.as_ref().unwrap();
@@ -182,6 +212,7 @@ impl App {
                     loading: None,
                     commands: Vec::new(),
                     view: View { zoom: 1.0, ..Default::default() },
+                    detail: None,
                 })),
                 opened: Instant::now(),
                 size,
@@ -205,6 +236,11 @@ impl App {
         }
         if s.place != place { s.place = place; changed = true; }
         s.pal = pal;
+        let detail = self.preview.detail.clone();
+        if s.detail.as_ref().map(|d| d.0.id()) != detail.as_ref().map(|d| d.0.id()) {
+            s.detail = detail;
+            changed = true;
+        }
         let waiting = matches!(self.preview.content, PreviewContent::Loading);
         if waiting {
             if s.loading.is_none() {
@@ -217,7 +253,7 @@ impl App {
             s.previous = Some(old);
             s.switched = Instant::now();
             s.loading = None;
-            s.view = View { zoom: 1.0, wrap: s.view.wrap, ..Default::default() };
+            s.view = View { zoom: 1.0, wrap: s.view.wrap, source: s.view.source, ..Default::default() };
             changed = true;
         }
         if changed { ctx.request_repaint_of(viewport()); }
@@ -245,6 +281,8 @@ fn keys(ctx: &egui::Context, s: &mut Shared, page: f32) {
             K::Enter if !repeat => s.send(Cmd::Open, ctx),
             K::ArrowDown => s.send(Cmd::Step(1), ctx),
             K::ArrowUp => s.send(Cmd::Step(-1), ctx),
+            K::ArrowRight => s.send(Cmd::Page(1), ctx),
+            K::ArrowLeft => s.send(Cmd::Page(-1), ctx),
             K::PageDown => s.view.scroll_to = Some(s.view.offset + page),
             K::PageUp => s.view.scroll_to = Some((s.view.offset - page).max(0.0)),
             K::Home => s.view.scroll_to = Some(0.0),
@@ -253,6 +291,7 @@ fn keys(ctx: &egui::Context, s: &mut Shared, page: f32) {
             K::Minus => zoom_by(&mut s.view, 0.8),
             K::Num0 => { s.view.zoom = 1.0; s.view.pan = Vec2::ZERO; }
             K::W if !repeat => { s.view.wrap = !s.view.wrap; s.view.rows_for = (0, 0); }
+            K::M if !repeat => { s.view.source = !s.view.source; s.view.rows_for = (0, 0); }
             _ => {}
         }
     }
@@ -276,7 +315,7 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
     ui.painter().rect_filled(body, CornerRadius::ZERO, blend(pal.window, pal.inactive, 0.5));
     let t = (s.switched.elapsed().as_secs_f32() / SWITCH_SECONDS).min(1.0);
     if t < 1.0 { ctx.request_repaint(); } else { s.previous = None; }
-    if let Some(PreviewContent::Image(tex, orig, _)) = &s.previous {
+    if let Some(PreviewContent::Image(tex, orig, _) | PreviewContent::Page { texture: tex, orig, .. }) = &s.previous {
         let r = image_rect(body, *orig, 1.0, Vec2::ZERO, ctx.pixels_per_point());
         ui.painter_at(body).image(tex.id(), r, unit_uv(), Color32::WHITE.gamma_multiply(1.0 - t));
     }
@@ -286,14 +325,34 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
     let content = s.content.clone();
     match &content {
         PreviewContent::Text(doc) => text_view(&mut child, s, doc, body),
-        PreviewContent::Image(tex, orig, alpha) => image_view(&mut child, s, tex, *orig, *alpha, body),
+        PreviewContent::Image(tex, orig, alpha) => {
+            let sharpen = tex.size()[0] < orig[0] as usize;
+            image_view(&mut child, s, tex, *orig, *alpha, body, sharpen, false);
+        }
+        PreviewContent::Page { texture, orig, .. } => image_view(&mut child, s, texture, *orig, false, body, true, true),
+        PreviewContent::Animation(frames, orig) => {
+            let total: u32 = frames.iter().map(|f| f.1).sum::<u32>().max(1);
+            let started = *s.view.started.get_or_insert_with(Instant::now);
+            let mut at = (started.elapsed().as_millis() % total as u128) as u32;
+            let (tex, left) = frames.iter().find_map(|(tex, ms)| {
+                if at < *ms { return Some((tex, *ms - at)); }
+                at -= ms;
+                None
+            }).unwrap_or((&frames[0].0, 20));
+            ctx.request_repaint_after(Duration::from_millis(left as u64));
+            image_view(&mut child, s, tex, *orig, true, body, false, false);
+        }
+        PreviewContent::Doc(doc) => match (&doc.source, s.view.source) {
+            (Some(source), true) => text_view(&mut child, s, source, body),
+            _ => doc_view(&mut child, s, doc, body),
+        },
+        PreviewContent::Hex(bytes, total) => hex_view(&mut child, s, bytes, *total, body),
         PreviewContent::Folder { folders, files, size } => {
             let text = format!("{folders} folders, {files} files\n{}", fsx::fmt_size(*size, false));
             card(&child, s, body, &text);
         }
-        PreviewContent::Binary => card(&child, s, body, "No preview for this kind of file"),
         PreviewContent::Error(message) => card(&child, s, body, message),
-        PreviewContent::None | PreviewContent::Loading => {}
+        PreviewContent::Detail(_) | PreviewContent::None | PreviewContent::Loading => {}
     }
     if let Some(since) = s.loading {
         if since.elapsed() >= SPINNER_AFTER {
@@ -303,7 +362,9 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
             ctx.request_repaint_after(SPINNER_AFTER);
         }
     }
-    control_bar(ui, s, body, &ctx, matches!(content, PreviewContent::Image(..)));
+    let zoomable = matches!(content, PreviewContent::Image(..) | PreviewContent::Page { .. } | PreviewContent::Animation(..));
+    let pages = if let PreviewContent::Page { page, pages, .. } = content { Some((page, pages)) } else { None };
+    control_bar(ui, s, body, &ctx, zoomable, pages);
     if cfg!(windows) { ui.painter().rect_stroke(full, CornerRadius::ZERO, Stroke::new(1.0, pal.border), egui::StrokeKind::Inside); }
 }
 
@@ -362,11 +423,29 @@ fn checkerboard(ui: &Ui, r: Rect, clip: Rect, pal: Palette) {
     }
 }
 
-fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32; 2], alpha: bool, body: Rect) {
+/// Normalised part of `r` that lies inside the frame.
+fn visible_part(r: Rect, frame: Rect) -> [u16; 4] {
+    let seen = r.intersect(frame);
+    let along = |v: f32| (v.clamp(0.0, 1.0) * 65535.0) as u16;
+    [along((seen.min.x - r.min.x) / r.width()), along((seen.min.y - r.min.y) / r.height()), along((seen.max.x - r.min.x) / r.width()), along((seen.max.y - r.min.y) / r.height())]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32; 2], alpha: bool, body: Rect, sharpen: bool, paged: bool) {
     let response = ui.interact(body, ui.scope_id().with("preview_image"), Sense::click_and_drag());
     let (wheel, pinch, hover) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta(), i.pointer.hover_pos()));
     let before = s.view.zoom;
-    if response.contains_pointer() && (wheel != 0.0 || pinch != 1.0) {
+    let over = response.contains_pointer();
+    if over && paged && pinch == 1.0 && before <= 1.0 {
+        // At fit size a document's wheel turns pages, as it would scroll through them.
+        s.view.wheel += wheel;
+        if s.view.wheel.abs() >= 40.0 {
+            s.send(Cmd::Page(if s.view.wheel > 0.0 { -1 } else { 1 }), &ui.ctx().clone());
+            s.view.wheel = 0.0;
+        }
+    } else if over && paged && pinch == 1.0 {
+        s.view.pan.y += wheel;
+    } else if over && (wheel != 0.0 || pinch != 1.0) {
         s.view.zoom = (s.view.zoom * pinch * (wheel * 0.002).exp()).clamp(1.0, MAX_ZOOM);
         if let Some(at) = hover {
             let from_center = at - body.center() - s.view.pan;
@@ -376,12 +455,42 @@ fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32
     if response.dragged() { s.view.pan += response.drag_delta(); }
     if response.double_clicked() { s.view.zoom = 1.0; s.view.pan = Vec2::ZERO; }
     let ppp = ui.ctx().pixels_per_point();
-    let fitted = image_rect(body, orig, s.view.zoom, Vec2::ZERO, ppp);
+    let fit_frame = image_rect(body, orig, s.view.zoom, Vec2::ZERO, ppp);
+    // Drawn larger than its nominal size means vector art, which has no size of its own.
+    let fitted = if paged || tex.size()[0] > orig[0] as usize { page_rect(body, orig, s.view.zoom) } else { fit_frame };
     let spare = ((fitted.size() - body.size()) / 2.0).max(Vec2::ZERO);
     s.view.pan = s.view.pan.clamp(-spare, spare);
     let r = fitted.translate(s.view.pan);
     if alpha { checkerboard(ui, r, body, s.pal); }
-    ui.painter_at(body).image(tex.id(), r, unit_uv(), Color32::WHITE);
+    let p = ui.painter_at(body);
+    p.image(tex.id(), r, unit_uv(), Color32::WHITE);
+    if s.view.zoom > 1.0 && let Some((detail, [l, t, cr, cb])) = &s.detail {
+        let at = |x: u16, y: u16| r.min + vec2(x as f32 / 65535.0 * r.width(), y as f32 / 65535.0 * r.height());
+        p.image(detail.id(), Rect::from_min_max(at(*l, *t), at(*cr, *cb)), unit_uv(), Color32::WHITE);
+    }
+    let look = (s.view.zoom, s.view.pan);
+    if s.view.last_look != look {
+        s.view.last_look = look;
+        s.view.moved = Some(Instant::now());
+    }
+    let coarse = r.width() * ppp > tex.size()[0] as f32 * 1.05;
+    if sharpen && coarse && let Some(moved) = s.view.moved {
+        let crop = visible_part(r, body);
+        if moved.elapsed() < SHARPEN_AFTER {
+            ui.ctx().request_repaint_after(SHARPEN_AFTER);
+        } else if s.view.sent != Some(crop) {
+            s.view.sent = Some(crop);
+            s.send(Cmd::Detail(crop), &ui.ctx().clone());
+        }
+    }
+}
+
+/// A document page fills the frame, because its size in points says nothing about the screen.
+fn page_rect(frame: Rect, orig: [u32; 2], zoom: f32) -> Rect {
+    let size = vec2(orig[0].max(1) as f32, orig[1].max(1) as f32);
+    let area = frame.shrink(12.0);
+    let fit = (area.width() / size.x).min(area.height() / size.y);
+    Rect::from_center_size(frame.center(), size * fit * zoom)
 }
 
 fn card(ui: &Ui, s: &Shared, body: Rect, message: &str) {
@@ -392,6 +501,36 @@ fn card(ui: &Ui, s: &Shared, body: Rect, message: &str) {
     let g = p.layout(message.to_owned(), FontId::proportional(14.0), s.pal.text_weak, body.width() - 80.0);
     let at = pos2(body.center().x - g.size().x / 2.0, icon.max.y + 18.0);
     p.galley(at, g, s.pal.text_weak);
+}
+
+fn class_color(class: u8, pal: Palette) -> Color32 {
+    match class {
+        CLASS_COMMENT => pal.text_weak,
+        CLASS_STRING => pal.text_important,
+        CLASS_NUMBER => blend(pal.accent, pal.text, 0.45),
+        CLASS_KEYWORD => pal.accent,
+        CLASS_FUNCTION => blend(pal.text, pal.accent, 0.35),
+        CLASS_TYPE => blend(pal.text, pal.text_important, 0.55),
+        CLASS_TAG => blend(pal.accent, pal.text_important, 0.5),
+        _ => pal.text,
+    }
+}
+
+/// The coloured pieces of `start..end`, a stretch of one line.
+fn coloured_row(doc: &TextDoc, line: u32, start: u32, end: u32, font: &FontId, pal: Palette) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let format = |color| egui::TextFormat::simple(font.clone(), color);
+    let Some(spans) = doc.spans.get(line as usize) else {
+        job.append(&doc.text[start as usize..end as usize], 0.0, format(pal.text));
+        return job;
+    };
+    let mut at = doc.lines[line as usize].0;
+    for &(len, class) in spans {
+        let (from, to) = (at.max(start), (at + len).min(end));
+        if from < to { job.append(&doc.text[from as usize..to as usize], 0.0, format(class_color(class, pal))); }
+        at += len;
+    }
+    job
 }
 
 /// Only visible rows are laid out, so a large file costs the same as a small one.
@@ -406,24 +545,23 @@ fn text_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<TextDoc>, body: Rect) {
     let view_w = body.width() - text_x - 16.0;
     let columns = ((view_w / char_w) as usize).max(10);
     let wrap = s.view.wrap;
-    let key = (if wrap { columns } else { 1 }, doc.text.len() + 1);
+    let key = (if wrap { columns } else { 1 }, Arc::as_ptr(doc) as usize);
     if s.view.rows_for != key {
         s.view.rows = doc.rows(wrap.then_some(columns));
         s.view.rows_for = key;
     }
     let rows = std::mem::take(&mut s.view.rows);
-    let content_w = if wrap { view_w } else { doc.longest as f32 * char_w } + text_x + 16.0;
+    let content_w = if wrap { view_w } else { doc.longest.min(100_000) as f32 * char_w } + text_x + 16.0;
     let mut area = egui::ScrollArea::both().id_salt("preview_text").auto_shrink(false);
     if let Some(y) = s.view.scroll_to.take() { area = area.vertical_scroll_offset(y); }
-    let footer = doc.trimmed as usize;
-    let total = rows.len() + footer;
+    let total = rows.len() + doc.trimmed as usize;
     let output = area.show_rows(ui, row_h, total, |ui, range| {
         ui.set_min_width(content_w);
         let top = ui.min_rect().min;
         let n = range.len() as f32;
-        let (r, _) = ui.allocate_exact_size(vec2(content_w, n * (row_h + ui.spacing().item_spacing.y) - ui.spacing().item_spacing.y), Sense::hover());
-        let p = ui.painter_at(r.expand(2.0));
         let step = row_h + ui.spacing().item_spacing.y;
+        let (r, _) = ui.allocate_exact_size(vec2(content_w, n * step - ui.spacing().item_spacing.y), Sense::hover());
+        let p = ui.painter_at(r.expand(2.0));
         let mut last = None;
         for (at, row) in range.enumerate() {
             let y = top.y + at as f32 * step + row_h / 2.0;
@@ -435,21 +573,113 @@ fn text_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<TextDoc>, body: Rect) {
                 p.text(pos2(top.x + gutter - 6.0, y), Align2::RIGHT_CENTER, (line + 1).to_string(), font.clone(), blend(pal.text_weak, pal.panel, 0.35));
             }
             last = Some(line);
-            let piece = &doc.text[start as usize..end as usize];
-            p.text(pos2(top.x + text_x, y), Align2::LEFT_CENTER, piece, font.clone(), pal.text);
+            // One enormous line costs a whole frame to lay out; nobody scrolls that far right.
+            let end = doc.text.floor_char_boundary((end as usize).min(start as usize + 20_000)) as u32;
+            let galley = p.layout_job(coloured_row(doc, line, start, end, &font, pal));
+            p.galley(pos2(top.x + text_x, y - galley.size().y / 2.0), galley, pal.text);
         }
     });
     s.view.offset = output.state.clamped_offset().y;
     s.view.rows = rows;
 }
 
-fn control_bar(ui: &mut Ui, s: &mut Shared, body: Rect, ctx: &egui::Context, image: bool) {
+/// Sized once per width; only the blocks on screen are painted.
+fn doc_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<DocData>, body: Rect) {
+    let pal = s.pal;
+    let width = (body.width() - 64.0).min(READING_WIDTH).max(120.0);
+    let left = (body.width() - width) / 2.0;
+    let key = (width as usize, Arc::as_ptr(doc) as usize);
+    if s.view.laid_out_for != key {
+        s.view.laid_out_for = key;
+        let p = ui.painter();
+        let (mut y, mut laid) = (24.0, Vec::with_capacity(doc.blocks.len()));
+        for block in &doc.blocks {
+            let (font, color, indent, before, after) = match block.kind {
+                BlockKind::H1 => (FontId::proportional(26.0), pal.text, 0.0, 14.0, 10.0),
+                BlockKind::H2 => (FontId::proportional(21.0), pal.text, 0.0, 12.0, 8.0),
+                BlockKind::H3 => (FontId::proportional(17.0), pal.text, 0.0, 10.0, 6.0),
+                BlockKind::Paragraph => (FontId::proportional(15.0), pal.text, 0.0, 0.0, 10.0),
+                BlockKind::Quote => (FontId::proportional(15.0), pal.text_weak, 16.0, 0.0, 10.0),
+                BlockKind::Code => (FontId::monospace(13.0), pal.text, 12.0, 2.0, 10.0),
+                BlockKind::Item => (FontId::proportional(15.0), pal.text, 18.0, 0.0, 4.0),
+                BlockKind::Rule => (FontId::proportional(6.0), pal.text_weak, 0.0, 6.0, 12.0),
+            };
+            y += before;
+            let galley = p.layout(block.text.clone(), font, color, width - indent * 2.0);
+            let height = galley.size().y;
+            laid.push((galley, pos2(indent, y), block.kind));
+            y += height + after;
+        }
+        if doc.trimmed {
+            let note = p.layout("Only the beginning of this document is shown".to_owned(), FontId::proportional(12.0), pal.text_weak, width);
+            laid.push((note, pos2(0.0, y + 8.0), BlockKind::Paragraph));
+            y += 32.0;
+        }
+        s.view.laid_out = laid;
+        s.view.laid_out_height = y + 48.0;
+    }
+    let laid = std::mem::take(&mut s.view.laid_out);
+    let height = s.view.laid_out_height;
+    let mut area = egui::ScrollArea::vertical().id_salt("preview_doc").auto_shrink(false);
+    if let Some(y) = s.view.scroll_to.take() { area = area.vertical_scroll_offset(y); }
+    let output = area.show_viewport(ui, |ui, viewport| {
+        let (r, _) = ui.allocate_exact_size(vec2(body.width(), height), Sense::hover());
+        let p = ui.painter();
+        for (galley, at, kind) in &laid {
+            let size = galley.size();
+            if at.y + size.y + 16.0 < viewport.min.y || at.y - 16.0 > viewport.max.y { continue; }
+            let pos = r.min + vec2(left + at.x, at.y);
+            match kind {
+                BlockKind::Quote => { p.rect_filled(Rect::from_min_size(pos - vec2(14.0, 0.0), vec2(3.0, size.y)), CornerRadius::same(1), pal.raised); }
+                BlockKind::Code => { p.rect_filled(Rect::from_min_size(pos - vec2(8.0, 6.0), vec2(width - at.x, size.y + 12.0)), CornerRadius::same(4), blend(pal.raised, pal.window, 0.45)); }
+                BlockKind::Item => { p.circle_filled(pos + vec2(-11.0, 10.0), 2.5, pal.text_weak); }
+                BlockKind::Rule => { p.line_segment([pos, pos + vec2(width, 0.0)], Stroke::new(1.0, pal.raised)); }
+                _ => {}
+            }
+            p.galley(pos, galley.clone(), pal.text);
+        }
+    });
+    s.view.offset = output.state.clamped_offset().y;
+    s.view.laid_out = laid;
+}
+
+fn hex_view(ui: &mut Ui, s: &mut Shared, bytes: &[u8], total: u64, body: Rect) {
+    let pal = s.pal;
+    let font = FontId::monospace(13.0);
+    let row_h = (ui.ctx().fonts_mut(|f| f.row_height(&font)) + 3.0).round();
+    let rows = bytes.len().div_ceil(16);
+    let cut = (total as usize > bytes.len()) as usize;
+    let mut area = egui::ScrollArea::vertical().id_salt("preview_hex").auto_shrink(false);
+    if let Some(y) = s.view.scroll_to.take() { area = area.vertical_scroll_offset(y); }
+    let output = area.show_rows(ui, row_h, rows + cut, |ui, range| {
+        ui.add_space(0.0);
+        let top = ui.min_rect().min;
+        let step = row_h + ui.spacing().item_spacing.y;
+        let (r, _) = ui.allocate_exact_size(vec2(body.width() - 16.0, range.len() as f32 * step), Sense::hover());
+        let p = ui.painter_at(r.expand(2.0));
+        for (at, row) in range.enumerate() {
+            let y = top.y + at as f32 * step + row_h / 2.0;
+            let Some(chunk) = bytes.chunks(16).nth(row) else {
+                p.text(pos2(top.x + 16.0, y), Align2::LEFT_CENTER, format!("Only the first {} of this file is shown", fsx::fmt_size(bytes.len() as u64, false)), FontId::proportional(12.0), pal.text_weak);
+                continue;
+            };
+            p.text(pos2(top.x + 16.0, y), Align2::LEFT_CENTER, format!("{:08x}", row * 16), font.clone(), pal.text_weak);
+            let hex: Vec<String> = chunk.iter().enumerate().map(|(i, b)| if i == 8 { format!(" {b:02x}") } else { format!("{b:02x}") }).collect();
+            p.text(pos2(top.x + 110.0, y), Align2::LEFT_CENTER, hex.join(" "), font.clone(), pal.text);
+            let ascii: String = chunk.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '·' }).collect();
+            p.text(pos2(top.x + 520.0, y), Align2::LEFT_CENTER, ascii, font.clone(), pal.text_weak);
+        }
+    });
+    s.view.offset = output.state.clamped_offset().y;
+}
+
+fn control_bar(ui: &mut Ui, s: &mut Shared, body: Rect, ctx: &egui::Context, image: bool, pages: Option<(u32, u32)>) {
     let moved = ui.input(|i| i.pointer.time_since_last_movement() < 2.0 && i.pointer.has_pointer());
     let opacity = ctx.animate_bool_with_time(ui.scope_id().with("preview_bar"), moved, 0.12);
     if moved { ctx.request_repaint_after(Duration::from_millis(2100)); }
     if opacity <= 0.0 { return; }
     let pal = s.pal;
-    let width = if image { 300.0 } else { 170.0 };
+    let width = 170.0 + if image { 130.0 } else { 0.0 } + if pages.is_some() { 110.0 } else { 0.0 };
     let r = Rect::from_center_size(pos2(body.center().x, body.max.y - 30.0), vec2(width, 36.0));
     let mut bar = ui.new_child(UiBuilder::new().max_rect(r).layout(egui::Layout::left_to_right(egui::Align::Center)));
     bar.multiply_opacity(opacity);
@@ -458,6 +688,12 @@ fn control_bar(ui: &mut Ui, s: &mut Shared, body: Rect, ctx: &egui::Context, ima
     let flat = |text: &str| egui::Button::new(egui::RichText::new(text).size(15.0)).frame(false);
     if bar.add(flat("‹")).on_hover_text("Previous file").clicked() { s.send(Cmd::Step(-1), ctx); }
     if bar.add(flat("›")).on_hover_text("Next file").clicked() { s.send(Cmd::Step(1), ctx); }
+    if let Some((page, total)) = pages {
+        bar.add_space(10.0);
+        if bar.add(flat("‹")).on_hover_text("Previous page").clicked() { s.send(Cmd::Page(-1), ctx); }
+        bar.label(egui::RichText::new(format!("{} / {total}", page + 1)).size(12.0).color(pal.text_weak));
+        if bar.add(flat("›")).on_hover_text("Next page").clicked() { s.send(Cmd::Page(1), ctx); }
+    }
     if image {
         bar.add_space(10.0);
         if bar.add(flat("−")).clicked() { zoom_by(&mut s.view, 0.8); }

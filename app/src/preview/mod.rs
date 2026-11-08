@@ -5,6 +5,9 @@
 
 pub mod helper;
 pub mod load;
+mod pdf;
+mod picture;
+pub mod text;
 pub mod window;
 
 use std::collections::VecDeque;
@@ -14,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::app::App;
 use crate::fsx::Entry;
-use load::{Loaded, Picture, Reply};
+use load::{Block, Loaded, Options, Picture, Reply, Spans};
 
 /// Longest side of a decoded picture; `MAX_TEXTURE_SIDE` in `main.rs` limits it from above.
 pub const MAX_SIDE: u32 = 2048;
@@ -37,11 +40,17 @@ pub struct Key {
     pub path: PathBuf,
     pub modified: Option<SystemTime>,
     pub size: u64,
+    pub page: u32,
+    pub crop: Option<[u16; 4]>,
 }
 
 impl Key {
+    fn options(&self) -> Options {
+        Options { max_side: MAX_SIDE, page: self.page, crop: self.crop }
+    }
+
     pub fn of(e: &Entry) -> Key {
-        Key { path: e.path.clone(), modified: e.modified, size: e.size }
+        Key { path: e.path.clone(), modified: e.modified, size: e.size, page: 0, crop: None }
     }
 }
 
@@ -53,10 +62,12 @@ pub struct TextDoc {
     /// Characters in the longest line.
     pub longest: usize,
     pub trimmed: bool,
+    /// Colours per line; lines beyond the end of this have none.
+    pub spans: Vec<Spans>,
 }
 
 impl TextDoc {
-    pub fn new(text: String, trimmed: bool) -> TextDoc {
+    pub fn new(text: String, trimmed: bool, spans: Vec<Spans>) -> TextDoc {
         let mut lines = Vec::new();
         let mut longest = 0;
         let mut at = 0;
@@ -66,7 +77,7 @@ impl TextDoc {
             lines.push((at as u32, (at + shown.len()) as u32));
             at += line.len();
         }
-        TextDoc { text, lines, longest, trimmed }
+        TextDoc { text, lines, longest, trimmed, spans }
     }
 
     /// One row per line, or several rows per line when wrapped to `columns`.
@@ -97,18 +108,33 @@ pub enum PreviewContent {
     None,
     Loading,
     Text(Arc<TextDoc>),
+    /// Frames with their durations, and the original size.
+    Animation(Arc<Vec<(egui::TextureHandle, u32)>>, [u32; 2]),
+    Page { texture: egui::TextureHandle, orig: [u32; 2], page: u32, pages: u32 },
+    /// A sharper copy of the part of the shown picture named by the job.
+    Detail(egui::TextureHandle),
+    Doc(Arc<DocData>),
+    Hex(Arc<Vec<u8>>, u64),
     /// The texture, the original size, and whether anything in it is see-through.
     Image(egui::TextureHandle, [u32; 2], bool),
     Folder { folders: usize, files: usize, size: u64 },
-    Binary,
     Error(String),
+}
+
+pub struct DocData {
+    pub blocks: Vec<Block>,
+    pub source: Option<Arc<TextDoc>>,
+    pub trimmed: bool,
 }
 
 impl PreviewContent {
     fn bytes(&self) -> usize {
         match self {
             PreviewContent::Text(t) => t.text.len() + t.lines.len() * 8,
-            PreviewContent::Image(tex, ..) => tex.byte_size(),
+            PreviewContent::Image(tex, ..) | PreviewContent::Page { texture: tex, .. } | PreviewContent::Detail(tex) => tex.byte_size(),
+            PreviewContent::Animation(frames, _) => frames.iter().map(|(tex, _)| tex.byte_size()).sum(),
+            PreviewContent::Doc(doc) => doc.blocks.iter().map(|b| b.text.len() + 32).sum(),
+            PreviewContent::Hex(bytes, _) => bytes.len(),
             _ => 64,
         }
     }
@@ -205,12 +231,12 @@ fn run_lane(slot: Arc<Slot>, results: mpsc::Sender<(Key, PreviewContent)>, start
         let reply = match start {
             Some(start) => {
                 let stale = || started.elapsed() > ABANDON_AFTER && slot.superseded(&job.key);
-                match helper::ask(&mut running, start, &job.key.path, MAX_SIDE, JOB_LIMIT, &stale) {
+                match helper::ask(&mut running, start, &job.key.path, job.key.options(), JOB_LIMIT, &stale) {
                     Some(reply) => reply,
                     None => continue,
                 }
             }
-            None => load::load(&job.key.path, MAX_SIDE),
+            None => load::load(&job.key.path, job.key.options()),
         };
         if trace() {
             eprintln!("[preview] {} loaded in {} ms", job.key.path.display(), started.elapsed().as_millis());
@@ -223,22 +249,34 @@ fn run_lane(slot: Arc<Slot>, results: mpsc::Sender<(Key, PreviewContent)>, start
     }
 }
 
-fn texture(picture: &Picture, ctx: &egui::Context) -> egui::TextureHandle {
-    let size = [picture.size[0] as usize, picture.size[1] as usize];
-    let image = egui::ColorImage::from_rgba_unmultiplied(size, &picture.rgba);
+fn texture(rgba: &[u8], size: [u32; 2], ctx: &egui::Context) -> egui::TextureHandle {
+    let image = egui::ColorImage::from_rgba_unmultiplied([size[0] as usize, size[1] as usize], rgba);
     ctx.load_texture("preview", image, egui::TextureOptions::LINEAR)
 }
 
+fn picture_content(p: Picture, orig: [u32; 2], ctx: &egui::Context) -> PreviewContent {
+    if p.delays.is_empty() {
+        return PreviewContent::Image(texture(&p.rgba, p.size, ctx), orig, p.rgba.chunks_exact(4).any(|c| c[3] < 255));
+    }
+    let frame_bytes = p.size[0] as usize * p.size[1] as usize * 4;
+    let frames = p.rgba.chunks_exact(frame_bytes).zip(&p.delays).map(|(rgba, &ms)| (texture(rgba, p.size, ctx), ms)).collect();
+    PreviewContent::Animation(Arc::new(frames), orig)
+}
+
 fn content_of((loaded, picture): Reply, ctx: &egui::Context) -> PreviewContent {
-    match loaded {
-        Loaded::Text(t, trimmed) => PreviewContent::Text(Arc::new(TextDoc::new(t, trimmed))),
-        Loaded::Image(orig) => match picture {
-            Some(p) => PreviewContent::Image(texture(&p, ctx), orig, p.rgba.chunks_exact(4).any(|c| c[3] < 255)),
-            None => PreviewContent::Error("The picture is missing".into()),
-        },
-        Loaded::Folder { folders, files, size } => PreviewContent::Folder { folders, files, size },
-        Loaded::Binary => PreviewContent::Binary,
-        Loaded::Error(e) => PreviewContent::Error(e),
+    match (loaded, picture) {
+        (Loaded::Text { text, trimmed, spans }, _) => PreviewContent::Text(Arc::new(TextDoc::new(text, trimmed, spans))),
+        (Loaded::Image(orig), Some(p)) => picture_content(p, orig, ctx),
+        (Loaded::Page { orig, page, pages }, Some(p)) => PreviewContent::Page { texture: texture(&p.rgba, p.size, ctx), orig, page, pages },
+        (Loaded::Detail, Some(p)) => PreviewContent::Detail(texture(&p.rgba, p.size, ctx)),
+        (Loaded::Image(_) | Loaded::Page { .. } | Loaded::Detail, None) => PreviewContent::Error("The picture is missing".into()),
+        (Loaded::Doc { blocks, source, trimmed }, _) => {
+            let source = source.map(|s| Arc::new(TextDoc::new(s, trimmed, Vec::new())));
+            PreviewContent::Doc(Arc::new(DocData { blocks, source, trimmed }))
+        }
+        (Loaded::Hex { bytes, total }, _) => PreviewContent::Hex(Arc::new(bytes), total),
+        (Loaded::Folder { folders, files, size }, _) => PreviewContent::Folder { folders, files, size },
+        (Loaded::Error(e), _) => PreviewContent::Error(e),
     }
 }
 
@@ -251,6 +289,9 @@ fn trace() -> bool {
 pub struct Preview {
     pub path: Option<PathBuf>,
     pub content: PreviewContent,
+    pub page: u32,
+    /// A sharper copy of part of the shown picture, and which part.
+    pub detail: Option<(egui::TextureHandle, [u16; 4])>,
     key: Option<Key>,
     cache: Cache,
     tx: mpsc::Sender<(Key, PreviewContent)>,
@@ -269,6 +310,8 @@ impl Preview {
         Preview {
             path: None,
             content: PreviewContent::None,
+            page: 0,
+            detail: None,
             key: None,
             cache: Cache::default(),
             tx,
@@ -279,6 +322,10 @@ impl Preview {
             asked: None,
             prefetched: None,
         }
+    }
+
+    pub fn page_key(&self, page: u32) -> Option<Key> {
+        self.key.clone().map(|key| Key { page, ..key })
     }
 
     pub fn key(&self) -> Option<&Key> {
@@ -297,9 +344,15 @@ impl Preview {
 
 impl App {
     /// Starts loading in this very frame, instead of waiting for the next one to happen.
-    pub fn want_preview(&mut self, key: Option<Key>, ctx: &egui::Context) {
+    pub fn want_preview(&mut self, mut key: Option<Key>, ctx: &egui::Context) {
         let preview = &mut self.preview;
+        // The listing knows files, not pages: the page belongs to the file on show.
+        match &mut key {
+            Some(k) if preview.path.as_ref() == Some(&k.path) => k.page = preview.page,
+            _ => preview.page = 0,
+        }
         if preview.key == key { return; }
+        preview.detail = None;
         preview.path = key.as_ref().map(|k| k.path.clone());
         preview.key = key.clone();
         preview.asked = Some(Instant::now());
@@ -313,6 +366,13 @@ impl App {
         }
         preview.content = PreviewContent::Loading;
         preview.send(0, vec![Job { key, ctx: ctx.clone(), prefetch: false }]);
+    }
+
+    /// Asks for a sharper copy of part of the shown picture.
+    pub fn want_detail(&mut self, crop: [u16; 4], ctx: &egui::Context) {
+        let Some(mut key) = self.preview.key.clone() else { return };
+        key.crop = Some(crop);
+        self.preview.send(0, vec![Job { key, ctx: ctx.clone(), prefetch: false }]);
     }
 
     /// Loads the files around the shown one, once the selection has settled on it.
@@ -333,6 +393,11 @@ impl App {
     pub(crate) fn receive_preview(&mut self) {
         let preview = &mut self.preview;
         while let Ok((key, content)) = preview.rx.try_recv() {
+            if let (Some(crop), PreviewContent::Detail(texture)) = (key.crop, &content) {
+                let current = preview.key.as_ref().is_some_and(|k| k.path == key.path && k.page == key.page);
+                if current { preview.detail = Some((texture.clone(), crop)); }
+                continue;
+            }
             if content.remembered() { preview.cache.insert(key.clone(), content.clone()); }
             if preview.key.as_ref() == Some(&key) {
                 if trace() && let Some(asked) = preview.asked {
@@ -349,7 +414,7 @@ mod tests {
     use super::*;
 
     fn key(name: &str) -> Key {
-        Key { path: PathBuf::from(name), modified: None, size: 0 }
+        Key { path: PathBuf::from(name), modified: None, size: 0, page: 0, crop: None }
     }
 
     fn job(name: &str, ctx: &egui::Context) -> Job {
@@ -371,20 +436,20 @@ mod tests {
     #[test]
     fn cache_keeps_recent_items_within_its_limits() {
         let mut cache = Cache::default();
-        for i in 0..CACHE_ITEMS + 5 { cache.insert(key(&format!("f{i}")), PreviewContent::Binary); }
+        for i in 0..CACHE_ITEMS + 5 { cache.insert(key(&format!("f{i}")), PreviewContent::Hex(Arc::default(), 0)); }
         assert_eq!(cache.items.len(), CACHE_ITEMS);
         assert!(!cache.contains(&key("f0")));
         assert!(cache.get(&key("f5")).is_some());
-        cache.insert(key("new"), PreviewContent::Binary);
+        cache.insert(key("new"), PreviewContent::Hex(Arc::default(), 0));
         assert!(cache.contains(&key("f5")), "using an item keeps it");
-        let huge = Arc::new(TextDoc::new("x".repeat(CACHE_BYTES), false));
+        let huge = Arc::new(TextDoc::new("x".repeat(CACHE_BYTES), false, Vec::new()));
         cache.insert(key("huge"), PreviewContent::Text(huge));
         assert_eq!(cache.items.len(), 1, "one oversized preview stays while it is shown");
     }
 
     #[test]
     fn text_rows_follow_lines_and_wrap_on_characters() {
-        let doc = TextDoc::new("żółw\r\n\nabcdef".into(), false);
+        let doc = TextDoc::new("żółw\r\n\nabcdef".into(), false, Vec::new());
         assert_eq!(doc.lines.len(), 3);
         assert_eq!(doc.longest, 6);
         let piece = |r: &(u32, u32, u32)| doc.text[r.1 as usize..r.2 as usize].to_string();
@@ -409,7 +474,7 @@ mod tests {
         app.receive_preview();
         assert!(!app.preview.cache.contains(&key("broken")));
         app.want_preview(None, &ctx);
-        app.preview.tx.send((key("old"), PreviewContent::Text(Arc::new(TextDoc::new("old".into(), false))))).unwrap();
+        app.preview.tx.send((key("old"), PreviewContent::Text(Arc::new(TextDoc::new("old".into(), false, Vec::new()))))).unwrap();
         app.receive_preview();
         assert!(matches!(app.preview.content, PreviewContent::None));
         assert!(app.preview.cache.contains(&key("old")), "a finished read still serves the next visit");
@@ -419,8 +484,8 @@ mod tests {
     fn a_remembered_file_shows_without_loading() {
         let mut app = App::new(Some(PathBuf::from("unused.png")));
         let ctx = egui::Context::default();
-        app.preview.cache.insert(key("seen"), PreviewContent::Binary);
+        app.preview.cache.insert(key("seen"), PreviewContent::Hex(Arc::default(), 0));
         app.want_preview(Some(key("seen")), &ctx);
-        assert!(matches!(app.preview.content, PreviewContent::Binary));
+        assert!(matches!(app.preview.content, PreviewContent::Hex(..)));
     }
 }

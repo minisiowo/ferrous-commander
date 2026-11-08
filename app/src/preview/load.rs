@@ -4,43 +4,87 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use super::{pdf, picture, text};
 use crate::fsx;
 
-/// Text preview length.
-pub const PREVIEW_TEXT_MAX: usize = crate::defaults::PREVIEW_TEXT_MAX;
+/// What part of a file to prepare, and how large.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Options {
+    pub max_side: u32,
+    /// Page of a document.
+    pub page: u32,
+    /// Part of the picture, as left, top, right, bottom out of 65535.
+    pub crop: Option<[u16; 4]>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlockKind { H1, H2, H3, Paragraph, Quote, Code, Item, Rule }
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Block {
+    pub kind: BlockKind,
+    pub text: String,
+}
+
+/// Length in bytes and colour class of each stretch of a line.
+pub type Spans = Vec<(u32, u8)>;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Loaded {
-    Text(String, bool),
+    Text { text: String, trimmed: bool, spans: Vec<Spans> },
     /// Original width and height; the pixels travel beside it as a `Picture`.
     Image([u32; 2]),
+    Page { orig: [u32; 2], page: u32, pages: u32 },
+    /// A sharper copy of part of a picture that is already shown.
+    Detail,
+    Doc { blocks: Vec<Block>, source: Option<String>, trimmed: bool },
+    Hex { bytes: Vec<u8>, total: u64 },
     Folder { folders: usize, files: usize, size: u64 },
-    Binary,
     Error(String),
 }
 
 pub struct Picture {
     pub size: [u32; 2],
+    /// Milliseconds per frame of an animation; empty for one still picture.
+    pub delays: Vec<u32>,
     pub rgba: Vec<u8>,
 }
 
 pub type Reply = (Loaded, Option<Picture>);
 
-fn plain(loaded: Loaded) -> Reply {
+pub(super) fn plain(loaded: Loaded) -> Reply {
     (loaded, None)
 }
 
-pub fn load(p: &Path, max_side: u32) -> Reply {
+pub(super) fn failed(message: impl Into<String>) -> Reply {
+    plain(Loaded::Error(message.into()))
+}
+
+fn head(p: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::with_capacity(1024);
+    std::fs::File::open(p)?.take(1024).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+pub fn load(p: &Path, options: Options) -> Reply {
     let md = match std::fs::metadata(p) {
         Ok(m) => m,
-        Err(e) => return plain(Loaded::Error(fsx::friendly_err(&e))),
+        Err(e) => return failed(fsx::friendly_err(&e)),
     };
     if md.is_dir() { return plain(folder(p)); }
-    if !md.is_file() { return plain(Loaded::Error("Preview is unavailable for pipes, sockets and device files".into())); }
-    if md.len() == 0 { return plain(Loaded::Text(String::new(), false)); }
+    if !md.is_file() { return failed("Preview is unavailable for pipes, sockets and device files"); }
+    if md.len() == 0 { return plain(Loaded::Text { text: String::new(), trimmed: false, spans: Vec::new() }); }
+    let head = match head(p) {
+        Ok(head) => head,
+        Err(e) => return failed(fsx::friendly_err(&e)),
+    };
     let ext = fsx::split_ext(&fsx::display_name(p), false).to_ascii_lowercase();
-    if fsx::IMAGE_EXTS.contains(&ext.as_str()) && md.len() < 200_000_000 { return image(p, max_side); }
-    plain(text(p, &ext, md.len()))
+    // Contents go first: a PDF or a picture with the wrong name is still that.
+    if head.windows(5).any(|w| w == b"%PDF-") { return pdf::load(p, options); }
+    if ext == "svg" || ext == "svgz" { return picture::svg(p, options); }
+    if picture::is_picture(&head, &ext) { return picture::load(p, options); }
+    plain(text::load(p, &ext, md.len()))
 }
 
 fn folder(p: &Path) -> Loaded {
@@ -66,41 +110,20 @@ fn folder(p: &Path) -> Loaded {
     Loaded::Folder { folders, files, size }
 }
 
-fn image(p: &Path, max_side: u32) -> Reply {
-    let decoded = image::ImageReader::open(p)
-        .and_then(|r| r.with_guessed_format())
-        .map_err(|e| e.to_string())
-        .and_then(|r| r.decode().map_err(|e| e.to_string()));
-    match decoded {
-        Ok(img) => {
-            let orig = [img.width(), img.height()];
-            let small = if img.width() > max_side || img.height() > max_side { img.thumbnail(max_side, max_side) } else { img };
-            let rgba = small.to_rgba8();
-            let picture = Picture { size: [rgba.width(), rgba.height()], rgba: rgba.into_raw() };
-            (Loaded::Image(orig), Some(picture))
-        }
-        Err(e) => plain(Loaded::Error(e)),
-    }
-}
-
-fn text(p: &Path, ext: &str, len: u64) -> Loaded {
-    use std::io::Read;
-    let mut buf = vec![0u8; PREVIEW_TEXT_MAX * 4];
-    let n = match std::fs::File::open(p).and_then(|mut f| f.read(&mut buf)) {
-        Ok(n) => n,
-        Err(e) => return Loaded::Error(fsx::friendly_err(&e)),
-    };
-    buf.truncate(n);
-    let sniff = &buf[..buf.len().min(2048)];
-    if !fsx::is_text_extension(ext) && sniff.contains(&0) { return Loaded::Binary; }
-    let s = String::from_utf8_lossy(&buf);
-    let trimmed = s.chars().count() > PREVIEW_TEXT_MAX || len as usize > n;
-    Loaded::Text(s.chars().take(PREVIEW_TEXT_MAX).collect(), trimmed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    pub(in crate::preview) fn whole(max_side: u32) -> Options {
+        Options { max_side, page: 0, crop: None }
+    }
+
+    pub(in crate::preview) fn scratch(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("fc_preview_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
 
     /// Timings on real files: `FERROUS_PREVIEW_FIXTURES=<folder> cargo test --release
     /// preview_baseline -- --ignored --nocapture`.
@@ -112,34 +135,32 @@ mod tests {
         files.sort();
         for file in files {
             let started = std::time::Instant::now();
-            let (loaded, picture) = load(&file, crate::preview::MAX_SIDE);
+            let (loaded, picture) = load(&file, whole(crate::preview::MAX_SIDE));
             let summary = match loaded {
-                Loaded::Text(t, trimmed) => format!("text {} chars, trimmed {trimmed}", t.chars().count()),
-                other => format!("{other:?} {:?}", picture.map(|p| p.size)),
+                Loaded::Text { text, trimmed, spans } => format!("text {} chars, trimmed {trimmed}, {} lines coloured", text.chars().count(), spans.len()),
+                Loaded::Doc { blocks, .. } => format!("doc of {} blocks", blocks.len()),
+                Loaded::Hex { bytes, total } => format!("hex {} of {total}", bytes.len()),
+                other => format!("{other:?}"),
             };
-            println!("{:>7.1} ms  {}  ->  {summary}", started.elapsed().as_secs_f64() * 1000.0, fsx::display_name(&file));
+            let size = picture.map(|p| (p.size, p.delays.len()));
+            println!("{:>7.1} ms  {}  ->  {summary} {size:?}", started.elapsed().as_secs_f64() * 1000.0, fsx::display_name(&file));
         }
     }
 
     #[test]
-    fn previews_text_images_folders_and_binary_files() {
-        let root = std::env::temp_dir().join(format!("fc_preview_{}", std::process::id()));
+    fn folders_missing_files_and_contents_over_names() {
+        let root = scratch("load");
         std::fs::create_dir_all(root.join("folder")).unwrap();
-        let text = root.join("unicode.txt");
-        std::fs::write(&text, "🦀".repeat(PREVIEW_TEXT_MAX + 1)).unwrap();
-        assert!(matches!(load(&text, 1024).0, Loaded::Text(s, true) if s == "🦀".repeat(PREVIEW_TEXT_MAX)));
-        let binary = root.join("binary.bin");
-        std::fs::write(&binary, [0, 1, 2, 3]).unwrap();
-        assert!(matches!(load(&binary, 1024).0, Loaded::Binary));
-        let picture = root.join("image.png");
-        image::RgbaImage::new(2048, 100).save(&picture).unwrap();
-        let (loaded, pixels) = load(&picture, 1024);
-        assert!(matches!(loaded, Loaded::Image([2048, 100])));
-        let pixels = pixels.unwrap();
-        assert!(pixels.size[0] == 1024 && pixels.size[1] <= 1024);
-        assert_eq!(pixels.rgba.len(), (pixels.size[0] * pixels.size[1] * 4) as usize);
-        assert!(matches!(load(&root, 1024).0, Loaded::Folder { folders: 1, files: 3, .. }));
-        assert!(matches!(load(&root.join("missing"), 1024).0, Loaded::Error(_)));
+        let picture = root.join("really_a_picture.txt");
+        image::RgbaImage::new(4, 4).save_with_format(&picture, image::ImageFormat::Png).unwrap();
+        assert!(matches!(load(&picture, whole(64)).0, Loaded::Image([4, 4])));
+        let pdf = root.join("report.bin");
+        std::fs::write(&pdf, b"%PDF-1.7 not really").unwrap();
+        assert!(matches!(load(&pdf, whole(64)).0, Loaded::Error(_)), "goes to the PDF reader, which refuses it");
+        std::fs::write(root.join("bm.txt"), b"BM is how this text starts").unwrap();
+        assert!(matches!(load(&root.join("bm.txt"), whole(64)).0, Loaded::Text { .. }), "weak signatures need the name too");
+        assert!(matches!(load(&root, whole(64)).0, Loaded::Folder { folders: 1, files: 3, .. }));
+        assert!(matches!(load(&root.join("missing"), whole(64)).0, Loaded::Error(_)));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -147,14 +168,13 @@ mod tests {
     #[test]
     fn inaccessible_folder_reports_error_and_pipe_is_not_read() {
         use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
-        let root = std::env::temp_dir().join(format!("fc_preview_access_{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = scratch("access");
         let pipe = root.join("pipe.txt");
         let name = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        assert!(matches!(load(&pipe, 1024).0, Loaded::Error(_)));
+        assert!(matches!(load(&pipe, whole(64)).0, Loaded::Error(_)));
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let result = load(&root, 1024).0;
+        let result = load(&root, whole(64)).0;
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::remove_dir_all(root).unwrap();
         if unsafe { libc::geteuid() } != 0 {
@@ -162,3 +182,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+pub(super) use tests::{scratch, whole};
