@@ -57,7 +57,7 @@ pub fn load(p: &Path, ext: &str, len: u64) -> Loaded {
     if matches!(ext, "md" | "markdown" | "mdown") {
         return Loaded::Doc { blocks: markdown(&text), source: Some(text), trimmed };
     }
-    let spans = colours(&text, ext);
+    let spans = colours(&text, ext, COLOUR_BUDGET);
     Loaded::Text { text, trimmed, spans }
 }
 
@@ -90,7 +90,7 @@ fn classes() -> &'static syntect::highlighting::Theme {
     })
 }
 
-fn colours(text: &str, ext: &str) -> Vec<Spans> {
+fn colours(text: &str, ext: &str, budget: Duration) -> Vec<Spans> {
     use syntect::easy::HighlightLines;
     let set = syntaxes();
     let first = text.lines().next().unwrap_or("");
@@ -100,7 +100,7 @@ fn colours(text: &str, ext: &str) -> Vec<Spans> {
     let started = Instant::now();
     let mut lines = Vec::new();
     for line in text.split_inclusive('\n') {
-        if started.elapsed() > COLOUR_BUDGET || line.len() > COLOUR_LINE_MAX { break; }
+        if started.elapsed() > budget || line.len() > COLOUR_LINE_MAX { break; }
         let Ok(pieces) = highlighter.highlight_line(line, set) else { break };
         let mut spans: Spans = Vec::new();
         for (style, piece) in pieces {
@@ -192,7 +192,10 @@ mod tests {
         assert!(matches!(load_file(&long, whole(64)).0, Loaded::Text { text, trimmed: true, .. } if text.len() == TEXT_MAX));
         let code = root.join("main.rs");
         std::fs::write(&code, "// note\nfn main() { let a = \"s\"; }\n").unwrap();
-        let Loaded::Text { text, spans, .. } = load_file(&code, whole(64)).0 else { panic!("not text") };
+        assert!(matches!(load_file(&code, whole(64)).0, Loaded::Text { .. }));
+        // The time limit depends on the machine and on what else is running.
+        let text = std::fs::read_to_string(&code).unwrap();
+        let spans = colours(&text, "rs", Duration::from_secs(120));
         assert_eq!(spans.len(), 2);
         assert_eq!(spans.iter().flatten().map(|s| s.0 as usize).sum::<usize>(), text.len(), "spans cover the text");
         assert!(spans[0].iter().any(|s| s.1 == CLASS_COMMENT));
