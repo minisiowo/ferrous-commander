@@ -1,6 +1,6 @@
 [package]
 name = "ferrous-commander"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "A fast, light multi-pane file manager with tiled panels and column navigation"
 license = "MIT"
