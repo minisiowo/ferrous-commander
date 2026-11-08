@@ -95,6 +95,7 @@ pub struct Quick {
     limit: Vec2,
     position: Option<Pos2>,
     shown: Option<Key>,
+    revision: u32,
     path: Option<std::path::PathBuf>,
 }
 
@@ -169,6 +170,7 @@ impl App {
             neighbours.splice(0..0, around.into_iter().flatten().filter_map(|n| self.preview.page_key(n)));
         }
         self.prefetch_preview(neighbours, ctx);
+        self.want_film(ctx);
         self.hand_over(ctx, &e, i);
         let quick = self.quick.as_ref().unwrap();
         let waiting = matches!(self.preview.content, PreviewContent::Loading);
@@ -224,6 +226,7 @@ impl App {
                 limit,
                 position,
                 shown: None,
+                revision: 0,
                 path: None,
             }
         });
@@ -256,7 +259,14 @@ impl App {
         } else if quick.shown.as_ref() == self.preview.key() {
             // Back on the file still on screen, from one that never finished loading.
             if s.loading.take().is_some() { changed = true; }
+            if quick.revision != self.preview.revision {
+                quick.revision = self.preview.revision;
+                s.content = self.preview.content.clone();
+                s.view.started = None;
+                changed = true;
+            }
         } else {
+            quick.revision = self.preview.revision;
             quick.shown = self.preview.key().cloned();
             let old = std::mem::replace(&mut s.content, self.preview.content.clone());
             s.previous = Some(old);
@@ -354,15 +364,7 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
         }
         PreviewContent::Page { texture, orig, .. } => image_view(&mut child, s, texture, *orig, false, body, true, true),
         PreviewContent::Animation(frames, orig) => {
-            let total: u32 = frames.iter().map(|f| f.1).sum::<u32>().max(1);
-            let started = *s.view.started.get_or_insert_with(Instant::now);
-            let mut at = (started.elapsed().as_millis() % total as u128) as u32;
-            let (tex, left) = frames.iter().find_map(|(tex, ms)| {
-                if at < *ms { return Some((tex, *ms - at)); }
-                at -= ms;
-                None
-            }).unwrap_or((&frames[0].0, 20));
-            ctx.request_repaint_after(Duration::from_millis(left as u64));
+            let tex = playing_frame(s, &ctx, frames);
             image_view(&mut child, s, tex, *orig, true, body, false, false);
         }
         PreviewContent::Doc(doc) => match (&doc.source, s.view.source) {
@@ -372,7 +374,10 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
         PreviewContent::Hex(bytes, total) => hex_view(&mut child, s, bytes, *total, body),
         PreviewContent::Table(table) => table_view(&mut child, s, table, body),
         PreviewContent::Archive(entries, total, trimmed) => archive_view(&mut child, s, entries, *total, *trimmed, body),
-        PreviewContent::Info(rows, cover) => info_view(&child, s, rows, cover.as_ref(), body),
+        PreviewContent::Info(rows, cover, _) => {
+            let picture = cover.as_ref().map(|(frames, size)| (playing_frame(s, &ctx, frames), *size));
+            info_view(&child, s, rows, picture, body);
+        }
         PreviewContent::Folder { folders, files, size } => {
             let text = format!("{folders} folders, {files} files\n{}", fsx::fmt_size(*size, s.mebibytes));
             card(&child, s, body, &text);
@@ -447,6 +452,23 @@ fn checkerboard(ui: &Ui, r: Rect, clip: Rect, pal: Palette) {
         }
         x += 1.0;
     }
+}
+
+/// The frame to show now, with a repaint booked for when it ends.
+fn playing_frame<'a>(s: &mut Shared, ctx: &egui::Context, frames: &'a [(egui::TextureHandle, u32)]) -> &'a egui::TextureHandle {
+    if frames.len() < 2 { return &frames[0].0; }
+    let total = frames.iter().map(|f| f.1).sum::<u32>().max(1);
+    let started = *s.view.started.get_or_insert_with(Instant::now);
+    let mut at = (started.elapsed().as_millis() % total as u128) as u32;
+    for (texture, ms) in frames {
+        if at < *ms {
+            ctx.request_repaint_after(Duration::from_millis((*ms - at) as u64));
+            return texture;
+        }
+        at -= ms;
+    }
+    ctx.request_repaint_after(Duration::from_millis(20));
+    &frames[0].0
 }
 
 /// Normalised part of `r` that lies inside the frame.
@@ -758,7 +780,7 @@ fn archive_view(ui: &mut Ui, s: &mut Shared, entries: &[ArchiveEntry], total: u6
     s.view.offset = output.state.clamped_offset().y;
 }
 
-fn info_view(ui: &Ui, s: &Shared, rows: &[(String, String)], cover: Option<&(egui::TextureHandle, [u32; 2])>, body: Rect) {
+fn info_view(ui: &Ui, s: &Shared, rows: &[(String, String)], cover: Option<(&egui::TextureHandle, [u32; 2])>, body: Rect) {
     let pal = s.pal;
     let p = ui.painter_at(body);
     let (row_h, table_h) = (24.0, rows.len() as f32 * 24.0);

@@ -35,6 +35,8 @@ const JOB_LIMIT: Duration = Duration::from_secs(15);
 const IDLE_LIMIT: Duration = Duration::from_secs(30);
 /// Neighbours wait until the selection stops moving.
 pub const PREFETCH_DELAY: Duration = Duration::from_millis(150);
+/// Arrowing past videos should not start ffmpeg several times for each of them.
+const FILM_DELAY: Duration = Duration::from_millis(400);
 
 /// A file as the listing knows it. Asking the disk here could stall the interface on a
 /// sleeping share; a changed date or size makes a new key, so changed files load again.
@@ -56,6 +58,9 @@ impl Key {
         Key { path: e.path.clone(), modified: e.modified, size: e.size, page: 0, crop: None }
     }
 }
+
+/// Pictures and how many milliseconds each one stays.
+pub type Frames = Arc<Vec<(egui::TextureHandle, u32)>>;
 
 /// Text with its line positions, so drawing can go straight to the visible lines.
 pub struct TextDoc {
@@ -112,7 +117,7 @@ pub enum PreviewContent {
     Loading,
     Text(Arc<TextDoc>),
     /// Frames with their durations, and the original size.
-    Animation(Arc<Vec<(egui::TextureHandle, u32)>>, [u32; 2]),
+    Animation(Frames, [u32; 2]),
     Page { texture: egui::TextureHandle, orig: [u32; 2], page: u32, pages: u32 },
     /// A sharper copy of the part of the shown picture named by the job.
     Detail(egui::TextureHandle),
@@ -120,7 +125,8 @@ pub enum PreviewContent {
     Hex(Arc<Vec<u8>>, u64),
     Table(Arc<TableDoc>),
     Archive(Arc<Vec<ArchiveEntry>>, u64, bool),
-    Info(Arc<Vec<(String, String)>>, Option<(egui::TextureHandle, [u32; 2])>),
+    /// Facts about a file, and its cover or the frames of a video.
+    Info(Arc<Vec<(String, String)>>, Option<(Frames, [u32; 2])>, bool),
     /// The texture, the original size, and whether anything in it is see-through.
     Image(egui::TextureHandle, [u32; 2], bool),
     Folder { folders: usize, files: usize, size: u64 },
@@ -153,7 +159,7 @@ impl PreviewContent {
             PreviewContent::Hex(bytes, _) => bytes.len(),
             PreviewContent::Table(table) => table.rows.iter().flatten().map(|c| c.len() + 24).sum(),
             PreviewContent::Archive(entries, ..) => entries.iter().map(|e| e.name.len() + 48).sum(),
-            PreviewContent::Info(_, cover) => cover.as_ref().map_or(256, |(tex, _)| tex.byte_size()),
+            PreviewContent::Info(_, cover, _) => cover.as_ref().map_or(256, |(frames, _)| frames.iter().map(|(tex, _)| tex.byte_size()).sum()),
             _ => 64,
         }
     }
@@ -277,9 +283,14 @@ fn picture_content(p: Picture, orig: [u32; 2], ctx: &egui::Context) -> PreviewCo
     if p.delays.is_empty() {
         return PreviewContent::Image(texture(&p.rgba, p.size, ctx), orig, p.rgba.iter().skip(3).step_by(4).any(|&alpha| alpha < 255));
     }
+    PreviewContent::Animation(frames_of(&p, ctx), orig)
+}
+
+/// A still picture is one frame that never ends.
+fn frames_of(p: &Picture, ctx: &egui::Context) -> Frames {
+    if p.delays.is_empty() { return Arc::new(vec![(texture(&p.rgba, p.size, ctx), 0)]); }
     let frame_bytes = p.size[0] as usize * p.size[1] as usize * 4;
-    let frames = p.rgba.chunks_exact(frame_bytes).zip(&p.delays).map(|(rgba, &ms)| (texture(rgba, p.size, ctx), ms)).collect();
-    PreviewContent::Animation(Arc::new(frames), orig)
+    Arc::new(p.rgba.chunks_exact(frame_bytes).zip(&p.delays).map(|(rgba, &ms)| (texture(rgba, p.size, ctx), ms)).collect())
 }
 
 fn content_of((loaded, picture): Reply, ctx: &egui::Context) -> PreviewContent {
@@ -303,7 +314,7 @@ fn content_of((loaded, picture): Reply, ctx: &egui::Context) -> PreviewContent {
             PreviewContent::Table(Arc::new(TableDoc { rows, widths, sheets, page, trimmed }))
         }
         (Loaded::Archive { entries, total, trimmed }, _) => PreviewContent::Archive(Arc::new(entries), total, trimmed),
-        (Loaded::Info { rows }, picture) => PreviewContent::Info(Arc::new(rows), picture.map(|p| (texture(&p.rgba, p.size, ctx), p.size))),
+        (Loaded::Info { rows, more }, picture) => PreviewContent::Info(Arc::new(rows), picture.map(|p| (frames_of(&p, ctx), p.size)), more),
         (Loaded::Hex { bytes, total }, _) => PreviewContent::Hex(Arc::new(bytes), total),
         (Loaded::Folder { folders, files, size }, _) => PreviewContent::Folder { folders, files, size },
         (Loaded::Error(e), _) => PreviewContent::Error(e),
@@ -320,6 +331,9 @@ pub struct Preview {
     pub path: Option<PathBuf>,
     pub content: PreviewContent,
     pub page: u32,
+    /// Grows when the shown preview is replaced by a better one of the same file.
+    pub revision: u32,
+    film_asked: Option<Key>,
     /// A sharper copy of part of the shown picture, and which part.
     pub detail: Option<(egui::TextureHandle, [u16; 4])>,
     key: Option<Key>,
@@ -341,6 +355,8 @@ impl Preview {
             path: None,
             content: PreviewContent::None,
             page: 0,
+            revision: 0,
+            film_asked: None,
             detail: None,
             key: None,
             cache: Cache::default(),
@@ -403,6 +419,22 @@ impl App {
         preview.send(0, vec![Job { key, ctx: ctx.clone(), prefetch: false }]);
     }
 
+    /// Once the selection rests on a video, starts on its moving preview.
+    /// Only for the preview window: the side pane has no use for it.
+    pub fn want_film(&mut self, ctx: &egui::Context) {
+        let preview = &mut self.preview;
+        if !matches!(preview.content, PreviewContent::Info(_, _, true)) { return; }
+        let (Some(key), Some(asked)) = (preview.key.clone(), preview.asked) else { return };
+        if preview.film_asked.as_ref() == Some(&key) { return; }
+        if asked.elapsed() < FILM_DELAY {
+            ctx.request_repaint_after(FILM_DELAY);
+            return;
+        }
+        preview.film_asked = Some(key.clone());
+        let key = Key { page: media::FILM_PAGE, ..key };
+        preview.send(0, vec![Job { key, ctx: ctx.clone(), prefetch: false }]);
+    }
+
     /// Asks for a sharper copy of part of the shown picture.
     pub fn want_detail(&mut self, crop: [u16; 4], ctx: &egui::Context) {
         let Some(mut key) = self.preview.key.clone() else { return };
@@ -431,6 +463,16 @@ impl App {
             if let (Some(crop), PreviewContent::Detail(texture)) = (key.crop, &content) {
                 let current = preview.key.as_ref().is_some_and(|k| k.path == key.path && k.page == key.page);
                 if current { preview.detail = Some((texture.clone(), crop)); }
+                continue;
+            }
+            if key.page == media::FILM_PAGE && matches!(content, PreviewContent::Info(..)) {
+                // Stands in for the single frame, here and for later visits.
+                let still = Key { page: 0, ..key };
+                preview.cache.insert(still.clone(), content.clone());
+                if preview.key.as_ref() == Some(&still) {
+                    preview.content = content;
+                    preview.revision += 1;
+                }
                 continue;
             }
             if content.remembered() { preview.cache.insert(key.clone(), content.clone()); }
@@ -513,6 +555,21 @@ mod tests {
         app.receive_preview();
         assert!(matches!(app.preview.content, PreviewContent::None));
         assert!(app.preview.cache.contains(&key("old")), "a finished read still serves the next visit");
+    }
+
+    #[test]
+    fn a_film_replaces_the_single_frame_of_its_video() {
+        let mut app = App::new(Some(PathBuf::from("unused.png")));
+        let ctx = egui::Context::default();
+        let info = |more| PreviewContent::Info(Arc::default(), None, more);
+        app.preview.cache.insert(key("v"), info(true));
+        app.want_preview(Some(key("v")), &ctx);
+        let film = Key { page: media::FILM_PAGE, ..key("v") };
+        app.preview.tx.send((film, info(false))).unwrap();
+        app.receive_preview();
+        assert_eq!(app.preview.revision, 1);
+        assert!(matches!(app.preview.content, PreviewContent::Info(_, _, false)));
+        assert!(matches!(app.preview.cache.get(&key("v")), Some(PreviewContent::Info(_, _, false))), "the next visit starts with the film");
     }
 
     #[test]

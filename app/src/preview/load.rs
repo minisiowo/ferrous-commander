@@ -49,8 +49,9 @@ pub enum Loaded {
     /// Spreadsheet rows; `sheets` lists the workbook's sheets and `page` the one shown.
     Table { rows: Vec<Vec<String>>, sheets: Vec<String>, page: u32, trimmed: bool },
     Archive { entries: Vec<ArchiveEntry>, total: u64, trimmed: bool },
-    /// Facts about a file, with a cover or a video frame as the `Picture` when there is one.
-    Info { rows: Vec<(String, String)> },
+    /// Facts about a file, with a cover or video frames as the `Picture` when there are any.
+    /// `more` says that asking again for the film page gives a moving preview.
+    Info { rows: Vec<(String, String)>, more: bool },
     Folder { folders: usize, files: usize, size: u64 },
     Error(String),
 }
@@ -104,13 +105,13 @@ pub fn load(p: &Path, options: Options) -> Reply {
         "odt" => return office::opendocument(p),
         "pptx" | "pptm" => return office::slides(p),
         "epub" => return office::epub(p),
-        "rar" => return plain(Loaded::Info { rows: vec![("Archive".into(), "RAR contents are shown after unpacking".into())] }),
+        "rar" => return plain(Loaded::Info { rows: vec![("Archive".into(), "RAR contents are shown after unpacking".into())], more: false }),
         _ => {}
     }
     if let Some(listed) = archive_list::load(p, &name, head.starts_with(b"PK\x03\x04")) { return plain(listed); }
     match Kind::from_ext(&ext) {
         Kind::Audio => return media::audio(p),
-        Kind::Video => return media::video(p),
+        Kind::Video => return media::video(p, options.page),
         _ => {}
     }
     plain(text::load(p, &ext, md.len()))
