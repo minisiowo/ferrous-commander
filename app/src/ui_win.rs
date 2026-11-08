@@ -376,6 +376,17 @@ impl App {
         }
     }
 
+    /// Opens in the active panel; the settings window closes so the new tab can be seen.
+    pub fn show_configuration_folder(&mut self, saved: std::io::Result<std::path::PathBuf>) {
+        match saved {
+            Ok(dir) => {
+                self.acts.push(Act::OpenNewTab(self.active, dir, true));
+                self.settings_open = false;
+            }
+            Err(e) => self.toast(ToastKind::Error, format!("Cannot open configuration folder: {e}")),
+        }
+    }
+
     pub fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
             return;
@@ -493,10 +504,8 @@ impl App {
             ui.label(RichText::new("Text format: Lua table. Close the app before editing; changes load on next start.").color(weak).size(11.0));
             if ui.button("Open configuration folder").clicked() {
                 self.save();
-                match self.st.save_result().and_then(|dir| crate::fsx::open_with_system(dir.as_ref())) {
-                    Ok(()) => {},
-                    Err(e) => self.toast(ToastKind::Error, format!("Cannot open configuration folder: {e}")),
-                }
+                let saved = self.st.save_result();
+                self.show_configuration_folder(saved);
             }
             settings_section(ui, "Application", accent);
             ui.horizontal(|ui| {

@@ -1,6 +1,22 @@
 //! Drives the real UI headlessly with simulated mouse and keyboard input.
 
 #[test]
+fn the_configuration_folder_opens_in_a_new_tab_of_the_app() {
+    let root = std::env::temp_dir().join(format!("fc_config_folder_{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(root.join("unused.png")));
+    let tabs = app.panes[app.active].tabs.len();
+    app.settings_open = true;
+    app.show_configuration_folder(Ok(root.clone()));
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    assert!(!app.settings_open);
+    assert_eq!(app.panes[app.active].tabs.len(), tabs + 1);
+    assert_eq!(app.panes[app.active].path(), root.as_path());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn tree_marquee_matches_painted_rows_after_scrolling() {
     let root = std::env::temp_dir().join(format!("fc_tree_marquee_{}", std::process::id()));
     let nested = root.join("branch/nested");
