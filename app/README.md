@@ -12,7 +12,7 @@
 
 [Download](#download) · [Keys](#keyboard) · [Archives](#archives) · [Build](#build-from-source) · [Full reference](docs/DETAILS.md)
 
-<img src="docs/screenshot.png" alt="Ferrous Commander with two panels side by side">
+<img src="docs/screenshot.png" alt="Ferrous Commander with tiled panels and tabs">
 
 </div>
 

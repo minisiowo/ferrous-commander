@@ -6,6 +6,6 @@ A fast, light multi-pane file manager for Linux and Windows, written in Rust. Sp
 [Releases](https://github.com/minisiowo/ferrous-commander/releases) page. Windows may
 warn about an unknown publisher, because the builds are not signed.
 
-![Ferrous Commander with two panels side by side](app/docs/screenshot.png)
+![Ferrous Commander with tiled panels and tabs](app/docs/screenshot.png)
 
 Features, installation and configuration are described in [app/README.md](app/README.md).
