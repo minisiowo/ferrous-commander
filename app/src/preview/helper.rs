@@ -165,7 +165,7 @@ pub fn serve() {
 }
 
 pub struct Helper {
-    child: Child,
+    child: Option<Child>,
     stdin: ChildStdin,
     replies: mpsc::Receiver<io::Result<Reply>>,
 }
@@ -199,14 +199,17 @@ impl Helper {
             let ended = reply.is_err();
             if tx.send(reply).is_err() || ended { return; }
         });
-        Ok(Helper { child, stdin, replies })
+        Ok(Helper { child: Some(child), stdin, replies })
     }
 }
 
 impl Drop for Helper {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let Some(mut child) = self.child.take() else { return };
+        let _ = child.kill();
+        // A process stuck on a dead network share dies only when the share answers,
+        // and the lane must not wait for that.
+        std::thread::spawn(move || { let _ = child.wait(); });
     }
 }
 

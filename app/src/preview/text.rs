@@ -13,6 +13,8 @@ const HEX_MAX: usize = 64 * 1024;
 /// Text shows at once; colours are for as much of it as this allows.
 const COLOUR_BUDGET: Duration = Duration::from_millis(300);
 const COLOUR_LINE_MAX: usize = 2000;
+/// Formatted text is laid out whole, again whenever the window changes width.
+const MARKDOWN_MAX: usize = 300 * 1024;
 
 pub const CLASS_COMMENT: u8 = 1;
 pub const CLASS_STRING: u8 = 2;
@@ -55,7 +57,8 @@ pub fn load(p: &Path, ext: &str, len: u64) -> Loaded {
     };
     let trimmed = len > bytes.len() as u64;
     if matches!(ext, "md" | "markdown" | "mdown") {
-        return Loaded::Doc { blocks: markdown(&text), source: Some(text), trimmed };
+        let (blocks, cut) = markdown(&text);
+        return Loaded::Doc { blocks, source: Some(text), trimmed: trimmed || cut };
     }
     let spans = colours(&text, ext, COLOUR_BUDGET);
     Loaded::Text { text, trimmed, spans }
@@ -115,7 +118,7 @@ fn colours(text: &str, ext: &str, budget: Duration) -> Vec<Spans> {
     lines
 }
 
-fn markdown(text: &str) -> Vec<Block> {
+fn markdown(text: &str) -> (Vec<Block>, bool) {
     use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
     let mut blocks = Vec::new();
     let mut current = String::new();
@@ -126,7 +129,11 @@ fn markdown(text: &str) -> Vec<Block> {
         if !text.is_empty() { blocks.push(Block { kind, text }); }
     };
     let mut in_item = 0usize;
+    let (mut size, mut counted) = (0, 0);
     for event in Parser::new_ext(text, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH) {
+        size += blocks[counted..].iter().map(|b: &Block| b.text.len()).sum::<usize>();
+        counted = blocks.len();
+        if size > MARKDOWN_MAX { return (blocks, true); }
         match event {
             Event::Start(Tag::BlockQuote(_)) => quote += 1,
             Event::End(TagEnd::BlockQuote(_)) => quote = quote.saturating_sub(1),
@@ -151,7 +158,7 @@ fn markdown(text: &str) -> Vec<Block> {
         }
     }
     flush(&mut blocks, &mut current, BlockKind::Paragraph);
-    blocks
+    (blocks, false)
 }
 
 #[cfg(test)]
@@ -202,6 +209,13 @@ mod tests {
         assert!(spans[1].iter().any(|s| s.1 == CLASS_KEYWORD));
         assert!(spans[1].iter().any(|s| s.1 == CLASS_STRING));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn very_long_markdown_is_cut() {
+        let (blocks, cut) = markdown(&"A paragraph of words.\n\n".repeat(40_000));
+        assert!(cut);
+        assert!(blocks.iter().map(|b| b.text.len()).sum::<usize>() <= MARKDOWN_MAX * 2);
     }
 
     #[test]

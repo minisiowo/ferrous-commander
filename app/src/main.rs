@@ -41,6 +41,20 @@ use std::path::PathBuf;
 /// takes the full width of its side in memory. Previews are capped at 1024 px.
 const MAX_TEXTURE_SIDE: usize = 2048;
 
+/// A plugin rather than `raw_input_hook`, which runs for the main window only. Windows with
+/// different limits would make egui rebuild the font atlas each time it switches between them.
+struct TextureLimit;
+
+impl egui::Plugin for TextureLimit {
+    fn debug_name(&self) -> &'static str {
+        "TextureLimit"
+    }
+
+    fn input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
+        input.max_texture_side = Some(input.max_texture_side.map_or(MAX_TEXTURE_SIDE, |side| side.min(MAX_TEXTURE_SIDE)));
+    }
+}
+
 struct Shell {
     app: app::App,
     #[cfg(windows)]
@@ -48,8 +62,8 @@ struct Shell {
 }
 
 impl eframe::App for Shell {
+    #[cfg_attr(not(windows), allow(unused_variables))]
     fn raw_input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
-        input.max_texture_side = Some(input.max_texture_side.map_or(MAX_TEXTURE_SIDE, |side| side.min(MAX_TEXTURE_SIDE)));
         #[cfg(windows)]
         file_transfer::shortcuts(input, &mut self.held_keys, _ctx.text_edit_focused());
     }
@@ -102,6 +116,7 @@ fn run(renderer: eframe::Renderer, shot: Option<PathBuf>) -> eframe::Result {
         "Ferrous Commander",
         options(renderer),
         Box::new(move |cc| {
+            cc.egui_ctx.add_plugin(TextureLimit);
             fonts(&cc.egui_ctx);
             Ok(Box::new(Shell {
                 app: app::App::new(shot),
@@ -110,6 +125,20 @@ fn run(renderer: eframe::Renderer, shot: Option<PathBuf>) -> eframe::Result {
             }))
         }),
     )
+}
+
+#[cfg(test)]
+#[test]
+fn every_window_gets_the_same_texture_limit() {
+    let ctx = egui::Context::default();
+    ctx.add_plugin(TextureLimit);
+    for offered in [Some(16384), Some(MAX_TEXTURE_SIDE), None] {
+        let input = egui::RawInput { max_texture_side: offered, ..Default::default() };
+        let mut seen = 0;
+        let mut output = ctx.run_ui(input, |ui| seen = ui.input(|i| i.max_texture_side));
+        output.textures_delta.clear();
+        assert_eq!(seen, MAX_TEXTURE_SIDE);
+    }
 }
 
 fn main() {

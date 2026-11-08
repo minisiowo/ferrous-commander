@@ -51,9 +51,16 @@ fn ffmpeg() -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?).filter(|d| d.is_absolute()).map(|d| d.join(&file)).find(|p| p.is_file())
 }
 
+/// A "video" can really be a playlist that tells ffmpeg to fetch addresses from the network,
+/// and merely selecting a downloaded file must not do that.
+fn before_input(seek: &str) -> [&str; 10] {
+    ["-hide_banner", "-nostdin", "-timelimit", "10", "-protocol_whitelist", "file", "-ss", seek, "-i", ""]
+}
+
 fn frame_at(tool: &Path, input: &OsStr, seek: &str) -> Option<(Vec<u8>, String)> {
     let mut command = Command::new(tool);
-    command.args(["-hide_banner", "-nostdin", "-timelimit", "10", "-ss", seek, "-i"]).arg(input)
+    let arguments = before_input(seek);
+    command.args(&arguments[..arguments.len() - 1]).arg(input)
         .args(["-frames:v", "1", "-vf", "scale='min(1600,iw)':-2", "-f", "image2pipe", "-vcodec", "png", "-"])
         .stdin(Stdio::null());
     #[cfg(windows)]
@@ -112,6 +119,14 @@ mod tests {
         let log = "Input #0, mov, from 'file:a.mp4':\n  Duration: 00:01:23.45, start: 0.0, bitrate: 900 kb/s\n  Stream #0:0: Video: h264 (High), yuv420p(tv), 1920x1080 [SAR 1:1], 24 fps\n";
         assert_eq!(details(log), [("Length".to_string(), "00:01:23".to_string()), ("Codec".to_string(), "h264".to_string()), ("Resolution".to_string(), "1920 × 1080".to_string())]);
         assert!(details("nothing useful").is_empty());
+    }
+
+    #[test]
+    fn only_local_files_are_allowed_before_the_input() {
+        let arguments = before_input("5");
+        let at = arguments.iter().position(|a| *a == "-protocol_whitelist").unwrap();
+        assert_eq!(arguments[at + 1], "file");
+        assert!(at < arguments.iter().position(|a| *a == "-i").unwrap(), "options apply to what follows them");
     }
 
     #[test]

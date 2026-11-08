@@ -275,7 +275,7 @@ fn texture(rgba: &[u8], size: [u32; 2], ctx: &egui::Context) -> egui::TextureHan
 
 fn picture_content(p: Picture, orig: [u32; 2], ctx: &egui::Context) -> PreviewContent {
     if p.delays.is_empty() {
-        return PreviewContent::Image(texture(&p.rgba, p.size, ctx), orig, p.rgba.chunks_exact(4).any(|c| c[3] < 255));
+        return PreviewContent::Image(texture(&p.rgba, p.size, ctx), orig, p.rgba.iter().skip(3).step_by(4).any(|&alpha| alpha < 255));
     }
     let frame_bytes = p.size[0] as usize * p.size[1] as usize * 4;
     let frames = p.rgba.chunks_exact(frame_bytes).zip(&p.delays).map(|(rgba, &ms)| (texture(rgba, p.size, ctx), ms)).collect();
@@ -352,6 +352,11 @@ impl Preview {
             asked: None,
             prefetched: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remember(&mut self, key: Key, content: PreviewContent) {
+        self.cache.insert(key, content);
     }
 
     pub fn page_key(&self, page: u32) -> Option<Key> {

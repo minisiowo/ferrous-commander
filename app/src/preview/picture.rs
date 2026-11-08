@@ -101,7 +101,8 @@ pub fn svg(p: &Path, options: Options) -> Reply {
         },
         ..Default::default()
     };
-    if data.windows(5).any(|w| w == b"<text") {
+    // Compressed SVG cannot be searched, so it is assumed to have text.
+    if data.starts_with(&[0x1F, 0x8B]) || data.windows(5).any(|w| w == b"<text") {
         let fonts = settings.fontdb_mut();
         fonts.load_system_fonts();
         // Left to chance, unnamed text can land on a symbol font and come out as Greek.

@@ -31,6 +31,8 @@ const MAX_ZOOM: f32 = 32.0;
 /// Pause after zooming or moving before a sharper copy is worth making.
 const SHARPEN_AFTER: Duration = Duration::from_millis(150);
 const READING_WIDTH: f32 = 760.0;
+/// Past the end of any preview, yet small enough to compute with.
+const SCROLL_TO_END: f32 = 1e9;
 
 fn viewport() -> ViewportId {
     ViewportId::from_hash_of("ferrous_commander_preview")
@@ -76,6 +78,7 @@ struct Shared {
     folder: Color32,
     size: String,
     place: (usize, usize),
+    mebibytes: bool,
     content: PreviewContent,
     previous: Option<PreviewContent>,
     switched: Instant,
@@ -129,8 +132,11 @@ impl App {
                     ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
                 }
                 Cmd::Page(by) => {
-                    let last = pages_of(&self.preview.content).map_or(0, |(_, pages)| pages.saturating_sub(1));
-                    self.preview.page = self.preview.page.saturating_add_signed(by).min(last);
+                    // While the next page loads, the one still on screen knows the count.
+                    let known = pages_of(&self.preview.content).or_else(|| pages_of(&self.quick.as_ref()?.shared.lock().unwrap().content));
+                    if let Some((_, pages)) = known {
+                        self.preview.page = self.preview.page.saturating_add_signed(by).min(pages.saturating_sub(1));
+                    }
                 }
                 Cmd::Detail(crop) => self.want_detail(crop, ctx),
                 Cmd::Step(by) => self.key(i, if by > 0 { K::ArrowDown } else { K::ArrowUp }, egui::Modifiers::NONE, 1),
@@ -204,6 +210,7 @@ impl App {
                     folder,
                     size: String::new(),
                     place,
+                    mebibytes: false,
                     content: PreviewContent::Loading,
                     previous: None,
                     switched: Instant::now(),
@@ -234,6 +241,7 @@ impl App {
         }
         if s.place != place { s.place = place; changed = true; }
         s.pal = pal;
+        s.mebibytes = self.st.mebibytes;
         let detail = self.preview.detail.clone();
         if s.detail.as_ref().map(|d| d.0.id()) != detail.as_ref().map(|d| d.0.id()) {
             s.detail = detail;
@@ -245,7 +253,10 @@ impl App {
                 s.loading = Some(Instant::now());
                 ctx.request_repaint_of(viewport());
             }
-        } else if quick.shown.as_ref() != self.preview.key() {
+        } else if quick.shown.as_ref() == self.preview.key() {
+            // Back on the file still on screen, from one that never finished loading.
+            if s.loading.take().is_some() { changed = true; }
+        } else {
             quick.shown = self.preview.key().cloned();
             let old = std::mem::replace(&mut s.content, self.preview.content.clone());
             s.previous = Some(old);
@@ -273,8 +284,12 @@ fn keys(ctx: &egui::Context, s: &mut Shared, page: f32) {
     }
     let events = ctx.input(|i| i.events.clone());
     for event in events {
-        let egui::Event::Key { key, pressed: true, repeat, .. } = event else { continue };
+        let egui::Event::Key { key, pressed: true, repeat, modifiers, .. } = event else { continue };
+        if modifiers.ctrl || modifiers.alt || modifiers.command { continue; }
+        let paged = matches!(s.content, PreviewContent::Page { .. });
         match key {
+            K::PageDown if paged => s.send(Cmd::Page(1), ctx),
+            K::PageUp if paged => s.send(Cmd::Page(-1), ctx),
             K::Space | K::Escape if !repeat => s.send(Cmd::Close, ctx),
             K::Enter if !repeat => s.send(Cmd::Open, ctx),
             K::ArrowDown => s.send(Cmd::Step(1), ctx),
@@ -284,7 +299,7 @@ fn keys(ctx: &egui::Context, s: &mut Shared, page: f32) {
             K::PageDown => s.view.scroll_to = Some(s.view.offset + page),
             K::PageUp => s.view.scroll_to = Some((s.view.offset - page).max(0.0)),
             K::Home => s.view.scroll_to = Some(0.0),
-            K::End => s.view.scroll_to = Some(f32::MAX / 2.0),
+            K::End => s.view.scroll_to = Some(SCROLL_TO_END),
             K::Plus | K::Equals => zoom_by(&mut s.view, 1.25),
             K::Minus => zoom_by(&mut s.view, 0.8),
             K::Num0 => { s.view.zoom = 1.0; s.view.pan = Vec2::ZERO; }
@@ -323,7 +338,8 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
     let t = (s.switched.elapsed().as_secs_f32() / SWITCH_SECONDS).min(1.0);
     if t < 1.0 { ctx.request_repaint(); } else { s.previous = None; }
     if let Some(PreviewContent::Image(tex, orig, _) | PreviewContent::Page { texture: tex, orig, .. }) = &s.previous {
-        let r = image_rect(body, *orig, 1.0, Vec2::ZERO, ctx.pixels_per_point());
+        let paged = matches!(s.previous, Some(PreviewContent::Page { .. }));
+        let r = fitted_rect(body, tex, *orig, 1.0, paged, ctx.pixels_per_point());
         ui.painter_at(body).image(tex.id(), r, unit_uv(), Color32::WHITE.gamma_multiply(1.0 - t));
     }
     let mut child = ui.new_child(UiBuilder::new().max_rect(body));
@@ -358,7 +374,7 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
         PreviewContent::Archive(entries, total, trimmed) => archive_view(&mut child, s, entries, *total, *trimmed, body),
         PreviewContent::Info(rows, cover) => info_view(&child, s, rows, cover.as_ref(), body),
         PreviewContent::Folder { folders, files, size } => {
-            let text = format!("{folders} folders, {files} files\n{}", fsx::fmt_size(*size, false));
+            let text = format!("{folders} folders, {files} files\n{}", fsx::fmt_size(*size, s.mebibytes));
             card(&child, s, body, &text);
         }
         PreviewContent::Error(message) => card(&child, s, body, message),
@@ -465,9 +481,7 @@ fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32
     if response.dragged() { s.view.pan += response.drag_delta(); }
     if response.double_clicked() { s.view.zoom = 1.0; s.view.pan = Vec2::ZERO; }
     let ppp = ui.ctx().pixels_per_point();
-    let fit_frame = image_rect(body, orig, s.view.zoom, Vec2::ZERO, ppp);
-    // Drawn larger than its nominal size means vector art, which has no size of its own.
-    let fitted = if paged || tex.size()[0] > orig[0] as usize { page_rect(body, orig, s.view.zoom) } else { fit_frame };
+    let fitted = fitted_rect(body, tex, orig, s.view.zoom, paged, ppp);
     let spare = ((fitted.size() - body.size()) / 2.0).max(Vec2::ZERO);
     s.view.pan = s.view.pan.clamp(-spare, spare);
     let r = fitted.translate(s.view.pan);
@@ -493,6 +507,12 @@ fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32
             s.send(Cmd::Detail(crop), &ui.ctx().clone());
         }
     }
+}
+
+/// Where a picture goes before panning.
+fn fitted_rect(frame: Rect, tex: &egui::TextureHandle, orig: [u32; 2], zoom: f32, paged: bool, ppp: f32) -> Rect {
+    // Drawn larger than its nominal size means vector art, which has no size of its own.
+    if paged || tex.size()[0] > orig[0] as usize { page_rect(frame, orig, zoom) } else { image_rect(frame, orig, zoom, Vec2::ZERO, ppp) }
 }
 
 /// A document page fills the frame, because its size in points says nothing about the screen.
@@ -570,7 +590,7 @@ fn text_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<TextDoc>, body: Rect) {
         let top = ui.min_rect().min;
         let n = range.len() as f32;
         let step = row_h + ui.spacing().item_spacing.y;
-        let (r, _) = ui.allocate_exact_size(vec2(content_w, n * step - ui.spacing().item_spacing.y), Sense::hover());
+        let (r, _) = ui.allocate_exact_size(vec2(content_w, (n * step - ui.spacing().item_spacing.y).max(0.0)), Sense::hover());
         let p = ui.painter_at(r.expand(2.0));
         let mut last = None;
         for (at, row) in range.enumerate() {
@@ -596,7 +616,7 @@ fn text_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<TextDoc>, body: Rect) {
 /// Sized once per width; only the blocks on screen are painted.
 fn doc_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<DocData>, body: Rect) {
     let pal = s.pal;
-    let width = (body.width() - 64.0).min(READING_WIDTH).max(120.0);
+    let width = (body.width() - 64.0).clamp(120.0, READING_WIDTH.max(120.0));
     let left = (body.width() - width) / 2.0;
     let key = (width as usize, Arc::as_ptr(doc) as usize);
     if s.view.laid_out_for != key {
@@ -729,7 +749,7 @@ fn archive_view(ui: &mut Ui, s: &mut Shared, entries: &[ArchiveEntry], total: u6
                 let ext = fsx::split_ext(&entry.name, false);
                 icons::entry(&p, icon, Kind::from_ext(&ext), &ext, pal.dark, false);
             }
-            let size = if entry.folder { String::new() } else { fsx::fmt_size(entry.size, false) };
+            let size = if entry.folder { String::new() } else { fsx::fmt_size(entry.size, s.mebibytes) };
             let size_rect = p.text(pos2(top.x + width - 16.0, y), Align2::RIGHT_CENTER, size, FontId::proportional(12.0), pal.text_weak);
             let name = fit_text(&p, &entry.name, &font, (size_rect.min.x - top.x - 60.0).max(40.0));
             p.text(pos2(top.x + 44.0, y), Align2::LEFT_CENTER, name, font.clone(), pal.text);
@@ -777,15 +797,14 @@ fn hex_view(ui: &mut Ui, s: &mut Shared, bytes: &[u8], total: u64, body: Rect) {
     let mut area = egui::ScrollArea::vertical().id_salt("preview_hex").auto_shrink(false);
     if let Some(y) = s.view.scroll_to.take() { area = area.vertical_scroll_offset(y); }
     let output = area.show_rows(ui, row_h, rows + cut, |ui, range| {
-        ui.add_space(0.0);
         let top = ui.min_rect().min;
         let step = row_h + ui.spacing().item_spacing.y;
         let (r, _) = ui.allocate_exact_size(vec2(body.width() - 16.0, range.len() as f32 * step), Sense::hover());
         let p = ui.painter_at(r.expand(2.0));
         for (at, row) in range.enumerate() {
             let y = top.y + at as f32 * step + row_h / 2.0;
-            let Some(chunk) = bytes.chunks(16).nth(row) else {
-                p.text(pos2(top.x + 16.0, y), Align2::LEFT_CENTER, format!("Only the first {} of this file is shown", fsx::fmt_size(bytes.len() as u64, false)), FontId::proportional(12.0), pal.text_weak);
+            let Some(chunk) = bytes.get(row * 16..).filter(|rest| !rest.is_empty()).map(|rest| &rest[..rest.len().min(16)]) else {
+                p.text(pos2(top.x + 16.0, y), Align2::LEFT_CENTER, format!("Only the first {} of this file is shown", fsx::fmt_size(bytes.len() as u64, s.mebibytes)), FontId::proportional(12.0), pal.text_weak);
                 continue;
             };
             p.text(pos2(top.x + 16.0, y), Align2::LEFT_CENTER, format!("{:08x}", row * 16), font.clone(), pal.text_weak);
@@ -827,4 +846,67 @@ fn control_bar(ui: &mut Ui, s: &mut Shared, body: Rect, ctx: &egui::Context, ima
     }
     bar.add_space(10.0);
     if bar.add(flat("Open")).clicked() { s.send(Cmd::Open, ctx); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn entry(name: &str) -> Entry {
+        Entry {
+            name: name.into(), lname: name.into(), ext: "bin".into(), path: PathBuf::from(name), is_dir: false, size: 1,
+            modified: None, created: None, hidden: false, readonly: false, kind: Kind::Other,
+        }
+    }
+
+    fn app() -> (App, egui::Context) {
+        (App::new(Some(PathBuf::from("unused.png"))), egui::Context::default())
+    }
+
+    fn page(ctx: &egui::Context, page: u32, pages: u32) -> PreviewContent {
+        let image = egui::ColorImage::filled([2, 2], Color32::WHITE);
+        PreviewContent::Page { texture: ctx.load_texture("t", image, Default::default()), orig: [100, 200], page, pages }
+    }
+
+    #[test]
+    fn returning_to_the_shown_file_ends_the_loading_state() {
+        let (mut app, ctx) = app();
+        let (seen, unfinished) = (entry("seen.bin"), entry("/does/not/exist.bin"));
+        app.preview.remember(Key::of(&seen), PreviewContent::Hex(Arc::default(), 0));
+        app.want_preview(Some(Key::of(&seen)), &ctx);
+        app.hand_over(&ctx, &seen, 0);
+        app.want_preview(Some(Key::of(&unfinished)), &ctx);
+        app.hand_over(&ctx, &unfinished, 0);
+        assert!(app.quick.as_ref().unwrap().shared.lock().unwrap().loading.is_some());
+        app.want_preview(Some(Key::of(&seen)), &ctx);
+        app.hand_over(&ctx, &seen, 0);
+        assert!(app.quick.as_ref().unwrap().shared.lock().unwrap().loading.is_none(), "no spinner over a finished preview");
+    }
+
+    #[test]
+    fn turning_pages_during_loading_keeps_the_place() {
+        let (mut app, ctx) = app();
+        let file = entry("a.pdf");
+        app.hand_over(&ctx, &file, 0);
+        app.quick.as_ref().unwrap().shared.lock().unwrap().content = page(&ctx, 2, 5);
+        app.preview.content = PreviewContent::Loading;
+        app.preview.page = 2;
+        app.quick.as_ref().unwrap().shared.lock().unwrap().commands.push(Cmd::Page(1));
+        app.preview_commands(&ctx);
+        assert_eq!(app.preview.page, 3, "not back to the first page");
+        app.preview.content = page(&ctx, 3, 5);
+        app.quick.as_ref().unwrap().shared.lock().unwrap().commands.extend([Cmd::Page(1), Cmd::Page(1), Cmd::Page(1)]);
+        app.preview_commands(&ctx);
+        assert_eq!(app.preview.page, 4, "stops at the last page");
+    }
+
+    #[test]
+    fn a_page_keeps_its_size_while_fading_to_the_next() {
+        let ctx = egui::Context::default();
+        let PreviewContent::Page { texture, .. } = page(&ctx, 0, 2) else { unreachable!() };
+        let frame = Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0));
+        let r = fitted_rect(frame, &texture, [595, 842], 1.0, true, 1.0);
+        assert!(r.height() > 900.0, "a page fills the frame instead of using its size in points");
+    }
 }
