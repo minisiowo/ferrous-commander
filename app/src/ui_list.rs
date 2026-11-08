@@ -1051,7 +1051,7 @@ impl App {
         act(ui, "Copy as path", Act::CopyPath(i), &mut acts);
         #[cfg(target_os = "linux")]
         act(ui, "Properties / Permissions   Alt+Enter", Act::Properties(e.path.clone()), &mut acts);
-        self.path_color_menu(ui, if e.is_dir { "Folder color" } else { "Tag (Color)" }, paths);
+        self.path_color_menu(ui, if e.is_dir { "Folder color" } else { "Tag (Color)" }, paths.clone());
         if e.is_dir {
             let groups: Vec<String> = self.st.favorites.iter().map(|g| g.name.clone()).collect();
             ui.menu_button("Add to favorites", |ui| {
@@ -1060,6 +1060,7 @@ impl App {
                 }
             });
         }
+        act(ui, "Compress...", Act::Compress(i, paths), &mut acts);
         ui.separator();
         if ui
             .button(RichText::new("Delete                Del").color(hex("#ef7063")))

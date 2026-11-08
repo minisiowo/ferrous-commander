@@ -186,6 +186,12 @@ for the password, which is never saved. `.rar` needs [7-Zip](https://www.7-zip.o
 to be installed when the app starts; without one, a `.rar` file opens in its default
 application.
 
+To make an archive, right-click the selection and choose **Compress...**, then pick a name and
+a format: `.zip`, `.7z`, `.tar`, `.tar.gz`, `.tar.bz2` or `.tar.xz`. It appears in the current
+folder and is selected. An existing file is never replaced, and a failed or cancelled job
+leaves nothing behind. Links are stored as links on Linux and left out on Windows. Special
+files such as pipes are left out, and you are told how many.
+
 An archive with one top-level item unpacks as that item; anything else gets a folder named
 after the archive. Existing files are never replaced, and a damaged or cancelled archive
 leaves nothing behind. An archive that tries to write outside its folder is refused. Links

@@ -18,6 +18,7 @@ pub enum OpKind {
     /// Delete for good, after the user confirmed it.
     Destroy,
     Extract,
+    Compress,
     #[cfg(target_os = "linux")]
     Symlink,
     #[cfg(target_os = "linux")]
@@ -31,6 +32,7 @@ impl OpKind {
             OpKind::Move => "Moving",
             OpKind::Trash | OpKind::Destroy => "Deleting",
             OpKind::Extract => "Extracting",
+            OpKind::Compress => "Compressing",
             #[cfg(target_os = "linux")]
             OpKind::Symlink | OpKind::Hardlink => "Creating links",
         }
@@ -135,6 +137,43 @@ pub fn start_with_password(kind: OpKind, sources: Vec<PathBuf>, dest: Option<Pat
         ctx.request_repaint();
     });
     Job { kind, dest, progress, cancel }
+}
+
+/// Pack all of `sources` into one new archive named `name` in `dest`.
+pub fn start_compress(sources: Vec<PathBuf>, dest: PathBuf, name: String, kind: crate::compress::Kind, ctx: egui::Context) -> Job {
+    let progress = Arc::new(Mutex::new(Progress { total_items: sources.len(), ..Default::default() }));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (p, c, d) = (progress.clone(), cancel.clone(), dest.clone());
+    std::thread::spawn(move || {
+        let exact_dest = op_path(&d);
+        let exact: Vec<PathBuf> = sources.iter().map(|source| op_path(source)).collect();
+        let mut report = |entry: String| p.lock().unwrap().current = entry;
+        let packed = crate::compress::pack(&exact, &exact_dest, &name, kind, &c, &mut report);
+        match packed {
+            Ok(done) => {
+                let wrote = d.join(&done.name);
+                let mut g = p.lock().unwrap();
+                if done.skipped > 0 {
+                    g.errors.push(format!("{}: {} item(s) left out: special files, or names this format can't store", fsx::display_name(&wrote), done.skipped));
+                }
+                g.created.push(wrote);
+                g.done_items = g.total_items;
+                drop(g);
+                #[cfg(target_os = "linux")]
+                {
+                    p.lock().unwrap().current = "Writing to the drive".into();
+                    ctx.request_repaint();
+                    if let Err(e) = proven::sync(&exact_dest) {
+                        p.lock().unwrap().errors.push(format!("The archive may not have reached the drive: {e}"));
+                    }
+                }
+            }
+            Err(e) => p.lock().unwrap().errors.push(if e == "Cancelled" { e } else { format!("{name}: {e}") }),
+        }
+        p.lock().unwrap().finished = true;
+        ctx.request_repaint();
+    });
+    Job { kind: OpKind::Compress, dest: Some(dest), progress, cancel }
 }
 
 /// The path to operate on, immune to Windows path normalisation.

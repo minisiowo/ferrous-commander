@@ -39,6 +39,7 @@ impl App {
             Dialog::RenameGroup { .. } => ("Rename group", "Group name", "Rename"),
             Dialog::NewGroup { .. } => ("New group", "New Group name", "Create"),
             Dialog::Password { .. } => ("Password needed", "Password", "Extract"),
+            Dialog::Compress { .. } => ("Create archive", "Archive name", "Compress"),
         };
         let pal = self.pal;
         let creates = matches!(d, Dialog::NewFolder { .. } | Dialog::NewFile { .. });
@@ -60,6 +61,7 @@ impl App {
                     | Dialog::NewFile { name, focus, .. }
                     | Dialog::RenameGroup { name, focus, .. }
                     | Dialog::NewGroup { name, focus }
+                    | Dialog::Compress { name, focus, .. }
                     | Dialog::Password { name, focus, .. } => (name, focus),
                 };
                 let resp = ui.add(egui::TextEdit::singleline(name).hint_text(hint).password(secret).desired_width(340.0));
@@ -75,11 +77,23 @@ impl App {
                     ui.label(RichText::new(if cfg!(windows) { r"Use a full path, e.g. C:\Work or \\server\share." } else { "Use a full path, e.g. /home/user/Work or /mnt/share." }).color(pal.text_weak).size(11.0));
                     ui.label(RichText::new("Saved as a shortcut; offline locations can be added too.").color(pal.text_weak).size(11.0));
                 }
+                if let Dialog::Compress { sources, kind, .. } = &mut d {
+                    egui::ComboBox::from_label("Format").selected_text(kind.suffix()).show_ui(ui, |ui| {
+                        for option in crate::compress::Kind::ALL { ui.selectable_value(kind, option, option.suffix()); }
+                    });
+                    ui.label(RichText::new(format!("{} item(s), saved in this folder. Existing files are never replaced.", sources.len())).color(pal.text_weak).size(11.0));
+                }
                 if matches!(d, Dialog::RenameFavorite { .. }) {
                     ui.label(RichText::new("Changes the name in the sidebar only; the folder is not renamed. Leave empty to use the folder's name.").color(pal.text_weak).size(11.0));
                 }
                 let valid = matches!(d, Dialog::RenameFavorite { .. }) || (secret && !name.is_empty()) || !name.trim().is_empty() && (!matches!(d, Dialog::AddLocation { .. }) || std::path::Path::new(name.trim()).is_absolute());
-                if !name.trim().is_empty() && !valid { ui.label("Enter a full folder path or network share."); }
+                let valid = valid && match &d {
+                    Dialog::Compress { kind, .. } => fsx::valid_name(&crate::compress::file_name(&name, *kind)),
+                    _ => true,
+                };
+                if !name.trim().is_empty() && !valid {
+                    ui.label(if matches!(d, Dialog::Compress { .. }) { "This name can't be used here." } else { "Enter a full folder path or network share." });
+                }
 
                 let (enter, ctrl, shift, esc) = ui.input(|inp| {
                     (inp.key_pressed(Key::Enter), inp.modifiers.command, inp.modifiers.shift, inp.key_pressed(Key::Escape))
@@ -145,6 +159,9 @@ impl App {
                         if !name.trim().is_empty() {
                             self.group_add_new(name.trim().to_string());
                         }
+                    }
+                    Dialog::Compress { pane, sources, kind, .. } => {
+                        self.compress(*pane, sources.clone(), crate::compress::file_name(&name, *kind), *kind, ui.ctx());
                     }
                     Dialog::Password { archive, dest, .. } => {
                         self.extract_with_password(archive.clone(), dest.clone(), name.clone(), ui.ctx());

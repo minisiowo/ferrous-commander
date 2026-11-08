@@ -1147,6 +1147,29 @@ fn plain_delete_goes_to_the_trash_without_asking() {
 }
 
 #[test]
+fn compressing_asks_for_a_name_and_selects_the_new_archive() {
+    use crate::app::{Act, Dialog};
+    let (root, file, ctx, mut app) = safety_app("compress");
+    app.acts.push(Act::Compress(0, vec![file.clone()]));
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    assert!(matches!(app.dialog, Some(Dialog::Compress { .. })));
+    assert!(app.jobs.is_empty(), "nothing starts before the answer");
+    click_text(&ctx, &mut app, "Compress");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !app.jobs.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "compress timed out");
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(app.notices.is_empty(), "packed without problems");
+    let archive = file.with_extension("zip");
+    assert!(archive.is_file());
+    assert!(app.panes[0].selected.contains(&archive));
+    assert_eq!(std::fs::read(&file).unwrap(), b"keep", "the original stays");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn keys_cannot_confirm_a_permanent_deletion() {
     use crate::app::Notice;
     let (root, file, ctx, mut app) = safety_app("confirm");

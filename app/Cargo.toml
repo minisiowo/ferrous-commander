@@ -25,9 +25,9 @@ trash = "5.2.9"
 # Pure Rust on purpose: nothing to install, and both systems unpack the same way.
 bzip2 = "0.6.1"
 flate2 = "1.1.10"
-lzma-rust2 = { version = "0.25.0", default-features = false, features = ["std", "xz"] }
+lzma-rust2 = { version = "0.25.0", default-features = false, features = ["std", "xz", "encoder"] }
 ruzstd = "0.9.1"
-sevenz-rust2 = { version = "0.25.0", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd"] }
+sevenz-rust2 = { version = "0.25.0", default-features = false, features = ["aes256", "bzip2", "compress", "deflate", "ppmd"] }
 tar = { version = "0.4.46", default-features = false }
 zip = { version = "9.4.1", default-features = false, features = ["aes-crypto", "bzip2", "chrono", "deflate-flate2", "deflate64", "lzma", "ppmd", "xz"] }
 

@@ -3,6 +3,7 @@
 
 mod app;
 mod archive;
+mod compress;
 mod drives;
 mod fsx;
 #[cfg(windows)]

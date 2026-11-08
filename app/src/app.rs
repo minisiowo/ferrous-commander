@@ -194,6 +194,13 @@ pub enum Dialog {
         name: String,
         focus: bool,
     },
+    Compress {
+        pane: usize,
+        sources: Vec<PathBuf>,
+        name: String,
+        kind: crate::compress::Kind,
+        focus: bool,
+    },
     Password {
         archive: PathBuf,
         dest: Option<PathBuf>,
@@ -326,6 +333,8 @@ pub enum Act {
     OpenWith(PathBuf, Option<crate::openwith::AppEntry>),
     /// Unpack these archives into this folder, or next to each archive.
     Extract(Vec<PathBuf>, Option<PathBuf>),
+    /// Ask for a name and format, then pack these items in the pane's folder.
+    Compress(usize, Vec<PathBuf>),
 }
 
 pub struct ShotState {
@@ -1659,6 +1668,7 @@ impl App {
                     OpKind::Trash => "Moved to Trash",
                     OpKind::Destroy => "Permanently deleted",
                     OpKind::Extract => "Extracted",
+                    OpKind::Compress => "Compressed",
                     _ => "Finished processing",
                 };
                 self.toast(ToastKind::Success, format!("{word} {processed} item(s)"));
@@ -1679,6 +1689,12 @@ impl App {
                 }
             }
         }
+    }
+
+    pub fn compress(&mut self, pane: usize, sources: Vec<PathBuf>, name: String, kind: crate::compress::Kind, ctx: &egui::Context) {
+        let dest = self.panes[pane].path().to_path_buf();
+        self.toast(ToastKind::Info, format!("Compressing {} item(s) to {name}", sources.len()));
+        self.jobs.push(ops::start_compress(sources, dest, name, kind, ctx.clone()));
     }
 
     fn ask_for_password(&mut self) {
@@ -1791,6 +1807,16 @@ impl App {
                     let _ = tx.send(crate::openwith::launch(&p, app.as_ref()));
                     ctx.request_repaint();
                 });
+            }
+            Act::Compress(i, paths) => {
+                let folder = self.panes[i].path().to_path_buf();
+                let sources = crate::compress::outermost(
+                    paths.into_iter().filter(|p| !is_computer(p) && p.parent().is_some()).collect(),
+                );
+                if !is_computer(&folder) && !sources.is_empty() {
+                    let name = crate::compress::suggested_name(&sources, &folder);
+                    self.dialog = Some(Dialog::Compress { pane: i, sources, name, kind: crate::compress::Kind::Zip, focus: true });
+                }
             }
             Act::Extract(archives, dest) => {
                 // Search results can sit in different folders, and each job has one target.
