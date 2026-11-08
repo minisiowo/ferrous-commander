@@ -361,8 +361,8 @@ impl App {
                         p.rect_filled(rr, CornerRadius::same(1), pal.hover);
                     }
                     let ir = Rect::from_min_size(pos2(rr.min.x + 4.0, rr.center().y - 8.0), vec2(16.0, 16.0));
-                    icons::entry(p, ir, e.kind, &e.ext, pal.dark, false);
-                    let name = fit_text(p, &e.name, &font, rr.width() * 0.45);
+                    icons::entry(p, ir, e.kind, e.ext(), pal.dark, false);
+                    let name = fit_text(p, e.name(), &font, rr.width() * 0.45);
                     let ng = p.text(pos2(ir.max.x + 8.0, rr.center().y), Align2::LEFT_CENTER, name, font.clone(), pal.text);
                     let parent = e.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
                     let small = FontId::proportional(11.0);

@@ -583,7 +583,7 @@ pub fn search(root: PathBuf, query: String, show_hidden: bool, ctx: egui::Contex
                         stack.push(e.path.clone());
                     }
                 }
-                if !words.is_empty() && words.iter().all(|w| e.lname.contains(w.as_str())) {
+                if !words.is_empty() && words.iter().all(|w| e.lname().contains(w.as_str())) {
                     res.lock().unwrap().push(e);
                 }
             }

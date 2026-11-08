@@ -104,11 +104,15 @@ impl Kind {
 
 #[derive(Clone, Debug)]
 pub struct Entry {
-    pub name: String,
-    /// Lower-case name, cached for filtering and sorting.
-    pub lname: String,
-    pub ext: String,
     pub path: PathBuf,
+    /// Only when the name is not simply the end of the path.
+    custom_name: Option<Box<str>>,
+    /// Lower-case name for filtering and sorting, only when it differs from the name.
+    lower: Option<Box<str>>,
+    /// Where the name starts in the path.
+    name_at: u32,
+    /// Bytes of the extension, which is the end of the name.
+    ext_len: u16,
     pub is_dir: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
@@ -116,6 +120,45 @@ pub struct Entry {
     pub hidden: bool,
     pub readonly: bool,
     pub kind: Kind,
+}
+
+impl Entry {
+    /// A row called `name`, with nothing else known about it yet.
+    pub fn named(path: PathBuf, name: String, is_dir: bool, kind: Kind) -> Entry {
+        let bytes = path.as_os_str().as_encoded_bytes();
+        let name_at = bytes.len().checked_sub(name.len())
+            .filter(|&at| at <= u32::MAX as usize && &bytes[at..] == name.as_bytes());
+        let lowered = name.to_lowercase();
+        Entry {
+            ext_len: u16::try_from(split_ext(&name, is_dir).len()).unwrap_or(0),
+            lower: (lowered != name).then(|| lowered.into_boxed_str()),
+            name_at: name_at.unwrap_or(0) as u32,
+            custom_name: name_at.is_none().then(|| name.into_boxed_str()),
+            path,
+            is_dir,
+            size: 0,
+            modified: None,
+            created: None,
+            hidden: false,
+            readonly: false,
+            kind,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        if let Some(name) = &self.custom_name { return name; }
+        let tail = self.path.as_os_str().as_encoded_bytes().get(self.name_at as usize..).unwrap_or_default();
+        std::str::from_utf8(tail).unwrap_or_default()
+    }
+
+    pub fn lname(&self) -> &str {
+        self.lower.as_deref().unwrap_or_else(|| self.name())
+    }
+
+    pub fn ext(&self) -> &str {
+        let name = self.name();
+        name.get(name.len().saturating_sub(self.ext_len as usize)..).unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
@@ -171,13 +214,13 @@ fn attr_flags(md: &std::fs::Metadata) -> (bool, bool) {
     (false, md.permissions().readonly())
 }
 
-pub fn split_ext(name: &str, is_dir: bool) -> String {
+pub fn split_ext(name: &str, is_dir: bool) -> &str {
     if is_dir {
-        return String::new();
+        return "";
     }
     match name.rfind('.') {
-        Some(i) if i > 0 && i + 1 < name.len() => name[i + 1..].to_string(),
-        _ => String::new(),
+        Some(i) if i > 0 && i + 1 < name.len() => &name[i + 1..],
+        _ => "",
     }
 }
 
@@ -189,21 +232,15 @@ pub fn make_entry(path: PathBuf, md: &std::fs::Metadata) -> Entry {
     let is_dir = md.is_dir();
     let ext = split_ext(&name, is_dir);
     let (attr_hidden, readonly) = attr_flags(md);
-    let hidden = attr_hidden || is_hidden_by_rule(&name, &ext);
-    let kind = if is_dir { Kind::Folder } else { Kind::from_ext(&ext) };
-    Entry {
-        lname: name.to_lowercase(),
-        name,
-        ext,
-        path,
-        is_dir,
-        size: if is_dir { 0 } else { md.len() },
-        modified: md.modified().ok(),
-        created: md.created().ok(),
-        hidden,
-        readonly,
-        kind,
-    }
+    let hidden = attr_hidden || is_hidden_by_rule(&name, ext);
+    let kind = if is_dir { Kind::Folder } else { Kind::from_ext(ext) };
+    let mut entry = Entry::named(path, name, is_dir, kind);
+    entry.size = if is_dir { 0 } else { md.len() };
+    entry.modified = md.modified().ok();
+    entry.created = md.created().ok();
+    entry.hidden = hidden;
+    entry.readonly = readonly;
+    entry
 }
 
 /// Read one folder. Fast path: one directory walk, metadata comes with the entry on Windows.
@@ -225,6 +262,7 @@ pub fn read_dir(dir: &Path) -> Result<Vec<Entry>, String> {
         };
         out.push(make_entry(p, &md));
     }
+    out.shrink_to_fit();
     Ok(out)
 }
 
@@ -279,7 +317,7 @@ type NameKey = ();
 
 fn name_key(_e: &Entry) -> NameKey {
     #[cfg(windows)]
-    { crate::win::wide(&_e.name) }
+    { crate::win::wide(_e.name()) }
 }
 
 fn compare_entries(keyed_a: &(NameKey, Entry), keyed_b: &(NameKey, Entry), s: Sorting) -> Ordering {
@@ -291,7 +329,7 @@ fn compare_entries(keyed_a: &(NameKey, Entry), keyed_b: &(NameKey, Entry), s: So
         #[cfg(windows)]
         { crate::win::logical_cmp(&keyed_a.0, &keyed_b.0) }
         #[cfg(not(windows))]
-        { natural_cmp(&a.lname, &b.lname) }
+        { natural_cmp(a.lname(), b.lname()) }
     };
     // "Folders can't be sorted by size" (resource SortBySize_LargestFirst).
     if s.by == SortBy::Size && a.is_dir && b.is_dir {
@@ -308,7 +346,7 @@ fn compare_entries(keyed_a: &(NameKey, Entry), keyed_b: &(NameKey, Entry), s: So
         // standard sort may panic on an inconsistent order.
         SortBy::Size if a.is_dir != b.is_dir => b.is_dir.cmp(&a.is_dir),
         SortBy::Size => a.size.cmp(&b.size).then_with(by_name),
-        SortBy::Type => lower(&a.ext).cmp(lower(&b.ext)).then_with(by_name),
+        SortBy::Type => lower(a.ext()).cmp(lower(b.ext())).then_with(by_name),
     };
     if s.ascending { o } else { o.reverse() }
 }
@@ -583,6 +621,21 @@ pub fn is_link_like(md: &std::fs::Metadata) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    #[test]
+    fn an_entry_keeps_only_what_the_path_does_not_say() {
+        let plain = super::Entry::named(PathBuf::from("/x/notes.txt"), "notes.txt".into(), false, super::Kind::Other);
+        assert_eq!((plain.name(), plain.lname(), plain.ext()), ("notes.txt", "notes.txt", "txt"));
+        assert!(plain.custom_name.is_none() && plain.lower.is_none());
+        let mixed = super::Entry::named(PathBuf::from("/x/Żółw.TAR"), "Żółw.TAR".into(), false, super::Kind::Other);
+        assert_eq!((mixed.name(), mixed.lname(), mixed.ext()), ("Żółw.TAR", "żółw.tar", "TAR"));
+        let drive = super::Entry::named(PathBuf::from("D:\\"), "Data (D:)".into(), true, super::Kind::Folder);
+        assert_eq!((drive.name(), drive.ext()), ("Data (D:)", ""));
+        let folder = super::Entry::named(PathBuf::from("/x/a.d"), "a.d".into(), true, super::Kind::Folder);
+        assert_eq!(folder.ext(), "", "a folder has no extension");
+    }
+
     #[test]
     fn every_sorting_is_a_consistent_order() {
         use std::cmp::Ordering::Greater;
@@ -600,7 +653,7 @@ mod tests {
                     let s = Sorting { by, ascending, folders_on_top };
                     for a in &entries { for b in &entries { for c in &entries {
                         if super::compare_entries(a, b, s) != Greater && super::compare_entries(b, c, s) != Greater {
-                            assert_ne!(super::compare_entries(a, c, s), Greater, "{s:?}: {} {} {}", a.1.name, b.1.name, c.1.name);
+                            assert_ne!(super::compare_entries(a, c, s), Greater, "{s:?}: {} {} {}", a.1.name(), b.1.name(), c.1.name());
                         }
                     }}}
                 }
@@ -609,8 +662,8 @@ mod tests {
         let by_type = Sorting { by: SortBy::Type, ascending: true, folders_on_top: false };
         let (mut upper, mut lower) = (None, None);
         for e in &entries {
-            if e.1.name == "g.TXT" { upper = Some(e); }
-            if e.1.name == "h.txt" { lower = Some(e); }
+            if e.1.name() == "g.TXT" { upper = Some(e); }
+            if e.1.name() == "h.txt" { lower = Some(e); }
         }
         assert_eq!(super::compare_entries(upper.unwrap(), lower.unwrap(), by_type), std::cmp::Ordering::Less, "extensions ignore case");
 

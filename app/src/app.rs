@@ -984,26 +984,12 @@ impl App {
                 .iter()
                 .map(|d| {
                     // no file-system call here: a network drive may be asleep
-                    let mut e = Entry {
-                        name: String::new(),
-                        lname: String::new(),
-                        ext: String::new(),
-                        path: d.path.clone(),
-                        is_dir: true,
-                        size: 0,
-                        modified: None,
-                        created: None,
-                        hidden: false,
-                        readonly: false,
-                        kind: fsx::Kind::Folder,
-                    };
-                    e.name = if d.label.is_empty() || !cfg!(windows) {
+                    let name = if d.label.is_empty() || !cfg!(windows) {
                         d.name.clone()
                     } else {
                         format!("{} {}", d.name, d.label)
                     };
-                    e.lname = e.name.to_lowercase();
-                    e.hidden = false;
+                    let mut e = Entry::named(d.path.clone(), name, true, fsx::Kind::Folder);
                     e.size = d.total.saturating_sub(d.free);
                     e
                 })
@@ -1211,7 +1197,7 @@ impl App {
         // browsable, even when the children's names do not match the filter.
         let matching_folders: HashSet<&Path> = if self.st.tree_files && !f.is_empty() {
             entries.iter()
-                .filter(|e| e.is_dir && e.lname.contains(&f) && pane.expanded.contains(&e.path))
+                .filter(|e| e.is_dir && e.lname().contains(&f) && pane.expanded.contains(&e.path))
                 .map(|e| e.path.as_path())
                 .collect()
         } else {
@@ -1220,7 +1206,7 @@ impl App {
         let view: Vec<usize> = entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| (show_hidden || !e.hidden) && (f.is_empty() || e.lname.contains(&f)
+            .filter(|(_, e)| (show_hidden || !e.hidden) && (f.is_empty() || e.lname().contains(&f)
                 || e.path.ancestors().skip(1).any(|p| matching_folders.contains(p))))
             .map(|(k, _)| k)
             .collect();
@@ -1881,7 +1867,7 @@ impl App {
                             .cloned()
                     });
                 if let Some(e) = pick.as_ref() {
-                    let (p, n) = (e.path.clone(), e.name.clone());
+                    let (p, n) = (e.path.clone(), e.name().to_string());
                     if is_computer(self.panes[i].path()) {
                         return;
                     }
@@ -2317,7 +2303,7 @@ mod performance_tests {
         let result = app.folder_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(result.path, root);
         let mut listing = result.listing.unwrap();
-        assert_eq!(listing.entries[0].name, "loaded.txt");
+        assert_eq!(listing.entries[0].name(), "loaded.txt");
         listing.generation = 1;
         app.cache.insert(root.clone(), listing);
         app.update_view(0);

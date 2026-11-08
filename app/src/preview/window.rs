@@ -262,7 +262,7 @@ impl App {
         let locked = quick.sized.elapsed() < SIZE_LOCK;
         if locked { ctx.request_repaint_after(SIZE_LOCK); }
         let mut builder = ViewportBuilder::default()
-            .with_title(format!("{} — Preview", e.name))
+            .with_title(format!("{} — Preview", e.name()))
             .with_app_id("ferrous-commander-preview")
             .with_decorations(false)
             .with_inner_size(quick.size)
@@ -317,9 +317,9 @@ impl App {
         let mut changed = false;
         if quick.path.as_ref() != Some(&e.path) {
             quick.path = Some(e.path.clone());
-            s.name = e.name.clone();
+            s.name = e.name().to_string();
             s.kind = e.kind;
-            s.ext = e.ext.clone();
+            s.ext = e.ext().to_string();
             s.is_dir = e.is_dir;
             s.folder = folder;
             s.size = size;
@@ -1102,10 +1102,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn entry(name: &str) -> Entry {
-        Entry {
-            name: name.into(), lname: name.into(), ext: "bin".into(), path: PathBuf::from(name), is_dir: false, size: 1,
-            modified: None, created: None, hidden: false, readonly: false, kind: Kind::Other,
-        }
+        let mut entry = Entry::named(PathBuf::from(name), name.into(), false, Kind::Other);
+        entry.size = 1;
+        entry
     }
 
     fn app() -> (App, egui::Context) {

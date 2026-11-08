@@ -592,7 +592,8 @@ impl App {
         let (exists, is_file) = side_metadata(path);
         if is_file {
             // The label may be a custom name; the icon follows the real file.
-            let ext = fsx::split_ext(&fsx::display_name(path), false);
+            let name = fsx::display_name(path);
+            let ext = fsx::split_ext(&name, false);
             icons::entry(
                 ui.painter(),
                 ir,
@@ -1456,10 +1457,10 @@ impl App {
             .map(|e| {
                 (
                     e.path.clone(),
-                    e.name.clone(),
+                    e.name().to_string(),
                     e.is_dir,
                     e.kind,
-                    e.ext.clone(),
+                    e.ext().to_string(),
                 )
             })
             .collect();

@@ -815,13 +815,13 @@ impl App {
                     } else if e.is_dir {
                         icons::folder(&p, ir, self.folder_color(&e.path));
                     } else {
-                        icons::entry(&p, ir, e.kind, &e.ext, pal.dark, false);
+                        icons::entry(&p, ir, e.kind, e.ext(), pal.dark, false);
                     }
                     if !renaming {
-                        let name = if !self.st.show_extensions && !e.is_dir && !e.ext.is_empty() {
-                            e.name[..e.name.len() - e.ext.len() - 1].to_string()
+                        let name = if !self.st.show_extensions && !e.is_dir && !e.ext().is_empty() {
+                            e.name()[..e.name().len() - e.ext().len() - 1].to_string()
                         } else {
-                            e.name.clone()
+                            e.name().to_string()
                         };
                         let tx = ir.max.x + 8.0;
                         p.text(
@@ -837,7 +837,7 @@ impl App {
                     let s = if e.is_dir {
                         "[DIR]".to_string()
                     } else {
-                        e.ext.to_lowercase()
+                        e.ext().to_lowercase()
                     };
                     put(
                         fit_text(&p, &s, &small, cr.width() - 6.0),
@@ -1171,7 +1171,7 @@ impl App {
                 let ir = Rect::from_center_size(r.center(), vec2(s, s));
                 match e {
                     Some(e) if e.is_dir => icons::folder(&p, ir, self.folder_color(&e.path)),
-                    Some(e) => icons::entry(&p, ir, e.kind, &e.ext, pal.dark, true),
+                    Some(e) => icons::entry(&p, ir, e.kind, e.ext(), pal.dark, true),
                     None => icons::folder(&p, ir, blend(pal.panel, fsx::Kind::Folder.color(), 0.6)),
                 }
             }
@@ -1182,13 +1182,13 @@ impl App {
         let mb = self.st.mebibytes;
         let kind = if e.is_dir {
             "Directory".to_string()
-        } else if e.ext.is_empty() {
+        } else if e.ext().is_empty() {
             e.kind.label().to_string()
         } else {
-            format!("{} (.{})", e.kind.label(), e.ext.to_lowercase())
+            format!("{} (.{})", e.kind.label(), e.ext().to_lowercase())
         };
         let mut v = vec![
-            ("Name", e.name.clone()),
+            ("Name", e.name().to_string()),
             ("Type", kind),
             ("Created", fsx::fmt_datetime(e.created)),
             ("Modified", fsx::fmt_datetime(e.modified)),
