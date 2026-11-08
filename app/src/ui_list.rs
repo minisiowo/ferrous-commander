@@ -1177,6 +1177,7 @@ impl App {
 
     pub fn details_rows(&self, e: &Entry) -> Vec<(&'static str, String)> {
         let mb = self.st.mebibytes;
+        let exact_size = || format!("{}  ({} bytes)", fsx::fmt_size(e.size, mb), e.size);
         let kind = if e.is_dir {
             "Directory".to_string()
         } else if e.ext().is_empty() {
@@ -1205,20 +1206,14 @@ impl App {
                 ));
             }
             PreviewContent::Page { pages, .. } if current => {
-                v.push(("Size", format!("{}  ({} bytes)", fsx::fmt_size(e.size, mb), e.size)));
+                v.push(("Size", exact_size()));
                 v.push(("Pages", pages.to_string()));
             }
             PreviewContent::Image(_, [w, h], _) | PreviewContent::Animation(_, [w, h]) if current => {
-                v.push((
-                    "Size",
-                    format!("{}  ({} bytes)", fsx::fmt_size(e.size, mb), e.size),
-                ));
+                v.push(("Size", exact_size()));
                 v.push(("Resolution", format!("{w} × {h}")));
             }
-            _ if !e.is_dir => v.push((
-                "Size",
-                format!("{}  ({} bytes)", fsx::fmt_size(e.size, mb), e.size),
-            )),
+            _ if !e.is_dir => v.push(("Size", exact_size())),
             _ => {}
         }
         let mut attrs = Vec::new();

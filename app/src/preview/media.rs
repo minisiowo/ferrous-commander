@@ -21,10 +21,7 @@ const LARGE_VIDEO_PIXELS: u64 = 1920 * 1080;
 pub const FILM_PAGE: u32 = 1;
 
 fn to_picture(bytes: &[u8]) -> Option<Picture> {
-    let img = image::load_from_memory(bytes).ok()?;
-    // `thumbnail` also enlarges, which only blurs a small cover.
-    let img = if img.width().max(img.height()) > MAX_SIDE { img.thumbnail(MAX_SIDE, MAX_SIDE) } else { img }.into_rgba8();
-    Some(Picture { size: [img.width(), img.height()], delays: Vec::new(), rgba: img.into_raw() })
+    Some(super::picture::to_picture(image::load_from_memory(bytes).ok()?, MAX_SIDE))
 }
 
 fn note(key: &str, value: &str) -> Reply {

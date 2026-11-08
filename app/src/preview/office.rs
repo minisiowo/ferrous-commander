@@ -7,7 +7,7 @@ use std::path::Path;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use super::load::{Block, BlockKind, Loaded, Options, Picture, Reply, failed, plain};
+use super::load::{Block, BlockKind, Loaded, Options, Reply, failed, plain};
 use super::text;
 use crate::fsx;
 
@@ -333,9 +333,7 @@ pub fn epub(p: &Path) -> Reply {
     let cover = cover_href.or_else(|| manifest.get(&cover_id?).cloned());
     let picture = cover.and_then(|href| {
         let bytes = entry_bytes(&mut zip, &beside(&package, &href))?;
-        let img = image::load_from_memory(&bytes).ok()?;
-        let img = if img.width().max(img.height()) > MAX_COVER { img.thumbnail(MAX_COVER, MAX_COVER) } else { img }.into_rgba8();
-        Some(Picture { size: [img.width(), img.height()], delays: Vec::new(), rgba: img.into_raw() })
+        Some(super::picture::to_picture(image::load_from_memory(&bytes).ok()?, MAX_COVER))
     });
     let mut out = empty();
     for id in spine {
