@@ -20,6 +20,8 @@ pub const REFRESH_MS: u64 = crate::defaults::REFRESH_MS;
 const FOLDER_WORKERS: usize = 4;
 /// Slowest redraw while nothing happens, for the drive list, sidebar and clipboard.
 /// Everything that needs the window sooner wakes it.
+/// Looking for what to forget needs no doing on every frame.
+const EVICT_EVERY: Duration = Duration::from_secs(1);
 const IDLE_HEARTBEAT: Duration = Duration::from_secs(5);
 /// Longest the interface waits to learn what a path is. A sleeping share can take
 /// half a minute; past this limit the background folder loader takes over.
@@ -330,7 +332,7 @@ pub struct App {
     folder_pending: HashMap<PathBuf, bool>,
     pub drives: Vec<DriveInfo>,
     drives_at: Option<Instant>,
-    pub clip: Option<(Vec<PathBuf>, bool)>,
+    pub clip: Option<(std::sync::Arc<[PathBuf]>, bool)>,
     #[cfg(windows)]
     clip_sequence: u32,
     pub jobs: Vec<Job>,
@@ -359,6 +361,7 @@ pub struct App {
     pub frame: u64,
     dirty: bool,
     last_save: Instant,
+    last_evict: Instant,
     applied: Option<(ThemeName, String, u32, Option<crate::omarchy::Colors>)>,
     omarchy_watch: Option<crate::omarchy::Watch>,
     omarchy_colors: Option<crate::omarchy::Colors>,
@@ -593,6 +596,7 @@ impl App {
             frame: 0,
             dirty: false,
             last_save: Instant::now(),
+            last_evict: Instant::now(),
             applied: None,
             omarchy_watch: None,
             omarchy_colors: None,
@@ -733,7 +737,7 @@ impl App {
             let sequence = crate::file_transfer::sequence();
             if self.clip_sequence != sequence
                 && let Ok(files) = crate::file_transfer::read() {
-                    self.clip = files;
+                    self.clip = files.map(|(paths, cut)| (paths.into(), cut));
                     self.clip_sequence = sequence;
                 }
         }
@@ -823,8 +827,11 @@ impl App {
             }
             self.update_view(i);
         }
-        self.evict();
-        self.preview.expire();
+        if self.last_evict.elapsed() >= EVICT_EVERY {
+            self.last_evict = Instant::now();
+            self.evict();
+            self.preview.expire();
+        }
         self.publish_watch_list();
     }
 
@@ -1173,22 +1180,25 @@ impl App {
     }
 
     pub fn update_view(&mut self, i: usize) {
-        let p = self.panes[i].path().to_path_buf();
-        let Some(l) = self.cache.get(&p) else { return };
+        let Some(l) = self.cache.get(self.panes[i].path()) else { return };
         if l.generation == 0 {
             // Keep a requested selection until the real listing arrives.
             self.panes[i].view.clear();
             return;
         }
+        let unchanged = self.panes[i].view_key.as_ref().is_some_and(|(path, generation, filter, hidden)| {
+            path == self.panes[i].path() && *generation == l.generation
+                && *filter == self.panes[i].filter && *hidden == self.st.show_hidden
+        });
+        if unchanged {
+            return;
+        }
         let key = (
-            p.clone(),
+            self.panes[i].path().to_path_buf(),
             l.generation,
             self.panes[i].filter.clone(),
             self.st.show_hidden,
         );
-        if self.panes[i].view_key.as_ref() == Some(&key) {
-            return;
-        }
         let pane = &mut self.panes[i];
         let entries = if self.st.tree_files { &pane.tree_entries } else { &l.entries };
         let f = pane.filter.to_lowercase();
@@ -1780,7 +1790,7 @@ impl App {
                         "Selection copied to Clipboard"
                     },
                 );
-                self.clip = Some((sel, cut));
+                self.clip = Some((sel.into(), cut));
             }
             Act::Paste(i, into) => {
                 let dest = into.unwrap_or_else(|| self.panes[i].path().to_path_buf());
@@ -1793,12 +1803,12 @@ impl App {
                     Err(e) => { self.toast(ToastKind::Error, e); return; }
                 };
                 #[cfg(not(windows))]
-                let clipboard = self.clip.take();
+                let clipboard = self.clip.take().map(|(paths, cut)| (paths.to_vec(), cut));
                 match clipboard {
                     Some((paths, cut)) => {
                         let kind = if cut { OpKind::Move } else { OpKind::Copy };
                         if !cut {
-                            self.clip = Some((paths.clone(), false));
+                            self.clip = Some((paths.as_slice().into(), false));
                         }
                         self.start_job(kind, paths, Some(dest), ctx);
                     }

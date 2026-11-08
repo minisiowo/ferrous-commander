@@ -507,10 +507,7 @@ impl App {
         let ctx = ui.ctx().clone();
         let is_active = self.active == i;
         let dragging = egui::DragAndDrop::has_payload_of_type::<DragPaths>(&ctx);
-        let cut: Vec<PathBuf> = match &self.clip {
-            Some((v, true)) => v.clone(),
-            _ => Vec::new(),
-        };
+        let cut = self.clip.as_ref().filter(|(_, cut)| *cut).map(|(paths, _)| paths.clone());
         let in_computer = is_computer(&path);
         let mut toggles = Vec::new();
         let mut clicks: Vec<(usize, Modifiers)> = Vec::new();
@@ -546,7 +543,7 @@ impl App {
                         selected,
                         is_active,
                         dragging,
-                        &cut,
+                        cut.as_deref().unwrap_or_default(),
                         in_computer,
                     );
                     // Selection is applied after drawing: the folder's listing is out of the
@@ -819,15 +816,15 @@ impl App {
                     }
                     if !renaming {
                         let name = if !self.st.show_extensions && !e.is_dir && !e.ext().is_empty() {
-                            e.name()[..e.name().len() - e.ext().len() - 1].to_string()
+                            &e.name()[..e.name().len() - e.ext().len() - 1]
                         } else {
-                            e.name().to_string()
+                            e.name()
                         };
                         let tx = ir.max.x + 8.0;
                         p.text(
                             pos2(tx, cr.center().y),
                             Align2::LEFT_CENTER,
-                            fit_text(&p, &name, &font, cr.max.x - tx - 6.0),
+                            fit_text(&p, name, &font, cr.max.x - tx - 6.0),
                             font.clone(),
                             main,
                         );
