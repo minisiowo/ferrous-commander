@@ -101,7 +101,7 @@ fn local(name: &str) -> &str {
     name.rsplit(':').next().unwrap_or(name)
 }
 
-fn attribute(e: &BytesStart, wanted: &str) -> Option<String> {
+pub(super) fn attribute(e: &BytesStart, wanted: &str) -> Option<String> {
     e.attributes().flatten().find(|a| local(a.key.as_ref()) == wanted)
         .map(|a| a.value.into_owned())
 }

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::{archive_list, media, office, pdf, picture, text};
+use super::{archive_list, media, model, office, pdf, picture, text};
 use crate::fsx::{self, Kind};
 
 /// What part of a file to prepare, and how large.
@@ -41,6 +41,8 @@ pub enum Loaded {
     Text { text: String, trimmed: bool, spans: Vec<Spans> },
     /// Original width and height; the pixels travel beside it as a `Picture`.
     Image([u32; 2]),
+    /// A drawn 3D model, with nothing behind it; its size in points, as for `Image`.
+    Model([u32; 2]),
     Page { orig: [u32; 2], page: u32, pages: u32 },
     /// A sharper copy of part of a picture that is already shown.
     Detail,
@@ -105,6 +107,8 @@ pub fn load(p: &Path, options: Options) -> Reply {
         "odt" => return office::opendocument(p),
         "pptx" | "pptm" => return office::slides(p),
         "epub" => return office::epub(p),
+        "stl" => return model::stl(p, options),
+        "3mf" => return model::three_mf(p, options),
         "rar" => return plain(Loaded::Info { rows: vec![("Archive".into(), "RAR contents are shown after unpacking".into())], more: false }),
         _ => {}
     }

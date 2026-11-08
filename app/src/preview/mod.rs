@@ -7,6 +7,7 @@ mod archive_list;
 pub mod helper;
 pub mod load;
 mod media;
+mod model;
 mod office;
 mod pdf;
 mod picture;
@@ -297,9 +298,11 @@ fn content_of((loaded, picture): Reply, ctx: &egui::Context) -> PreviewContent {
     match (loaded, picture) {
         (Loaded::Text { text, trimmed, spans }, _) => PreviewContent::Text(Arc::new(TextDoc::new(text, trimmed, spans))),
         (Loaded::Image(orig), Some(p)) => picture_content(p, orig, ctx),
+        // See-through around the shape on purpose, so no checkerboard behind it.
+        (Loaded::Model(orig), Some(p)) => PreviewContent::Image(texture(&p.rgba, p.size, ctx), orig, false),
         (Loaded::Page { orig, page, pages }, Some(p)) => PreviewContent::Page { texture: texture(&p.rgba, p.size, ctx), orig, page, pages },
         (Loaded::Detail, Some(p)) => PreviewContent::Detail(texture(&p.rgba, p.size, ctx)),
-        (Loaded::Image(_) | Loaded::Page { .. } | Loaded::Detail, None) => PreviewContent::Error("The picture is missing".into()),
+        (Loaded::Image(_) | Loaded::Model(_) | Loaded::Page { .. } | Loaded::Detail, None) => PreviewContent::Error("The picture is missing".into()),
         (Loaded::Doc { blocks, source, trimmed }, picture) => {
             let source = source.map(|s| Arc::new(TextDoc::new(s, trimmed, Vec::new())));
             let cover = picture.map(|p| (texture(&p.rgba, p.size, ctx), p.size));

@@ -19,7 +19,7 @@ pub fn is_picture(head: &[u8], ext: &str) -> bool {
     strong || fsx::IMAGE_EXTS.contains(&ext)
 }
 
-fn to_picture(img: DynamicImage, max_side: u32) -> Picture {
+pub(super) fn to_picture(img: DynamicImage, max_side: u32) -> Picture {
     let small = if img.width() > max_side || img.height() > max_side { img.thumbnail(max_side, max_side) } else { img };
     let rgba = small.to_rgba8();
     Picture { size: [rgba.width(), rgba.height()], delays: Vec::new(), rgba: rgba.into_raw() }

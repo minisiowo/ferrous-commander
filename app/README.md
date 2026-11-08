@@ -23,7 +23,7 @@
 | 🪟 **Tiled panels** | As many panels as you need, split either way, with tabs you can drag between them |
 | 🧭 **Navigation** | Folder columns, expandable tree, breadcrumbs, history, type to filter |
 | ⭐ **Sidebar** | Favorites in groups, drives and pendrives with eject, cloud folders |
-| 👁️ **Preview and search** | Space opens a floating preview of PDFs, pictures, code, documents, spreadsheets, archives, audio and video. Search, color tags for folders and files |
+| 👁️ **Preview and search** | Space opens a floating preview of PDFs, pictures, code, documents, spreadsheets, archives, audio, video and 3D models (STL, 3MF). Search, color tags for folders and files |
 | 📦 **Archives** | Unpack and create archives with nothing else to install |
 | 🗑️ **Safe by default** | Delete goes to the Trash, existing files are never overwritten, cancelled jobs leave nothing behind |
 | 🎨 **Themes** | Dark, Tokyo Night, Gruvbox, Catppuccin Latte, Rosé Pine, and live [Omarchy](https://omarchy.org/) theme |
