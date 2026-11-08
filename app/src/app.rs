@@ -205,6 +205,7 @@ pub enum Dialog {
 
 /// Something the user must see or decide. Unlike a toast, it stays until answered.
 pub enum Notice {
+    /// Each item with why it cannot go to the trash; empty when the user asked to skip it.
     ConfirmDestroy { items: Vec<(PathBuf, String)> },
     ConfirmClose,
     /// A program from a place the user does not control. See `App::open`.
@@ -292,6 +293,7 @@ pub enum Act {
     #[cfg(target_os = "linux")]
     LinkToOther(usize, bool),
     Delete(usize),
+    DeleteForever(usize),
     Rename(usize),
     CommitRename(usize),
     NewFolder(usize),
@@ -1914,6 +1916,17 @@ impl App {
                     pane.cursor = Some(c);
                 }
                 self.start_job(OpKind::Trash, sel, None, ctx);
+            }
+            Act::DeleteForever(i) => {
+                let items: Vec<(PathBuf, String)> = self
+                    .selection(i)
+                    .into_iter()
+                    .filter(|p| !is_computer(p) && p.parent().is_some())
+                    .map(|p| (p, String::new()))
+                    .collect();
+                if !items.is_empty() {
+                    self.notices.push(Notice::ConfirmDestroy { items });
+                }
             }
             Act::Rename(i) => {
                 // the cursor item when it is selected, else the first selected item

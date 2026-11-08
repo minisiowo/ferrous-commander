@@ -110,7 +110,7 @@ and follows `omarchy theme set` within a second, without a restart.
 Programs on removable drives and network locations ask before they run. Added drives and
 pendrives have an eject button in the sidebar; right click offers the same.
 
-Ctrl+C/X/V copy/cut/paste · Del delete (Recycle Bin) · F2 rename · Ctrl+Shift+N new folder ·
+Ctrl+C/X/V copy/cut/paste · Del move to Trash/Recycle Bin · Shift+Del delete for good (asks first) · F2 rename · Ctrl+Shift+N new folder ·
 Ctrl+N new file · Ctrl+D duplicate · Ctrl+T/W/Tab tabs · Ctrl+Shift+T reopen tab ·
 Alt+←/→ back/forward · Backspace parent · \ or Alt+D edit path · type to filter ·
 Space preview · Ctrl+H hidden files · Ctrl+F search · F5 refresh · F10 terminal ·

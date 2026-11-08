@@ -1099,6 +1099,54 @@ fn held_keys_do_not_repeat_file_operations() {
 }
 
 #[test]
+fn shift_delete_asks_first_and_then_deletes_for_good() {
+    use crate::app::Notice;
+    let (root, file, ctx, mut app) = safety_app("forever");
+    let press = |ctx: &egui::Context, app: &mut App| {
+        frame(ctx, app, vec![key_event(Key::Delete, false, Modifiers::SHIFT)], Modifiers::SHIFT);
+        frame(ctx, app, vec![Event::Key { key: Key::Delete, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::SHIFT }], Modifiers::SHIFT);
+    };
+    press(&ctx, &mut app);
+    assert!(matches!(&app.notices[0], Notice::ConfirmDestroy { items } if items.len() == 1 && items[0].0 == file && items[0].1.is_empty()));
+    assert!(app.jobs.is_empty());
+    assert_eq!(std::fs::read(&file).unwrap(), b"keep", "nothing happens before the answer");
+    click_text(&ctx, &mut app, "Keep the files");
+    assert!(app.notices.is_empty() && app.jobs.is_empty());
+    assert_eq!(std::fs::read(&file).unwrap(), b"keep");
+
+    press(&ctx, &mut app);
+    click_text(&ctx, &mut app, "Delete permanently");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !app.jobs.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "delete timed out");
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(app.notices.is_empty(), "deleted without problems");
+    assert!(std::fs::symlink_metadata(&file).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn plain_delete_goes_to_the_trash_without_asking() {
+    use crate::app::Notice;
+    use crate::ops::OpKind;
+    let (root, file, ctx, mut app) = safety_app("plain");
+    // Gone from disk but still listed: the real job runs and nothing lands in the real trash.
+    std::fs::remove_file(&file).unwrap();
+    frame(&ctx, &mut app, vec![key_event(Key::Delete, false, Modifiers::NONE)], Modifiers::NONE);
+    assert!(app.jobs.first().is_none_or(|job| job.kind == OpKind::Trash));
+    assert!(!app.notices.iter().any(|n| matches!(n, Notice::ConfirmDestroy { .. })));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !app.jobs.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "delete timed out");
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn keys_cannot_confirm_a_permanent_deletion() {
     use crate::app::Notice;
     let (root, file, ctx, mut app) = safety_app("confirm");

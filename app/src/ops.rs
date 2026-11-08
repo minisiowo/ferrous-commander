@@ -15,7 +15,7 @@ pub enum OpKind {
     Copy,
     Move,
     Trash,
-    /// Delete what the user confirmed cannot go to the Recycle Bin.
+    /// Delete for good, after the user confirmed it.
     Destroy,
     Extract,
     #[cfg(target_os = "linux")]
@@ -185,21 +185,27 @@ fn shell_delete(src: &Path) -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-/// Delete for good. On Windows the Shell does this for items without a Recycle Bin. Here
-/// the trash is exactly what was refused, so it must not be involved. Neither call
-/// follows links: a link is removed, not what it points to.
+/// Delete for good. The trash must not be involved, and the Windows Shell would use the
+/// Recycle Bin wherever a drive has one. None of these calls follow links: a link is
+/// removed, not what it points to.
 fn destroy(src: &Path) -> Result<Option<PathBuf>, String> {
+    let md = std::fs::symlink_metadata(src).map_err(|e| e.to_string())?;
+    // Windows removes a link to a folder, or a junction, as a folder. `is_dir` is false for it.
     #[cfg(windows)]
-    { shell_delete(src) }
+    let folder_link = std::os::windows::fs::FileTypeExt::is_symlink_dir(&md.file_type());
     #[cfg(not(windows))]
-    {
-        let md = std::fs::symlink_metadata(src).map_err(|e| e.to_string())?;
-        let removed = if md.is_dir() { std::fs::remove_dir_all(src) } else { std::fs::remove_file(src) };
-        #[cfg(target_os = "linux")]
-        if md.is_dir() && let Some(parent) = src.parent() { proven::settle_freed_folders(parent); }
-        removed.map_err(|e| e.to_string())?;
-        Ok(None)
-    }
+    let folder_link = false;
+    let removed = if md.is_dir() {
+        std::fs::remove_dir_all(src)
+    } else if folder_link {
+        std::fs::remove_dir(src)
+    } else {
+        std::fs::remove_file(src)
+    };
+    #[cfg(target_os = "linux")]
+    if md.is_dir() && let Some(parent) = src.parent() { proven::settle_freed_folders(parent); }
+    removed.map_err(|e| e.to_string())?;
+    Ok(None)
 }
 
 #[cfg(target_os = "linux")]
@@ -794,6 +800,29 @@ mod tests {
             assert_eq!(progress.created, [remote_dir.join("over-the-wire.bin")], "reported as listed");
             assert!(!file.exists());
             assert_eq!(std::fs::read(dst.join("over-the-wire.bin")).unwrap(), data);
+        }
+
+        /// A local drive has a Recycle Bin, and a permanent delete must not use it.
+        #[test]
+        fn destroy_removes_files_folders_and_links_without_the_shell() {
+            let root = Sandbox::new("destroy"); let (src, dst) = root.dirs();
+            let file = src.join("read-only.txt"); std::fs::write(&file, "x").unwrap();
+            let mut read_only = std::fs::metadata(&file).unwrap().permissions(); read_only.set_readonly(true);
+            std::fs::set_permissions(&file, read_only.clone()).unwrap();
+            let name = src.join("report."); std::fs::write(exact(&name).unwrap(), "x").unwrap();
+            let folder = src.join("folder"); std::fs::create_dir(&folder).unwrap();
+            std::fs::write(folder.join("inner.txt"), "x").unwrap();
+            std::fs::set_permissions(folder.join("inner.txt"), read_only).unwrap();
+            for item in [&file, &name, &folder] {
+                destroy(&exact(item).unwrap()).unwrap();
+                assert!(std::fs::symlink_metadata(exact(item).unwrap()).is_err(), "{}", item.display());
+            }
+            std::fs::write(dst.join("kept.txt"), "kept").unwrap();
+            let link = src.join("link");
+            if std::os::windows::fs::symlink_dir(&dst, &link).is_err() { eprintln!("Skipped links: no privilege"); return; }
+            destroy(&exact(&link).unwrap()).unwrap();
+            assert!(std::fs::symlink_metadata(&link).is_err());
+            assert_eq!(std::fs::read(dst.join("kept.txt")).unwrap(), b"kept", "what the link points to stays");
         }
 
         #[test]

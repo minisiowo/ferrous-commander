@@ -402,6 +402,7 @@ impl App {
                 }
             }
             Key::A if ctrl => self.acts.push(Act::SelectAll(i)),
+            Key::Delete if m.shift && !ctrl && !m.alt => self.acts.push(Act::DeleteForever(i)),
             Key::Delete => self.acts.push(Act::Delete(i)),
             Key::F2 => self.acts.push(Act::Rename(i)),
             Key::F5 => self.acts.push(Act::Refresh),

@@ -49,7 +49,7 @@ impl eframe::App for Shell {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
         input.max_texture_side = Some(input.max_texture_side.map_or(MAX_TEXTURE_SIDE, |side| side.min(MAX_TEXTURE_SIDE)));
         #[cfg(windows)]
-        file_transfer::shortcuts(input, &mut self.held_keys);
+        file_transfer::shortcuts(input, &mut self.held_keys, _ctx.text_edit_focused());
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.app.draw(ui);

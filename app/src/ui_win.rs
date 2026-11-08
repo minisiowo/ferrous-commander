@@ -184,9 +184,15 @@ impl App {
                 };
                 match notice {
                     Notice::ConfirmDestroy { items } => {
-                        let mut reasons: Vec<&str> = items.iter().map(|(_, reason)| reason.as_str()).collect();
+                        let mut reasons: Vec<&str> = items.iter().map(|(_, reason)| reason.as_str()).filter(|reason| !reason.is_empty()).collect();
                         reasons.dedup();
-                        ui.label(RichText::new(format!("{} item(s) cannot go to the Recycle Bin: {}.", items.len(), reasons.join("; "))).color(pal.text));
+                        let bin = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
+                        let intro = if reasons.is_empty() {
+                            format!("{} item(s) will be deleted without going to the {bin}.", items.len())
+                        } else {
+                            format!("{} item(s) cannot go to the {bin}: {}.", items.len(), reasons.join("; "))
+                        };
+                        ui.label(RichText::new(intro).color(pal.text));
                         ui.label(RichText::new("Nothing has been deleted yet. If you continue, these items cannot be recovered.").color(hex("#ef7063")).strong());
                         ui.add_space(6.0);
                         let names: Vec<String> = items.iter().map(|(path, _)| fsx::display_name(path)).collect();

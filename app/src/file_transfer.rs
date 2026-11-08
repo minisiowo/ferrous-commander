@@ -197,7 +197,8 @@ fn text() -> String {
 /// One press is one operation: a held Ctrl+V must not paste the files repeatedly. Raw
 /// input carries no repeat flag (egui derives it later), hence `held`. A repeat is
 /// dropped, not passed on: egui never saw the press, so it would look like a new one.
-pub fn shortcuts(input: &mut egui::RawInput, held: &mut std::collections::HashSet<egui::Key>) {
+/// Shift+Delete cuts only while typing. In the file list it deletes for good.
+pub fn shortcuts(input: &mut egui::RawInput, held: &mut std::collections::HashSet<egui::Key>, typing: bool) {
     input.events.retain_mut(|event| {
         match event {
             egui::Event::WindowFocused(false) => held.clear(),
@@ -209,7 +210,7 @@ pub fn shortcuts(input: &mut egui::RawInput, held: &mut std::collections::HashSe
         let command = if m.command && !m.shift && !m.alt {
             match key { egui::Key::C => 1, egui::Key::X => 2, egui::Key::V => 3, _ => 0 }
         } else if m.shift && !m.ctrl && !m.alt {
-            match key { egui::Key::Delete => 2, egui::Key::Insert => 3, _ => 0 }
+            match key { egui::Key::Delete if typing => 2, egui::Key::Insert => 3, _ => 0 }
         } else { 0 };
         if command == 0 { return true; }
         if !first_press { return false; }
@@ -329,9 +330,18 @@ mod tests {
             input.events.push(egui::Event::Key { key, physical_key: None,
                 pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND });
         }
-        shortcuts(&mut input, &mut Default::default());
+        shortcuts(&mut input, &mut Default::default(), false);
         assert!(matches!(input.events[0], egui::Event::Copy));
         assert!(matches!(input.events[1], egui::Event::Cut));
+    }
+
+    #[test]
+    fn shift_delete_reaches_the_file_list_as_a_key() {
+        let event = egui::Event::Key { key: egui::Key::Delete, physical_key: None,
+            pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT };
+        let mut input = egui::RawInput { events: vec![event], ..Default::default() };
+        shortcuts(&mut input, &mut Default::default(), false);
+        assert!(matches!(input.events[0], egui::Event::Key { key: egui::Key::Delete, .. }), "must not cut files");
     }
 
     #[test]
@@ -341,7 +351,7 @@ mod tests {
         let mut held = Default::default();
         let mut run = |events: Vec<egui::Event>| {
             let mut input = egui::RawInput { events, ..Default::default() };
-            shortcuts(&mut input, &mut held);
+            shortcuts(&mut input, &mut held, true);
             input.events
         };
         let cut = |events: &[egui::Event]| events.iter().filter(|e| matches!(e, egui::Event::Cut)).count();
