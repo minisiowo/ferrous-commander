@@ -824,6 +824,7 @@ impl App {
             self.update_view(i);
         }
         self.evict();
+        self.preview.expire();
         self.publish_watch_list();
     }
 

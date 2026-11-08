@@ -25,9 +25,12 @@ use load::{ArchiveEntry, Block, Loaded, ModelView, Options, Picture, Reply, Span
 
 /// Longest side of a decoded picture; `MAX_TEXTURE_SIDE` in `main.rs` limits it from above.
 pub const MAX_SIDE: u32 = 2048;
-/// Decoded previews kept for going back and forth.
-const CACHE_BYTES: usize = 256 * 1024 * 1024;
+/// Decoded previews kept for going back and forth. Textures count: on a machine with
+/// integrated graphics they are ordinary memory.
+const CACHE_BYTES: usize = 64 * 1024 * 1024;
 const CACHE_ITEMS: usize = 64;
+/// A preview left alone this long gives its memory back.
+const CACHE_IDLE: Duration = Duration::from_secs(60);
 /// A running job is allowed to finish, for the cache, unless it is this slow.
 const ABANDON_AFTER: Duration = Duration::from_millis(200);
 /// One file may not occupy a lane for longer than this.
@@ -77,6 +80,10 @@ pub struct TextDoc {
 }
 
 impl TextDoc {
+    fn bytes(&self) -> usize {
+        self.text.len() + self.lines.len() * 8 + self.spans.iter().map(|line| 24 + line.len() * 8).sum::<usize>()
+    }
+
     pub fn new(text: String, trimmed: bool, spans: Vec<Spans>) -> TextDoc {
         let mut lines = Vec::new();
         let mut longest = 0;
@@ -156,14 +163,20 @@ pub struct TableDoc {
 impl PreviewContent {
     fn bytes(&self) -> usize {
         match self {
-            PreviewContent::Text(t) => t.text.len() + t.lines.len() * 8,
+            PreviewContent::Text(t) => t.bytes(),
             PreviewContent::Image(tex, ..) | PreviewContent::Model(tex, _) | PreviewContent::Page { texture: tex, .. } | PreviewContent::Detail(tex) => tex.byte_size(),
-            PreviewContent::Animation(frames, _) => frames.iter().map(|(tex, _)| tex.byte_size()).sum(),
-            PreviewContent::Doc(doc) => doc.blocks.iter().map(|b| b.text.len() + 32).sum(),
+            PreviewContent::Animation(frames, _) => frames_bytes(frames),
+            PreviewContent::Doc(doc) => {
+                let blocks: usize = doc.blocks.iter().map(|b| b.text.len() + 32).sum();
+                blocks + doc.source.as_ref().map_or(0, |s| s.bytes()) + doc.cover.as_ref().map_or(0, |(tex, _)| tex.byte_size())
+            }
             PreviewContent::Hex(bytes, _) => bytes.len(),
             PreviewContent::Table(table) => table.rows.iter().flatten().map(|c| c.len() + 24).sum(),
             PreviewContent::Archive(entries, ..) => entries.iter().map(|e| e.name.len() + 48).sum(),
-            PreviewContent::Info(_, cover, _) => cover.as_ref().map_or(256, |(frames, _)| frames.iter().map(|(tex, _)| tex.byte_size()).sum()),
+            PreviewContent::Info(rows, cover, _) => {
+                let text: usize = rows.iter().map(|(k, v)| k.len() + v.len() + 48).sum();
+                text + cover.as_ref().map_or(0, |(frames, _)| frames_bytes(frames))
+            }
             _ => 64,
         }
     }
@@ -174,33 +187,51 @@ impl PreviewContent {
     }
 }
 
+fn frames_bytes(frames: &Frames) -> usize {
+    frames.iter().map(|(tex, _)| tex.byte_size()).sum()
+}
+
+struct Item {
+    key: Key,
+    content: PreviewContent,
+    bytes: usize,
+    used: Instant,
+}
+
 /// Least recently used first.
 #[derive(Default)]
 struct Cache {
-    items: Vec<(Key, PreviewContent, usize)>,
+    items: Vec<Item>,
 }
 
 impl Cache {
     fn get(&mut self, key: &Key) -> Option<PreviewContent> {
-        let at = self.items.iter().position(|(k, ..)| k == key)?;
-        let item = self.items.remove(at);
-        let content = item.1.clone();
+        let at = self.items.iter().position(|item| item.key == *key)?;
+        let mut item = self.items.remove(at);
+        item.used = Instant::now();
+        let content = item.content.clone();
         self.items.push(item);
         Some(content)
     }
 
     fn contains(&self, key: &Key) -> bool {
-        self.items.iter().any(|(k, ..)| k == key)
+        self.items.iter().any(|item| item.key == *key)
     }
 
     fn insert(&mut self, key: Key, content: PreviewContent) {
-        self.items.retain(|(k, ..)| *k != key);
+        self.items.retain(|item| item.key != key);
         let bytes = content.bytes();
-        self.items.push((key, content, bytes));
-        let mut total: usize = self.items.iter().map(|(.., b)| b).sum();
-        while self.items.len() > 1 && (self.items.len() > CACHE_ITEMS || total > CACHE_BYTES) {
-            total -= self.items.remove(0).2;
+        // Remembering it would push out everything else; the shown copy stays on screen.
+        if bytes > CACHE_BYTES / 2 { return; }
+        self.items.push(Item { key, content, bytes, used: Instant::now() });
+        let mut total: usize = self.items.iter().map(|item| item.bytes).sum();
+        while self.items.len() > CACHE_ITEMS || total > CACHE_BYTES {
+            total -= self.items.remove(0).bytes;
         }
+    }
+
+    fn expire(&mut self) {
+        self.items.retain(|item| item.used.elapsed() < CACHE_IDLE);
     }
 }
 
@@ -376,6 +407,11 @@ impl Preview {
         }
     }
 
+    /// Lets go of what has not been looked at for a while.
+    pub fn expire(&mut self) {
+        self.cache.expire();
+    }
+
     #[cfg(test)]
     pub(crate) fn remember(&mut self, key: Key, content: PreviewContent) {
         self.cache.insert(key, content);
@@ -542,7 +578,26 @@ mod tests {
         assert!(cache.contains(&key("f5")), "using an item keeps it");
         let huge = Arc::new(TextDoc::new("x".repeat(CACHE_BYTES), false, Vec::new()));
         cache.insert(key("huge"), PreviewContent::Text(huge));
-        assert_eq!(cache.items.len(), 1, "one oversized preview stays while it is shown");
+        assert!(!cache.contains(&key("huge")), "an oversized preview is not remembered");
+        assert!(cache.contains(&key("f5")), "and does not push out the others");
+    }
+
+    #[test]
+    fn previews_left_alone_are_forgotten() {
+        let mut cache = Cache::default();
+        cache.insert(key("old"), PreviewContent::Hex(Arc::default(), 0));
+        cache.insert(key("new"), PreviewContent::Hex(Arc::default(), 0));
+        cache.items[0].used = Instant::now() - CACHE_IDLE;
+        cache.expire();
+        assert!(!cache.contains(&key("old")));
+        assert!(cache.contains(&key("new")));
+    }
+
+    #[test]
+    fn the_budget_counts_colours() {
+        let plain = PreviewContent::Text(Arc::new(TextDoc::new("a\n".into(), false, Vec::new())));
+        let coloured = PreviewContent::Text(Arc::new(TextDoc::new("a\n".into(), false, vec![vec![(1, 1); 1000]])));
+        assert!(coloured.bytes() >= plain.bytes() + 8000);
     }
 
     #[test]

@@ -12,7 +12,7 @@ const MAX_SIDE: u32 = 1600;
 /// Frames of the moving preview of a video, and how long each one stays.
 const FRAMES: usize = 10;
 const FRAME_MS: u32 = 700;
-const FRAME_WIDTH: u32 = 1280;
+const FRAME_WIDTH: u32 = 960;
 /// How many copies of ffmpeg may seek at once.
 const WORKERS: usize = 4;
 const LONG_VIDEO_SECONDS: f64 = 120.0;

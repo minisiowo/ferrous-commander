@@ -10,8 +10,8 @@ use crate::fsx;
 
 const MAX_FILE: u64 = 200_000_000;
 const MAX_FRAMES: usize = 240;
-const MAX_ANIMATION_BYTES: usize = 192 * 1024 * 1024;
-const MAX_FRAME_SIDE: u32 = 1024;
+const MAX_ANIMATION_BYTES: usize = 96 * 1024 * 1024;
+const MAX_FRAME_SIDE: u32 = 720;
 
 /// Strong signatures count on their own; shorter ones ("BM" starts plenty of text) need the name.
 pub fn is_picture(head: &[u8], ext: &str) -> bool {
