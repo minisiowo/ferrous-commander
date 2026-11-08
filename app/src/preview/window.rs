@@ -20,17 +20,22 @@ use crate::theme::{Palette, blend};
 use crate::ui::fit_text;
 
 /// How long the file list waits for content before showing a window with a spinner.
-const OPEN_WAIT: Duration = Duration::from_millis(80);
+/// Content that arrives in time also sets the size the window first appears at.
+const OPEN_WAIT: Duration = Duration::from_millis(200);
 const SPINNER_AFTER: Duration = Duration::from_millis(150);
 const SWITCH_SECONDS: f32 = 0.09;
 /// Held Space must not close the preview and open it again from the file list.
 const REOPEN_PAUSE: Duration = Duration::from_millis(300);
 /// The compositor has decided by then whether the window floats.
-const SIZE_LOCK: Duration = Duration::from_millis(400);
+const SIZE_LOCK: Duration = Duration::from_millis(520);
+/// The smallest window a preview opens at: room for the control bar and a card.
+const MIN_OPEN: Vec2 = vec2(480.0, 320.0);
 const MAX_ZOOM: f32 = 32.0;
 /// Pause after zooming or moving before a sharper copy is worth making.
 const SHARPEN_AFTER: Duration = Duration::from_millis(150);
 const READING_WIDTH: f32 = 760.0;
+/// Where the text column of the hex view starts.
+const HEX_ASCII_X: f32 = 520.0;
 /// Past the end of any preview, yet small enough to compute with.
 const SCROLL_TO_END: f32 = 1e9;
 
@@ -91,7 +96,12 @@ struct Shared {
 pub struct Quick {
     shared: Arc<Mutex<Shared>>,
     opened: Instant,
+    /// When the size last changed. A compositor only follows a change while the limits hold it.
+    sized: Instant,
     size: Vec2,
+    /// Whether `size` already suits the first content. It is fitted once, so that
+    /// moving to the next file does not make the window jump.
+    fitted: bool,
     limit: Vec2,
     position: Option<Pos2>,
     shown: Option<Key>,
@@ -113,6 +123,57 @@ fn placement(ctx: &egui::Context) -> (Vec2, Vec2, Option<Pos2>) {
     }
     let screen = ctx.input(|i| i.viewport().monitor_size).filter(|s| s.x > 0.0 && s.y > 0.0).unwrap_or_else(|| ctx.content_rect().size());
     (vec2(screen.x * 0.7, screen.y * 0.8), screen, None)
+}
+
+/// A picture at its own size, one screen pixel per pixel, as `image_rect` draws it.
+fn picture_body(orig: [u32; 2], ppp: f32) -> Vec2 {
+    vec2(orig[0] as f32, orig[1] as f32) / ppp.max(0.1) + Vec2::splat(24.0)
+}
+
+/// A page has no size of its own on the screen: as large as fits, in its proportions.
+fn page_body(orig: [u32; 2], largest: Vec2) -> Vec2 {
+    let size = vec2(orig[0].max(1) as f32, orig[1].max(1) as f32);
+    let room = largest - vec2(24.0, BAR_H + 24.0);
+    size * (room.x / size.x).min(room.y / size.y) + Vec2::splat(24.0)
+}
+
+/// The window that suits `content`, no larger than `largest`.
+fn fitting_size(ctx: &egui::Context, content: &PreviewContent, largest: Vec2) -> Vec2 {
+    const SCROLLBAR: f32 = 10.0;
+    let mono = FontId::monospace(13.0);
+    let (char_w, line_h) = ctx.fonts_mut(|f| (f.glyph_width(&mono, '0'), f.row_height(&mono)));
+    let digit = ctx.fonts_mut(|f| f.glyph_width(&FontId::proportional(13.0), '0'));
+    let gap = ctx.global_style().spacing.item_spacing.y;
+    let (text_step, list_step) = ((line_h + 3.0).round() + gap, 24.0 + gap);
+    let body = match content {
+        // Drawn larger than its nominal size means vector art, which has no size of its own.
+        PreviewContent::Image(tex, orig, _) if tex.size()[0] > orig[0] as usize => page_body(*orig, largest),
+        PreviewContent::Image(_, orig, _) | PreviewContent::Animation(_, orig) => picture_body(*orig, ctx.pixels_per_point()),
+        PreviewContent::Page { orig, .. } => page_body(*orig, largest),
+        PreviewContent::Text(doc) if !doc.text.is_empty() => {
+            let digits = doc.lines.len().max(1).ilog10() as f32 + 1.0;
+            let width = (digits + doc.longest.min(100_000) as f32) * char_w + 42.0 + SCROLLBAR;
+            vec2(width, (doc.lines.len() + doc.trimmed as usize) as f32 * text_step + SCROLLBAR)
+        }
+        PreviewContent::Hex(bytes, total) => {
+            let rows = bytes.len().div_ceil(16) + (*total as usize > bytes.len()) as usize;
+            vec2(HEX_ASCII_X + 16.0 * char_w + 16.0 + SCROLLBAR, rows as f32 * text_step + SCROLLBAR)
+        }
+        PreviewContent::Table(table) => {
+            let columns: f32 = table.widths.iter().map(|w| *w as f32 * digit * 1.15 + 20.0).sum();
+            let numbers = table.rows.len().max(1).ilog10() as f32 * digit + digit + 24.0;
+            vec2(numbers + columns + 16.0 + SCROLLBAR, (table.rows.len() + table.trimmed as usize) as f32 * list_step + SCROLLBAR)
+        }
+        PreviewContent::Archive(entries, ..) => vec2(READING_WIDTH, (entries.len() + 1) as f32 * list_step + SCROLLBAR),
+        PreviewContent::Info(rows, cover, _) => {
+            let picture = cover.as_ref().map_or(Vec2::splat(96.0), |(_, size)| picture_body(*size, ctx.pixels_per_point()) - Vec2::splat(24.0));
+            vec2(picture.x.max(504.0) + 56.0, picture.y + 24.0 + rows.len() as f32 * 24.0 + 56.0)
+        }
+        // Laid out only once shown, so its length is not known yet: a page to read.
+        PreviewContent::Doc(_) => vec2(READING_WIDTH + 64.0, largest.y),
+        _ => Vec2::ZERO,
+    };
+    (body + vec2(0.0, BAR_H)).max(MIN_OPEN).min(largest)
 }
 
 impl App {
@@ -172,13 +233,20 @@ impl App {
         self.prefetch_preview(neighbours, ctx);
         self.want_film(ctx);
         self.hand_over(ctx, &e, i);
-        let quick = self.quick.as_ref().unwrap();
+        let quick = self.quick.as_mut().unwrap();
         let waiting = matches!(self.preview.content, PreviewContent::Loading);
         if waiting && quick.opened.elapsed() < OPEN_WAIT {
             ctx.request_repaint_after(OPEN_WAIT);
             return;
         }
-        let locked = quick.opened.elapsed() < SIZE_LOCK;
+        if !quick.fitted && !matches!(self.preview.content, PreviewContent::Loading | PreviewContent::None) {
+            quick.fitted = true;
+            quick.sized = Instant::now();
+            let size = fitting_size(ctx, &self.preview.content, quick.size);
+            if let Some(position) = &mut quick.position { *position += (quick.size - size) / 2.0; }
+            quick.size = size;
+        }
+        let locked = quick.sized.elapsed() < SIZE_LOCK;
         if locked { ctx.request_repaint_after(SIZE_LOCK); }
         let mut builder = ViewportBuilder::default()
             .with_title(format!("{} — Preview", e.name))
@@ -222,7 +290,9 @@ impl App {
                     detail: None,
                 })),
                 opened: Instant::now(),
+                sized: Instant::now(),
                 size,
+                fitted: false,
                 limit,
                 position,
                 shown: None,
@@ -820,7 +890,7 @@ fn hex_view(ui: &mut Ui, s: &mut Shared, bytes: &[u8], total: u64, body: Rect) {
             let hex: Vec<String> = chunk.iter().enumerate().map(|(i, b)| if i == 8 { format!(" {b:02x}") } else { format!("{b:02x}") }).collect();
             p.text(pos2(top.x + 110.0, y), Align2::LEFT_CENTER, hex.join(" "), font.clone(), pal.text);
             let ascii: String = chunk.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '·' }).collect();
-            p.text(pos2(top.x + 520.0, y), Align2::LEFT_CENTER, ascii, font.clone(), pal.text_weak);
+            p.text(pos2(top.x + HEX_ASCII_X, y), Align2::LEFT_CENTER, ascii, font.clone(), pal.text_weak);
         }
     });
     s.view.offset = output.state.clamped_offset().y;
@@ -860,6 +930,29 @@ fn control_bar(ui: &mut Ui, s: &mut Shared, body: Rect, ctx: &egui::Context, ima
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_opens_at_the_size_of_its_content() {
+        let largest = vec2(1400.0, 900.0);
+        let fit = |content: &PreviewContent| {
+            let ctx = egui::Context::default();
+            let mut size = Vec2::ZERO;
+            let mut out = ctx.run_ui(Default::default(), |ui| size = fitting_size(ui.ctx(), content, largest));
+            out.textures_delta.clear();
+            size
+        };
+        let text = |lines: usize, width: usize| PreviewContent::Text(Arc::new(TextDoc::new(vec!["x".repeat(width); lines].join("\n"), false, Vec::new())));
+        assert_eq!(fit(&text(3, 10)), MIN_OPEN, "a few short lines need no more than the smallest window");
+        let middling = fit(&text(30, 90));
+        assert!(middling.x > MIN_OPEN.x && middling.x < largest.x && middling.y > MIN_OPEN.y && middling.y < largest.y, "{middling:?}");
+        assert_eq!(fit(&text(5000, 2000)), largest, "the screen limit holds");
+        assert_eq!(fit(&PreviewContent::Error("broken".into())), MIN_OPEN);
+
+        assert_eq!(picture_body([800, 600], 1.0), vec2(824.0, 624.0));
+        assert_eq!(picture_body([800, 600], 2.0), vec2(424.0, 324.0), "one screen pixel per pixel on a scaled display");
+        let page = page_body([595, 842], largest) - Vec2::splat(24.0);
+        assert!((page.x / page.y - 595.0 / 842.0).abs() < 0.01 && page.y <= largest.y - BAR_H - 24.0 + 0.5, "{page:?}");
+    }
     use std::path::PathBuf;
 
     fn entry(name: &str) -> Entry {
