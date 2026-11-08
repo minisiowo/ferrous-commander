@@ -252,6 +252,14 @@ pub struct Preview {
     tx: mpsc::Sender<(PathBuf, Loaded)>,
     rx: mpsc::Receiver<(PathBuf, Loaded)>,
     busy: bool,
+    /// When the shown path was asked for, for `FERROUS_PREVIEW_TRACE`.
+    asked: Option<Instant>,
+}
+
+/// `FERROUS_PREVIEW_TRACE=1` prints how long previews take.
+fn preview_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FERROUS_PREVIEW_TRACE").is_some())
 }
 
 pub struct SearchUi {
@@ -617,6 +625,7 @@ impl App {
                 tx,
                 rx,
                 busy: false,
+                asked: None,
             },
             preview_window: false,
             search: None,
@@ -1721,6 +1730,7 @@ impl App {
             return;
         };
         self.preview.content = PreviewContent::Loading;
+        self.preview.asked = Some(Instant::now());
         // The receiver starts only the latest request after the current read ends.
         // Rapid selection changes never queue image decodes or create more workers.
     }
@@ -1730,6 +1740,9 @@ impl App {
             self.preview.busy = false;
             if self.preview.path.as_ref() != Some(&p) {
                 continue;
+            }
+            if preview_trace() && let Some(asked) = self.preview.asked {
+                eprintln!("[preview] {} ready after {} ms", p.display(), asked.elapsed().as_millis());
             }
             self.preview.content = match loaded {
                 Loaded::Text(t, trimmed) => PreviewContent::Text(t, trimmed),
@@ -1756,7 +1769,11 @@ impl App {
                 let tx = self.preview.tx.clone();
                 let ctx = ctx.clone();
                 std::thread::spawn(move || {
+                    let started = Instant::now();
                     let loaded = load_preview(&p);
+                    if preview_trace() {
+                        eprintln!("[preview] {} loaded in {} ms", p.display(), started.elapsed().as_millis());
+                    }
                     let _ = tx.send((p, loaded));
                     ctx.request_repaint();
                 });
@@ -2667,6 +2684,27 @@ mod preview_tests {
             assert!(!might_run(&root.join("letter.txt")));
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Timings on real files: `FERROUS_PREVIEW_FIXTURES=<folder> cargo test --release
+    /// preview_baseline -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measures files named by FERROUS_PREVIEW_FIXTURES"]
+    fn preview_baseline() {
+        let folder = std::env::var_os("FERROUS_PREVIEW_FIXTURES").expect("FERROUS_PREVIEW_FIXTURES");
+        let mut files: Vec<_> = std::fs::read_dir(folder).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        for file in files {
+            let started = Instant::now();
+            let kind = match load_preview(&file) {
+                Loaded::Text(t, trimmed) => format!("text {} chars, trimmed {trimmed}", t.chars().count()),
+                Loaded::Image(img, orig) => format!("image {:?} from {orig:?}", img.size),
+                Loaded::Folder { files, .. } => format!("folder of {files}"),
+                Loaded::Binary => "binary".into(),
+                Loaded::Error(e) => format!("error: {e}"),
+            };
+            println!("{:>7.1} ms  {}  ->  {kind}", started.elapsed().as_secs_f64() * 1000.0, fsx::display_name(&file));
+        }
     }
 
     #[test]
