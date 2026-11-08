@@ -23,6 +23,7 @@ depends=(
   'wayland'
 )
 optdepends=(
+  'ffmpeg: show a frame in video previews'
   'glib2: open files with a chosen application'
   'udisks2: eject drives'
 )

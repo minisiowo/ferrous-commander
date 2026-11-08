@@ -119,7 +119,7 @@ pendrives have an eject button in the sidebar; right click offers the same.
 Ctrl+C/X/V copy/cut/paste · Del move to Trash/Recycle Bin · Shift+Del delete for good (asks first) · F2 rename · Ctrl+Shift+N new folder ·
 Ctrl+N new file · Ctrl+D duplicate · Ctrl+T/W/Tab tabs · Ctrl+Shift+T reopen tab ·
 Alt+←/→ back/forward · Backspace parent · \ or Alt+D edit path · type to filter ·
-Space preview · Ctrl+H hidden files · Ctrl+F search · F5 refresh · F10 terminal ·
+Space preview (in the preview: ↑/↓ files, ←/→ pages or sheets, +/−/0 zoom, W wrap, M Markdown source, Enter open) · Ctrl+H hidden files · Ctrl+F search · F5 refresh · F10 terminal ·
 Tab switch browser · drag to move, Ctrl+drag to copy.
 
 While dragging inside the window, a wide tooltip separates the action and item
