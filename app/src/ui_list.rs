@@ -77,6 +77,16 @@ const COLS: [(Col, &str, f32, f32, bool); 6] = [
     (Col::Size, "Size", 70.0, 60.0, true),
 ];
 
+/// The order a column's header sorts by.
+fn col_sort(c: Col) -> SortBy {
+    match c {
+        Col::Name => SortBy::Name,
+        Col::Ext => SortBy::Type,
+        Col::Size => SortBy::Size,
+        _ => SortBy::Date,
+    }
+}
+
 /// Columns that fit, dropping the lowest removal order first; Name takes the rest.
 fn visible_cols(width: f32) -> Vec<(Col, &'static str, f32, bool)> {
     let mut order: Vec<usize> = (0..COLS.len()).collect();
@@ -103,52 +113,13 @@ impl App {
     pub fn header(&mut self, ui: &mut Ui, i: usize, r: Rect) {
         let pal = self.pal;
         let path = self.panes[i].path().to_path_buf();
-        // path row, then folder name with item count, then the toolbar
+        // path row, then one row of tools
         let crumb_r = Rect::from_min_size(r.min + vec2(8.0, 2.0), vec2(r.width() - 16.0, 22.0));
-        let name_r = Rect::from_min_size(
-            pos2(r.min.x + 10.0, crumb_r.max.y + 2.0),
-            vec2(r.width() - 20.0, 22.0),
-        );
         let tools_r = Rect::from_min_max(
-            pos2(r.min.x + 6.0, name_r.max.y + 1.0),
-            pos2(r.max.x - 6.0, name_r.max.y + 27.0),
+            pos2(r.min.x + 6.0, crumb_r.max.y + 1.0),
+            pos2(r.max.x - 6.0, crumb_r.max.y + 28.0),
         );
         let title_r = crumb_r;
-        {
-            let p = ui.painter_at(name_r);
-            let title = if is_computer(&path) {
-                "This PC".to_string()
-            } else {
-                fsx::display_name(&path)
-            };
-            let f = FontId::proportional(13.5);
-            let g = p.text(
-                name_r.left_center(),
-                Align2::LEFT_CENTER,
-                fit_text(&p, &title, &f, name_r.width() * 0.6),
-                f,
-                pal.text,
-            );
-            let (n, sel, total) = self.counts(i);
-            let mut c = format!("{n} items");
-            if sel > 0 {
-                c += &format!(" · {sel} selected");
-            }
-            p.text(
-                pos2(g.max.x + 10.0, name_r.center().y),
-                Align2::LEFT_CENTER,
-                c,
-                FontId::proportional(11.0),
-                pal.text_weak,
-            );
-            p.text(
-                name_r.right_center(),
-                Align2::RIGHT_CENTER,
-                fsx::fmt_size(total, self.st.mebibytes),
-                FontId::proportional(11.0),
-                pal.text_weak,
-            );
-        }
 
         if let Some(mut text) = self.panes[i].path_edit.take() {
             let mut keep = true;
@@ -219,6 +190,8 @@ impl App {
                         }
                         ui.add_space(8.0);
                         let s = self.cache.get(&path).map(|l| l.sorting).unwrap_or_default();
+                        // The list's own header already sorts by the columns it shows.
+                        let in_header = visible_cols(self.panes[i].list_w - 14.0);
                         for (by, label, tip) in [
                             (SortBy::Name, "NAME", "Sorts items by name"),
                             (SortBy::Date, "DATE", "Sorts items by date modified"),
@@ -229,6 +202,7 @@ impl App {
                             ),
                             (SortBy::Type, "TYPE", "Sorts items by type"),
                         ] {
+                            if in_header.iter().any(|(c, ..)| col_sort(*c) == by) { continue; }
                             let on = s.by == by;
                             if sort_chip(ui, label, on, on.then_some(s.ascending), &pal).on_hover_text(tip).clicked() {
                                 self.acts.push(Act::SetSort(i, by));
@@ -241,29 +215,20 @@ impl App {
                             self.acts.push(Act::ToggleFoldersOnTop(i));
                         }
                         ui.add_space(6.0);
-                        if !self.panes[i].filter.is_empty() {
-                            let f = self.panes[i].filter.clone();
-                            let resp = chip(ui, &format!("Contains: {f}  ✖"), true, &pal);
-                            if resp
-                                .on_hover_text("Typing filters this folder. Esc clears it.")
-                                .clicked()
-                            {
-                                self.panes[i].filter.clear();
-                            }
+                        if icon_button(ui, ">_", "Open in command shell (F10)", false, &pal)
+                            .clicked()
+                        {
+                            self.acts.push(Act::Terminal(self.panes[i].path().to_path_buf()));
                         }
-                    });
-                });
-        });
-        let actions_r = Rect::from_min_max(
-            pos2(tools_r.min.x, tools_r.max.y + 2.0),
-            pos2(tools_r.max.x, r.max.y),
-        );
-        ui.scope_builder(UiBuilder::new().max_rect(actions_r), |ui| {
-            ui.set_clip_rect(actions_r.intersect(ui.clip_rect()));
-            egui::ScrollArea::horizontal()
-                .id_salt(("file_actions", i))
-                .show(ui, |ui| {
-                    ui.horizontal_centered(|ui| {
+                        if icon_button(ui, "🗋", "Create new file (Ctrl+N)", false, &pal).clicked()
+                        {
+                            self.acts.push(Act::NewFile(i));
+                        }
+                        if icon_button(ui, "🗀", "Create new folder (Ctrl+Shift+N)", false, &pal)
+                            .clicked()
+                        {
+                            self.acts.push(Act::NewFolder(i));
+                        }
                         if !self.panes[i].selected.is_empty() {
                             ui.add_space(6.0);
                             if icon_button(ui, "🗑", "Delete selected items (Del)", false, &pal)
@@ -285,25 +250,21 @@ impl App {
                                 self.acts.push(Act::Cut(i));
                             }
                         }
-                        if icon_button(ui, ">_", "Open in command shell (F10)", false, &pal)
-                            .clicked()
-                        {
-                            self.acts.push(Act::Terminal(self.panes[i].path().to_path_buf()));
-                        }
-                        if icon_button(ui, "🗋", "Create new file (Ctrl+N)", false, &pal).clicked()
-                        {
-                            self.acts.push(Act::NewFile(i));
-                        }
-                        if icon_button(ui, "🗀", "Create new folder (Ctrl+Shift+N)", false, &pal)
-                            .clicked()
-                        {
-                            self.acts.push(Act::NewFolder(i));
-                        }
                         if self.can_paste_files()
                             && icon_button(ui, "📋", "Paste from Clipboard (Ctrl+V)", false, &pal)
                                 .clicked()
                         {
                             self.acts.push(Act::Paste(i, None));
+                        }
+                        if !self.panes[i].filter.is_empty() {
+                            let f = self.panes[i].filter.clone();
+                            let resp = chip(ui, &format!("Contains: {f}  ✖"), true, &pal);
+                            if resp
+                                .on_hover_text("Typing filters this folder. Esc clears it.")
+                                .clicked()
+                            {
+                                self.panes[i].filter.clear();
+                            }
                         }
                     });
                 });
@@ -333,7 +294,7 @@ impl App {
         }
     }
 
-    /// Big folder title followed by a clickable path; clicking the empty end edits the path.
+    /// A clickable path; clicking the empty end edits the path.
     fn breadcrumb(&mut self, ui: &mut Ui, i: usize, title_r: Rect, path: &std::path::Path) {
         let pal = self.pal;
         let p = ui.painter_at(title_r);
@@ -400,7 +361,7 @@ impl App {
                 p.text(
                     pos2(cr.max.x + 3.0, cr.center().y),
                     Align2::CENTER_CENTER,
-                    std::path::MAIN_SEPARATOR_STR,
+                    "›",
                     cfont.clone(),
                     pal.text_weak,
                 );
@@ -452,12 +413,7 @@ impl App {
             let cr = Rect::from_min_size(pos2(x, hr.min.y), vec2(*w, hr.height()));
             x += w;
             let resp = ui.interact(cr, ui.scope_id().with(("colhdr", i, k)), Sense::click());
-            let by = match c {
-                Col::Name => SortBy::Name,
-                Col::Ext => SortBy::Type,
-                Col::Size => SortBy::Size,
-                _ => SortBy::Date,
-            };
+            let by = col_sort(*c);
             let on = sorting.by == by && !matches!(c, Col::Age | Col::Time);
             let col = if resp.hovered() || on {
                 pal.text
@@ -494,6 +450,7 @@ impl App {
         let list_r = Rect::from_min_max(pos2(r.min.x, hr.max.y), r.max);
         let n = self.panes[i].view.len();
         self.panes[i].list_h = list_r.height();
+        self.panes[i].list_w = r.width();
         let mut offset = None;
         if let Some(t) = self.panes[i].scroll_to.take() {
             let top = t as f32 * rh;
@@ -1386,11 +1343,9 @@ impl App {
         let (n, sel, total) = self.counts(i);
         let mut s = format!("{n} items");
         if sel > 0 {
-            s += &format!(
-                "   ·   {sel} selected   ·   {}",
-                fsx::fmt_size(total, self.st.mebibytes)
-            );
+            s += &format!("   ·   {sel} selected");
         }
+        s += &format!("   ·   {}", fsx::fmt_size(total, self.st.mebibytes));
         let f = FontId::proportional(11.5);
         let summary_width = p.layout_no_wrap(s.clone(), f.clone(), pal.text_weak).size().x;
         p.text(

@@ -29,7 +29,7 @@ pub const TAB_H: f32 = 30.0;
 /// `tab` is `None` when the whole panel is dragged by its handle.
 struct TabDrag { pane: usize, tab: Option<usize> }
 
-pub const HEADER_H: f32 = 102.0;
+pub const HEADER_H: f32 = 52.0;
 pub const STATUS_H: f32 = 22.0;
 
 pub fn take_top(r: &mut Rect, h: f32) -> Rect {

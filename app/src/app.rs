@@ -125,6 +125,7 @@ pub struct Pane {
     pub scroll_to: Option<usize>,
     pub list_offset: f32,
     pub list_h: f32,
+    pub list_w: f32,
     pub pending_select: Option<PathBuf>,
     /// New items selected before the folder's fresh listing shows them.
     arriving: HashSet<PathBuf>,
