@@ -741,7 +741,8 @@ impl App {
         } else {
             Color32::TRANSPARENT
         };
-        p.rect_filled(rr, CornerRadius::same(1), bg);
+        // Square corners: neighbouring selected rows must join into one block.
+        p.rect_filled(rr, CornerRadius::ZERO, bg);
         let dim = e.hidden || cut.contains(&e.path);
         let font = FontId::proportional(self.st.font_size);
         let small = FontId::proportional(self.st.font_size - 1.0);
