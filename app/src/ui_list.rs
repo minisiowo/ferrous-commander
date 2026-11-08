@@ -288,7 +288,7 @@ impl App {
                         if icon_button(ui, ">_", "Open in command shell (F10)", false, &pal)
                             .clicked()
                         {
-                            self.acts.push(Act::Terminal(i));
+                            self.acts.push(Act::Terminal(self.panes[i].path().to_path_buf()));
                         }
                         if icon_button(ui, "🗋", "Create new file (Ctrl+N)", false, &pal).clicked()
                         {
@@ -1007,6 +1007,7 @@ impl App {
                     Act::OpenOtherPane(i, e.path.clone()),
                     &mut acts,
                 );
+                act(ui, "Command shell", Act::Terminal(e.path.clone()), &mut acts);
             });
         }
         ui.separator();
@@ -1099,7 +1100,7 @@ impl App {
             ui.close();
         }
         if ui.button("Open in command shell   F10").clicked() {
-            acts.push(Act::Terminal(i));
+            acts.push(Act::Terminal(self.panes[i].path().to_path_buf()));
             ui.close();
         }
         #[cfg(target_os = "linux")]

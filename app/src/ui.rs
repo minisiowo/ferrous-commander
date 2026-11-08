@@ -407,7 +407,7 @@ impl App {
             Key::Delete => self.acts.push(Act::Delete(i)),
             Key::F2 => self.acts.push(Act::Rename(i)),
             Key::F5 => self.acts.push(Act::Refresh),
-            Key::F10 => self.acts.push(Act::Terminal(i)),
+            Key::F10 => self.acts.push(Act::Terminal(self.panes[i].path().to_path_buf())),
             Key::N if ctrl && m.shift => self.acts.push(Act::NewFolder(i)),
             Key::N if ctrl => self.acts.push(Act::NewFile(i)),
             Key::D if ctrl => self.acts.push(Act::Duplicate(i)),

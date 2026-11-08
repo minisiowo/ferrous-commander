@@ -286,7 +286,7 @@ pub enum Act {
     DeleteGroup(usize),
     MoveGroup(usize, i32),
     Refresh,
-    Terminal(usize),
+    Terminal(PathBuf),
     SetSort(usize, fsx::SortBy),
     ToggleFoldersOnTop(usize),
     SelectAll(usize),
@@ -2053,8 +2053,7 @@ impl App {
                 self.refresh_drives();
                 self.toast(ToastKind::Info, "Refreshed");
             }
-            Act::Terminal(i) => {
-                let dir = self.panes[i].path().to_path_buf();
+            Act::Terminal(dir) => {
                 if is_computer(&dir) {
                     return;
                 }
@@ -2418,32 +2417,79 @@ fn open_terminal(dir: &Path) -> std::io::Result<()> {
     #[cfg(not(windows))]
     {
         let mut last = std::io::Error::other("no terminal found");
-        for (terminal, flag) in [
-            ("xdg-terminal-exec", "--dir"),
-            ("x-terminal-emulator", ""),
-            ("ghostty", "--working-directory"),
-            ("foot", "--working-directory"),
-            ("gnome-terminal", "--working-directory"),
-            ("konsole", "--workdir"),
-            ("xfce4-terminal", "--working-directory"),
-            ("kitty", "--directory"),
-            ("alacritty", "--working-directory"),
-            ("xterm", ""),
-        ] {
-            let mut command = std::process::Command::new(terminal);
-            command.current_dir(dir);
-            if !flag.is_empty() {
-                let mut argument = std::ffi::OsString::from(flag);
-                argument.push("=");
-                argument.push(dir.as_os_str());
-                command.arg(argument);
-            }
-            match command.spawn() {
+        for (terminal, flag) in terminal_choices(default_terminal_is_ghostty()) {
+            match terminal_command(terminal, flag, dir).spawn() {
                 Ok(_) => return Ok(()),
                 Err(e) => last = e,
             }
         }
         Err(last)
+    }
+}
+
+#[cfg(not(windows))]
+const GHOSTTY: (&str, &str) = ("ghostty", "--working-directory");
+
+#[cfg(not(windows))]
+fn default_terminal_is_ghostty() -> bool {
+    std::process::Command::new("xdg-terminal-exec").arg("--print-id").stderr(std::process::Stdio::null()).output()
+        .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim().starts_with("com.mitchellh.ghostty"))
+}
+
+/// Terminals to try, in order. `xdg-terminal-exec` starts Ghostty through its desktop entry,
+/// which forces single-instance mode, so a Ghostty that is the default is started directly.
+#[cfg(not(windows))]
+fn terminal_choices(ghostty_first: bool) -> impl Iterator<Item = (&'static str, &'static str)> {
+    ghostty_first.then_some(GHOSTTY).into_iter().chain([
+        ("xdg-terminal-exec", "--dir"),
+        ("x-terminal-emulator", ""),
+        GHOSTTY,
+        ("foot", "--working-directory"),
+        ("gnome-terminal", "--working-directory"),
+        ("konsole", "--workdir"),
+        ("xfce4-terminal", "--working-directory"),
+        ("kitty", "--directory"),
+        ("alacritty", "--working-directory"),
+        ("xterm", ""),
+    ])
+}
+
+#[cfg(not(windows))]
+fn terminal_command(terminal: &str, flag: &str, dir: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(terminal);
+    command.current_dir(dir);
+    if terminal == GHOSTTY.0 {
+        // A running single instance opens the window in the folder it was started from.
+        command.arg("--gtk-single-instance=false");
+    }
+    if !flag.is_empty() {
+        let mut argument = std::ffi::OsString::from(flag);
+        argument.push("=");
+        argument.push(dir.as_os_str());
+        command.arg(argument);
+    }
+    command
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod terminal_tests {
+    use super::*;
+
+    #[test]
+    fn ghostty_as_the_default_is_started_directly_and_on_its_own() {
+        assert_eq!(terminal_choices(true).next(), Some(GHOSTTY));
+        assert_eq!(terminal_choices(false).next().map(|t| t.0), Some("xdg-terminal-exec"));
+        let dir = Path::new("/some/folder with space");
+        let command = terminal_command(GHOSTTY.0, GHOSTTY.1, dir);
+        assert_eq!(command.get_current_dir(), Some(dir));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["--gtk-single-instance=false", "--working-directory=/some/folder with space"]);
+    }
+
+    #[test]
+    fn other_terminals_only_get_the_folder() {
+        let args: Vec<_> = terminal_command("foot", "--working-directory", Path::new("/x")).get_args().map(|a| a.to_owned()).collect();
+        assert_eq!(args, ["--working-directory=/x"]);
     }
 }
 
