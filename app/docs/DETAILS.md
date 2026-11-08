@@ -18,8 +18,8 @@ Folder reads and refreshes run on a bounded background worker. Sidebar metadata 
 Open with application discovery also run outside the render thread, so sleeping network
 shares do not stall window movement or resizing. Background refresh checks only visible folders. Inactive folder listings expire after
 30 seconds and share a cache budget of 24 folders / 50,000 entries; visible folders
-remain available even above that budget. Preview reads run one at a time and skip
-superseded selections. Closing or replacing a search cancels it, and timed-out
+remain available even above that budget. Previews are parsed in a helper process, one file at a time, and skip
+superseded selections; a file that breaks a parser costs only its preview. Closing or replacing a search cancels it, and timed-out
 Windows drive probes cannot accumulate on subsequent refreshes.
 
 The expanded file tree reuses its flattened rows and filtered view until folder data,

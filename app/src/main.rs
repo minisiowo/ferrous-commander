@@ -20,6 +20,7 @@ mod lua_config;
 mod omarchy;
 mod openwith;
 mod ops;
+mod preview;
 mod defaults;
 mod settings;
 mod theme;
@@ -117,6 +118,10 @@ fn main() {
     #[cfg(windows)]
     if openwith::run_handler_helper() { return; }
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|a| a == preview::helper::FLAG) {
+        preview::helper::serve();
+        return;
+    }
     let mut shot = None;
     let mut start: Option<PathBuf> = None;
     let mut k = 1;

@@ -7,7 +7,8 @@ use egui::{
     StrokeKind, Ui, UiBuilder, pos2, vec2,
 };
 
-use crate::app::{Act, App, DragPaths, DropTarget, PreviewContent, ToastKind, is_computer};
+use crate::app::{Act, App, DragPaths, DropTarget, ToastKind, is_computer};
+use crate::preview::{Key as PreviewKey, PreviewContent};
 use crate::fsx::{self, Entry, SortBy};
 use crate::icons;
 use crate::theme::{TAGS, blend, hex};
@@ -1231,7 +1232,7 @@ impl App {
         );
         let e = self.focused_item(i);
         if self.active == i {
-            self.want_preview(e.as_ref().map(|e| e.path.clone()));
+            self.want_preview(e.as_ref().map(PreviewKey::of), ui.ctx());
         }
         let mut rr = r.shrink(8.0);
         let pw = (rr.height() * 1.6).min(rr.width() * 0.35);
@@ -1297,7 +1298,7 @@ impl App {
         );
         let e = self.focused_item(i);
         if self.active == i {
-            self.want_preview(e.as_ref().map(|e| e.path.clone()));
+            self.want_preview(e.as_ref().map(PreviewKey::of), ui.ctx());
         }
         let mut rr = r.shrink(10.0);
         let (n, sel, total) = self.counts(i);

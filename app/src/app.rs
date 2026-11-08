@@ -9,6 +9,7 @@ use egui::Color32;
 
 use crate::fsx::{self, Entry, Sorting};
 use crate::ops::{self, Job, OpKind};
+use crate::preview::Preview;
 use crate::settings::{FavGroup, Layout, PaneSession, Settings};
 use crate::theme::{Palette, ThemeName, hex};
 use crate::tiles::Tile;
@@ -27,8 +28,6 @@ pub const PATH_PROBE_LIMIT: Duration = Duration::from_millis(150);
 pub const TOAST_MS: u64 = crate::defaults::TOAST_MS;
 /// History pane length.
 pub const HISTORY_MAX: usize = crate::defaults::HISTORY_MAX;
-/// Text preview length.
-pub const PREVIEW_TEXT_MAX: usize = crate::defaults::PREVIEW_TEXT_MAX;
 
 static START_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
@@ -218,48 +217,6 @@ pub enum Notice {
     /// A program from a place the user does not control. See `App::open`.
     ConfirmRun { path: PathBuf, place: &'static str, link: Option<String> },
     Problems { title: String, lines: Vec<String> },
-}
-
-pub enum PreviewContent {
-    None,
-    Loading,
-    Text(String, bool),
-    Image(egui::TextureHandle, [u32; 2]),
-    Folder {
-        folders: usize,
-        files: usize,
-        size: u64,
-    },
-    Binary,
-    Error(String),
-}
-
-pub enum Loaded {
-    Text(String, bool),
-    Image(egui::ColorImage, [u32; 2]),
-    Folder {
-        folders: usize,
-        files: usize,
-        size: u64,
-    },
-    Binary,
-    Error(String),
-}
-
-pub struct Preview {
-    pub path: Option<PathBuf>,
-    pub content: PreviewContent,
-    tx: mpsc::Sender<(PathBuf, Loaded)>,
-    rx: mpsc::Receiver<(PathBuf, Loaded)>,
-    busy: bool,
-    /// When the shown path was asked for, for `FERROUS_PREVIEW_TRACE`.
-    asked: Option<Instant>,
-}
-
-/// `FERROUS_PREVIEW_TRACE=1` prints how long previews take.
-fn preview_trace() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("FERROUS_PREVIEW_TRACE").is_some())
 }
 
 pub struct SearchUi {
@@ -508,7 +465,6 @@ impl App {
                 }
             p.tabs = tabs;
         }
-        let (tx, rx) = mpsc::channel();
         let accent = hex(&st.accent);
         let tiles = st.tiles.clone().unwrap_or(Tile::Leaf(0)).sanitize(n);
         // A bounded queue and a few workers: slow network paths never block rendering
@@ -619,14 +575,7 @@ impl App {
             properties: None,
             #[cfg(not(windows))]
             app_chooser: None,
-            preview: Preview {
-                path: None,
-                content: PreviewContent::None,
-                tx,
-                rx,
-                busy: false,
-                asked: None,
-            },
+            preview: Preview::new(),
             preview_window: false,
             search: None,
             settings_open: false,
@@ -794,7 +743,7 @@ impl App {
         self.receive_drives(ctx);
         self.finish_jobs();
         self.ask_for_password();
-        self.receive_preview(ctx);
+        self.receive_preview();
         for i in (0..self.ejecting.len()).rev() {
             let result = match self.ejecting[i].2.try_recv() {
                 Ok(result) => result,
@@ -1718,68 +1667,6 @@ impl App {
         self.jobs.push(ops::start_with_password(OpKind::Extract, vec![archive], dest, Some(password), ctx.clone()));
     }
 
-    // ---------------------------------------------------------------- preview
-
-    pub fn want_preview(&mut self, path: Option<PathBuf>) {
-        if self.preview.path == path {
-            return;
-        }
-        self.preview.path = path.clone();
-        let Some(_) = path else {
-            self.preview.content = PreviewContent::None;
-            return;
-        };
-        self.preview.content = PreviewContent::Loading;
-        self.preview.asked = Some(Instant::now());
-        // The receiver starts only the latest request after the current read ends.
-        // Rapid selection changes never queue image decodes or create more workers.
-    }
-
-    fn receive_preview(&mut self, ctx: &egui::Context) {
-        while let Ok((p, loaded)) = self.preview.rx.try_recv() {
-            self.preview.busy = false;
-            if self.preview.path.as_ref() != Some(&p) {
-                continue;
-            }
-            if preview_trace() && let Some(asked) = self.preview.asked {
-                eprintln!("[preview] {} ready after {} ms", p.display(), asked.elapsed().as_millis());
-            }
-            self.preview.content = match loaded {
-                Loaded::Text(t, trimmed) => PreviewContent::Text(t, trimmed),
-                Loaded::Image(img, orig) => PreviewContent::Image(
-                    ctx.load_texture("preview", img, egui::TextureOptions::LINEAR),
-                    orig,
-                ),
-                Loaded::Folder {
-                    folders,
-                    files,
-                    size,
-                } => PreviewContent::Folder {
-                    folders,
-                    files,
-                    size,
-                },
-                Loaded::Binary => PreviewContent::Binary,
-                Loaded::Error(e) => PreviewContent::Error(e),
-            };
-        }
-        if !self.preview.busy && matches!(self.preview.content, PreviewContent::Loading)
-            && let Some(p) = self.preview.path.clone() {
-                self.preview.busy = true;
-                let tx = self.preview.tx.clone();
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    let started = Instant::now();
-                    let loaded = load_preview(&p);
-                    if preview_trace() {
-                        eprintln!("[preview] {} loaded in {} ms", p.display(), started.elapsed().as_millis());
-                    }
-                    let _ = tx.send((p, loaded));
-                    ctx.request_repaint();
-                });
-            }
-    }
-
     // ---------------------------------------------------------------- actions
 
     fn run(&mut self, a: Act, ctx: &egui::Context) {
@@ -2483,31 +2370,6 @@ mod performance_tests {
         assert_eq!(app.cache.len(), 24);
         assert!(app.cache.contains_key(&active));
     }
-
-    #[test]
-    fn preview_coalesces_changes_while_a_read_is_running() {
-        let mut app = App::new(Some(PathBuf::from("unused.png")));
-        let ctx = egui::Context::default();
-        app.preview.busy = true;
-        for i in 0..1000 {
-            app.want_preview(Some(PathBuf::from(format!("preview-{i}"))));
-            app.receive_preview(&ctx);
-        }
-        assert_eq!(app.preview.path, Some(PathBuf::from("preview-999")));
-        assert!(app.preview.rx.try_recv().is_err());
-        // Closing the preview discards the old result and doesn't start another read.
-        app.want_preview(None);
-        app.preview
-            .tx
-            .send((
-                PathBuf::from("preview-0"),
-                Loaded::Text("old".into(), false),
-            ))
-            .unwrap();
-        app.receive_preview(&ctx);
-        assert!(!app.preview.busy);
-        assert!(matches!(app.preview.content, PreviewContent::None));
-    }
 }
 
 /// Asking only here keeps the question meaningful: one shown for every local program
@@ -2533,84 +2395,6 @@ fn might_run(p: &Path) -> bool {
 fn link_target(p: &Path) -> Option<String> {
     if !std::fs::symlink_metadata(p).ok()?.file_type().is_symlink() { return None; }
     Some(fsx::display_name(&std::fs::canonicalize(p).ok()?))
-}
-
-fn load_preview(p: &Path) -> Loaded {
-    let md = match std::fs::metadata(p) {
-        Ok(m) => m,
-        Err(e) => return Loaded::Error(fsx::friendly_err(&e)),
-    };
-    if md.is_dir() {
-        let (mut folders, mut files, mut size) = (0, 0, 0u64);
-        let rd = match std::fs::read_dir(p) {
-            Ok(rd) => rd,
-            Err(e) => return Loaded::Error(fsx::friendly_err(&e)),
-        };
-        for de in rd.take(20000) {
-            let de = match de {
-                Ok(de) => de,
-                Err(e) => return Loaded::Error(fsx::friendly_err(&e)),
-            };
-            match de.metadata() {
-                Ok(m) if m.is_dir() => folders += 1,
-                Ok(m) => {
-                    files += 1;
-                    size += m.len();
-                }
-                Err(_) => {}
-            }
-        }
-        return Loaded::Folder {
-            folders,
-            files,
-            size,
-        };
-    }
-    if !md.is_file() { return Loaded::Error("Preview is unavailable for pipes, sockets and device files".into()); }
-    if md.len() == 0 {
-        return Loaded::Text(String::new(), false);
-    }
-    let ext = fsx::split_ext(&fsx::display_name(p), false).to_ascii_lowercase();
-    if fsx::IMAGE_EXTS.contains(&ext.as_str()) && md.len() < 200_000_000 {
-        let img = image::ImageReader::open(p)
-            .and_then(|r| r.with_guessed_format())
-            .map_err(|e| e.to_string())
-            .and_then(|r| r.decode().map_err(|e| e.to_string()));
-        return match img {
-            Ok(img) => {
-                let orig = [img.width(), img.height()];
-                // Downscale: keeps memory low (at most 1024 px on the long side).
-                let small = if img.width() > 1024 || img.height() > 1024 {
-                    img.thumbnail(1024, 1024)
-                } else {
-                    img
-                };
-                let rgba = small.to_rgba8();
-                let size = [rgba.width() as usize, rgba.height() as usize];
-                Loaded::Image(
-                    egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
-                    orig,
-                )
-            }
-            Err(e) => Loaded::Error(e),
-        };
-    }
-    use std::io::Read;
-    let mut buf = vec![0u8; PREVIEW_TEXT_MAX * 4];
-    let n = match std::fs::File::open(p).and_then(|mut f| f.read(&mut buf)) {
-        Ok(n) => n,
-        Err(e) => return Loaded::Error(fsx::friendly_err(&e)),
-    };
-    buf.truncate(n);
-    let sniff = &buf[..buf.len().min(2048)];
-    let is_text_ext = fsx::is_text_extension(ext.as_str());
-    if !is_text_ext && sniff.contains(&0) {
-        return Loaded::Binary;
-    }
-    let s = String::from_utf8_lossy(&buf);
-    let trimmed = s.chars().count() > PREVIEW_TEXT_MAX || md.len() as usize > n;
-    let t: String = s.chars().take(PREVIEW_TEXT_MAX).collect();
-    Loaded::Text(t, trimmed)
 }
 
 fn open_terminal(dir: &Path) -> std::io::Result<()> {
@@ -2657,12 +2441,11 @@ fn open_terminal(dir: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod preview_tests {
     use super::*;
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn a_harmless_name_does_not_hide_a_program() {
         use std::os::unix::fs::symlink;
         let root = std::env::temp_dir().join(format!("fc_might_run_{}", std::process::id()));
@@ -2684,65 +2467,5 @@ mod preview_tests {
             assert!(!might_run(&root.join("letter.txt")));
         }
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    /// Timings on real files: `FERROUS_PREVIEW_FIXTURES=<folder> cargo test --release
-    /// preview_baseline -- --ignored --nocapture`.
-    #[test]
-    #[ignore = "measures files named by FERROUS_PREVIEW_FIXTURES"]
-    fn preview_baseline() {
-        let folder = std::env::var_os("FERROUS_PREVIEW_FIXTURES").expect("FERROUS_PREVIEW_FIXTURES");
-        let mut files: Vec<_> = std::fs::read_dir(folder).unwrap().map(|e| e.unwrap().path()).collect();
-        files.sort();
-        for file in files {
-            let started = Instant::now();
-            let kind = match load_preview(&file) {
-                Loaded::Text(t, trimmed) => format!("text {} chars, trimmed {trimmed}", t.chars().count()),
-                Loaded::Image(img, orig) => format!("image {:?} from {orig:?}", img.size),
-                Loaded::Folder { files, .. } => format!("folder of {files}"),
-                Loaded::Binary => "binary".into(),
-                Loaded::Error(e) => format!("error: {e}"),
-            };
-            println!("{:>7.1} ms  {}  ->  {kind}", started.elapsed().as_secs_f64() * 1000.0, fsx::display_name(&file));
-        }
-    }
-
-    #[test]
-    fn previews_text_images_folders_and_binary_files() {
-        let root = std::env::temp_dir().join(format!("fc_preview_{}", std::process::id()));
-        std::fs::create_dir_all(root.join("folder")).unwrap();
-        let text = root.join("unicode.txt");
-        std::fs::write(&text, "🦀".repeat(PREVIEW_TEXT_MAX + 1)).unwrap();
-        assert!(matches!(load_preview(&text), Loaded::Text(s, true)
-            if s == "🦀".repeat(PREVIEW_TEXT_MAX)));
-        let binary = root.join("binary.bin");
-        std::fs::write(&binary, [0, 1, 2, 3]).unwrap();
-        assert!(matches!(load_preview(&binary), Loaded::Binary));
-        let picture = root.join("image.png");
-        image::RgbaImage::new(2048, 100).save(&picture).unwrap();
-        assert!(matches!(load_preview(&picture), Loaded::Image(img, [2048, 100])
-            if img.size[0] == 1024 && img.size[1] <= 1024));
-        assert!(matches!(load_preview(&root), Loaded::Folder { folders: 1, files: 3, .. }));
-        assert!(matches!(load_preview(&root.join("missing")), Loaded::Error(_)));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn inaccessible_folder_reports_error_and_pipe_is_not_read() {
-        use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
-        let root = std::env::temp_dir().join(format!("fc_preview_access_{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        let pipe = root.join("pipe.txt");
-        let name = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        assert!(matches!(load_preview(&pipe), Loaded::Error(_)));
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let result = load_preview(&root);
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-        if unsafe { libc::geteuid() } != 0 {
-            assert!(matches!(result, Loaded::Error(message) if message == "No access"));
-        }
     }
 }
