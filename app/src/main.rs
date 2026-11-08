@@ -199,7 +199,7 @@ fn main() {
         }
         k += 1;
     }
-    if let Some(dir) = start.filter(|d| d.is_dir()) {
+    if let Some(dir) = start.filter(|d| d.is_dir()).and_then(|d| fsx::full_folder(&d).ok()) {
         app::set_start_dir(dir);
     }
     // The light OpenGL renderer first; the wgpu renderer (DirectX/Vulkan/Metal) if OpenGL is missing.

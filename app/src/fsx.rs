@@ -475,6 +475,15 @@ pub fn display_name(p: &Path) -> String {
     }
 }
 
+/// The full form of a folder named on the command line, so `.` shows as the folder it is
+/// and keeps working as a tab. A link stays a link, as when walking into it; only `..`,
+/// which POSIX `absolute` leaves in place, needs the real location.
+pub fn full_folder(given: &Path) -> std::io::Result<PathBuf> {
+    let full = std::path::absolute(given)?;
+    let full = if full.components().any(|c| c == std::path::Component::ParentDir) { std::fs::canonicalize(&full)? } else { full };
+    Ok(full.components().collect())
+}
+
 /// Ancestor chain from the root down to `p` (inclusive).
 pub fn ancestors(p: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = p.ancestors().map(|a| a.to_path_buf()).collect();
@@ -656,6 +665,24 @@ mod tests {
         assert_eq!(cmp("file2.txt", "file10.txt"), Ordering::Less);
         assert_eq!(cmp("REPORT.txt", "report.txt"), Ordering::Equal);
         assert_eq!(cmp("zażółć2.txt", "zażółć10.txt"), Ordering::Less);
+    }
+    #[test]
+    fn a_folder_from_the_command_line_becomes_a_full_path() {
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(full_folder(Path::new(".")).unwrap(), here);
+        assert_eq!(full_folder(Path::new("src/..")).unwrap(), here);
+        // Path equality ignores a trailing separator, the text shown does not.
+        assert_eq!(full_folder(Path::new("./src/")).unwrap().as_os_str(), here.join("src").as_os_str());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_link_named_on_the_command_line_stays_a_link() {
+        let root = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("fc_full_folder_{}", std::process::id()));
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        let full = full_folder(&root.join("link"));
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(full.unwrap(), root.join("link"));
     }
     #[test]
     fn sizes() {

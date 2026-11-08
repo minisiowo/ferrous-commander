@@ -451,7 +451,8 @@ impl App {
             let sess = st.panes.get(i).cloned().unwrap_or_default();
             // No disk access here: the folder loader moves a tab whose folder is gone
             // to its nearest parent, and a sleeping share cannot delay the window.
-            let mut tabs: Vec<Tab> = sess.tabs.iter().cloned().map(Tab::new).collect();
+            // A relative path saved by an older version means nothing in a later run.
+            let mut tabs: Vec<Tab> = sess.tabs.iter().filter(|p| p.is_absolute() || is_computer(p)).cloned().map(Tab::new).collect();
             if tabs.is_empty() {
                 let start = if i == 0 {
                     home.clone()
