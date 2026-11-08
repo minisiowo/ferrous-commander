@@ -404,6 +404,8 @@ impl App {
         }
         if preview.key == key { return; }
         preview.detail = None;
+        // A film given up on when the selection moved on is worth asking for again.
+        preview.film_asked = None;
         preview.path = key.as_ref().map(|k| k.path.clone());
         preview.key = key.clone();
         preview.asked = Some(Instant::now());
@@ -570,6 +572,9 @@ mod tests {
         assert_eq!(app.preview.revision, 1);
         assert!(matches!(app.preview.content, PreviewContent::Info(_, _, false)));
         assert!(matches!(app.preview.cache.get(&key("v")), Some(PreviewContent::Info(_, _, false))), "the next visit starts with the film");
+        app.preview.film_asked = Some(key("v"));
+        app.want_preview(Some(key("w")), &ctx);
+        assert!(app.preview.film_asked.is_none(), "coming back asks again");
     }
 
     #[test]

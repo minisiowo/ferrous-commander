@@ -1131,7 +1131,7 @@ impl App {
                 let ir = Rect::from_center_size(r.center(), s * scale);
                 p.image(tex.id(), ir, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             }
-            (PreviewContent::Animation(frames, _), true) if !frames.is_empty() => {
+            (PreviewContent::Animation(frames, _) | PreviewContent::Info(_, Some((frames, _)), _), true) if !frames.is_empty() => {
                 let tex = &frames[0].0;
                 let s = tex.size_vec2();
                 let scale = (r.width() / s.x).min(r.height() / s.y).min(1.0);

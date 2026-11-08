@@ -357,6 +357,7 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
     child.multiply_opacity(t);
     let content = s.content.clone();
     match &content {
+        PreviewContent::Text(doc) if doc.text.is_empty() => card(&child, s, body, "This file is empty"),
         PreviewContent::Text(doc) => text_view(&mut child, s, doc, body),
         PreviewContent::Image(tex, orig, alpha) => {
             let sharpen = tex.size()[0] < orig[0] as usize;
@@ -427,11 +428,11 @@ fn unit_uv() -> Rect {
 }
 
 /// Fits inside the frame; a small picture stays at its own size instead of being blown up.
-fn image_rect(frame: Rect, orig: [u32; 2], zoom: f32, pan: Vec2, ppp: f32) -> Rect {
+fn image_rect(frame: Rect, orig: [u32; 2], zoom: f32, ppp: f32) -> Rect {
     let size = vec2(orig[0].max(1) as f32, orig[1].max(1) as f32);
     let area = frame.shrink(12.0);
     let fit = (area.width() / size.x).min(area.height() / size.y).min(1.0 / ppp.max(0.1));
-    Rect::from_center_size(frame.center() + pan, size * fit * zoom)
+    Rect::from_center_size(frame.center(), size * fit * zoom)
 }
 
 fn checkerboard(ui: &Ui, r: Rect, clip: Rect, pal: Palette) {
@@ -534,7 +535,7 @@ fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32
 /// Where a picture goes before panning.
 fn fitted_rect(frame: Rect, tex: &egui::TextureHandle, orig: [u32; 2], zoom: f32, paged: bool, ppp: f32) -> Rect {
     // Drawn larger than its nominal size means vector art, which has no size of its own.
-    if paged || tex.size()[0] > orig[0] as usize { page_rect(frame, orig, zoom) } else { image_rect(frame, orig, zoom, Vec2::ZERO, ppp) }
+    if paged || tex.size()[0] > orig[0] as usize { page_rect(frame, orig, zoom) } else { image_rect(frame, orig, zoom, ppp) }
 }
 
 /// A document page fills the frame, because its size in points says nothing about the screen.
