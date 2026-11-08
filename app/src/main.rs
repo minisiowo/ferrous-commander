@@ -39,7 +39,7 @@ mod gui_tests;
 use std::path::PathBuf;
 
 /// Text needs far less than the largest texture a GPU offers, and the font atlas
-/// takes the full width of its side in memory. Previews are capped at 1024 px.
+/// takes the full width of its side in memory. Previews stay within `preview::MAX_SIDE`.
 const MAX_TEXTURE_SIDE: usize = 2048;
 
 /// A plugin rather than `raw_input_hook`, which runs for the main window only. Windows with
@@ -142,7 +142,22 @@ fn every_window_gets_the_same_texture_limit() {
     }
 }
 
+/// By default glibc gives every busy thread its own heap and hands freed memory back only
+/// from the very top of it. Folder and preview workers allocate what the interface later
+/// frees, so that memory would stay with the process.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn keep_the_heap_small() {
+    // SAFETY: takes plain integers, and runs before any other thread exists.
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 2);
+        libc::mallopt(libc::M_TRIM_THRESHOLD, 1 << 20);
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
+    }
+}
+
 fn main() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    keep_the_heap_small();
     #[cfg(windows)]
     win::load_libraries_from_system_only();
     #[cfg(windows)]
