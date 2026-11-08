@@ -300,7 +300,8 @@ impl App {
                         self.panes[i].path_edit = Some(self.panes[i].path().display().to_string())
                     }
                     // Space previews (setting PreviewShortcut)
-                    " " => self.preview_window = !self.preview_window,
+                    " " if self.preview_may_toggle() => self.preview_window = !self.preview_window,
+                    " " => {}
                     _ => {
                         self.panes[i].filter.push_str(&t);
                         self.panes[i].pending_select = None;
@@ -321,7 +322,7 @@ impl App {
         }
     }
 
-    fn key(&mut self, i: usize, key: Key, m: Modifiers, page: usize) {
+    pub(crate) fn key(&mut self, i: usize, key: Key, m: Modifiers, page: usize) {
         let n = self.panes[i].view.len();
         let cur = self.panes[i].cursor;
         let mv = |s: &mut Self, to: usize| {

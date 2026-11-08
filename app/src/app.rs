@@ -350,6 +350,9 @@ pub struct App {
     pub app_chooser: Option<crate::openwith::Chooser>,
     pub preview: Preview,
     pub preview_window: bool,
+    pub quick: Option<crate::preview::window::Quick>,
+    /// When the preview window closed itself; its key press must not open it again.
+    pub preview_closed: Option<Instant>,
     pub search: Option<SearchUi>,
     pub settings_open: bool,
     pub shot: Option<ShotState>,
@@ -577,6 +580,8 @@ impl App {
             app_chooser: None,
             preview: Preview::new(),
             preview_window: false,
+            quick: None,
+            preview_closed: None,
             search: None,
             settings_open: false,
             shot: shot.map(|file| ShotState {
@@ -1021,7 +1026,7 @@ impl App {
         }
     }
 
-    fn request_folder(&mut self, p: &Path, force: bool) {
+    pub(crate) fn request_folder(&mut self, p: &Path, force: bool) {
         if is_computer(p) {
             return;
         }

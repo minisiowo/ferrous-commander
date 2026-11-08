@@ -5,6 +5,7 @@
 
 pub mod helper;
 pub mod load;
+pub mod window;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -44,12 +45,60 @@ impl Key {
     }
 }
 
+/// Text with its line positions, so drawing can go straight to the visible lines.
+pub struct TextDoc {
+    pub text: String,
+    /// Byte range of each line.
+    pub lines: Vec<(u32, u32)>,
+    /// Characters in the longest line.
+    pub longest: usize,
+    pub trimmed: bool,
+}
+
+impl TextDoc {
+    pub fn new(text: String, trimmed: bool) -> TextDoc {
+        let mut lines = Vec::new();
+        let mut longest = 0;
+        let mut at = 0;
+        for line in text.split_inclusive('\n') {
+            let shown = line.trim_end_matches(['\n', '\r']);
+            longest = longest.max(shown.chars().count());
+            lines.push((at as u32, (at + shown.len()) as u32));
+            at += line.len();
+        }
+        TextDoc { text, lines, longest, trimmed }
+    }
+
+    /// One row per line, or several rows per line when wrapped to `columns`.
+    pub fn rows(&self, columns: Option<usize>) -> Vec<(u32, u32, u32)> {
+        let mut rows = Vec::with_capacity(self.lines.len());
+        for (n, &(start, end)) in self.lines.iter().enumerate() {
+            let Some(columns) = columns else {
+                rows.push((n as u32, start, end));
+                continue;
+            };
+            let line = &self.text[start as usize..end as usize];
+            let (mut from, mut count) = (0, 0);
+            for (at, _) in line.char_indices() {
+                if count == columns {
+                    rows.push((n as u32, start + from as u32, start + at as u32));
+                    (from, count) = (at, 0);
+                }
+                count += 1;
+            }
+            rows.push((n as u32, start + from as u32, end));
+        }
+        rows
+    }
+}
+
 #[derive(Clone)]
 pub enum PreviewContent {
     None,
     Loading,
-    Text(Arc<str>, bool),
-    Image(egui::TextureHandle, [u32; 2]),
+    Text(Arc<TextDoc>),
+    /// The texture, the original size, and whether anything in it is see-through.
+    Image(egui::TextureHandle, [u32; 2], bool),
     Folder { folders: usize, files: usize, size: u64 },
     Binary,
     Error(String),
@@ -58,8 +107,8 @@ pub enum PreviewContent {
 impl PreviewContent {
     fn bytes(&self) -> usize {
         match self {
-            PreviewContent::Text(t, _) => t.len(),
-            PreviewContent::Image(tex, _) => tex.byte_size(),
+            PreviewContent::Text(t) => t.text.len() + t.lines.len() * 8,
+            PreviewContent::Image(tex, ..) => tex.byte_size(),
             _ => 64,
         }
     }
@@ -169,7 +218,8 @@ fn run_lane(slot: Arc<Slot>, results: mpsc::Sender<(Key, PreviewContent)>, start
         // Texture creation is thread safe, and this conversion is too slow for the interface.
         let content = content_of(reply, &job.ctx);
         if results.send((job.key, content)).is_err() { return; }
-        job.ctx.request_repaint();
+        // Not the current viewport: the list is what takes the result and passes it on.
+        job.ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
 }
 
@@ -181,9 +231,9 @@ fn texture(picture: &Picture, ctx: &egui::Context) -> egui::TextureHandle {
 
 fn content_of((loaded, picture): Reply, ctx: &egui::Context) -> PreviewContent {
     match loaded {
-        Loaded::Text(t, trimmed) => PreviewContent::Text(t.into(), trimmed),
+        Loaded::Text(t, trimmed) => PreviewContent::Text(Arc::new(TextDoc::new(t, trimmed))),
         Loaded::Image(orig) => match picture {
-            Some(p) => PreviewContent::Image(texture(&p, ctx), orig),
+            Some(p) => PreviewContent::Image(texture(&p, ctx), orig, p.rgba.chunks_exact(4).any(|c| c[3] < 255)),
             None => PreviewContent::Error("The picture is missing".into()),
         },
         Loaded::Folder { folders, files, size } => PreviewContent::Folder { folders, files, size },
@@ -229,6 +279,10 @@ impl Preview {
             asked: None,
             prefetched: None,
         }
+    }
+
+    pub fn key(&self) -> Option<&Key> {
+        self.key.as_ref()
     }
 
     fn send(&mut self, lane: usize, jobs: Vec<Job>) {
@@ -323,9 +377,21 @@ mod tests {
         assert!(cache.get(&key("f5")).is_some());
         cache.insert(key("new"), PreviewContent::Binary);
         assert!(cache.contains(&key("f5")), "using an item keeps it");
-        let huge: Arc<str> = "x".repeat(CACHE_BYTES).into();
-        cache.insert(key("huge"), PreviewContent::Text(huge, false));
+        let huge = Arc::new(TextDoc::new("x".repeat(CACHE_BYTES), false));
+        cache.insert(key("huge"), PreviewContent::Text(huge));
         assert_eq!(cache.items.len(), 1, "one oversized preview stays while it is shown");
+    }
+
+    #[test]
+    fn text_rows_follow_lines_and_wrap_on_characters() {
+        let doc = TextDoc::new("żółw\r\n\nabcdef".into(), false);
+        assert_eq!(doc.lines.len(), 3);
+        assert_eq!(doc.longest, 6);
+        let piece = |r: &(u32, u32, u32)| doc.text[r.1 as usize..r.2 as usize].to_string();
+        assert_eq!(doc.rows(None).iter().map(piece).collect::<Vec<_>>(), ["żółw", "", "abcdef"]);
+        let wrapped = doc.rows(Some(4));
+        assert_eq!(wrapped.iter().map(piece).collect::<Vec<_>>(), ["żółw", "", "abcd", "ef"]);
+        assert_eq!(wrapped.iter().map(|r| r.0).collect::<Vec<_>>(), [0, 1, 2, 2]);
     }
 
     #[test]
@@ -343,7 +409,7 @@ mod tests {
         app.receive_preview();
         assert!(!app.preview.cache.contains(&key("broken")));
         app.want_preview(None, &ctx);
-        app.preview.tx.send((key("old"), PreviewContent::Text("old".into(), false))).unwrap();
+        app.preview.tx.send((key("old"), PreviewContent::Text(Arc::new(TextDoc::new("old".into(), false))))).unwrap();
         app.receive_preview();
         assert!(matches!(app.preview.content, PreviewContent::None));
         assert!(app.preview.cache.contains(&key("old")), "a finished read still serves the next visit");

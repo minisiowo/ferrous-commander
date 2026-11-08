@@ -15,6 +15,11 @@ unsafe extern "system" {
     fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
     fn SetDefaultDllDirectories(flags: u32) -> i32;
 }
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn MonitorFromPoint(point: Point, flags: u32) -> isize;
+    fn GetMonitorInfoW(monitor: isize, info: *mut MonitorInfo) -> i32;
+}
 #[link(name = "shell32")]
 unsafe extern "system" {
     fn ShellExecuteExW(info: *mut ShellExecuteInfo) -> i32;
@@ -23,6 +28,31 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn CoInitializeEx(reserved: *mut core::ffi::c_void, flags: u32) -> i32;
     fn CoUninitialize();
+}
+
+#[repr(C)]
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+/// MONITORINFO.
+#[repr(C)]
+#[derive(Default)]
+struct MonitorInfo {
+    size: u32,
+    monitor: [i32; 4],
+    work: [i32; 4],
+    flags: u32,
+}
+
+/// The usable part of the monitor at this physical point, as left, top, right, bottom.
+pub fn work_area_at(x: f32, y: f32) -> Option<[f32; 4]> {
+    const MONITOR_DEFAULTTONEAREST: u32 = 2;
+    let mut info = MonitorInfo { size: size_of::<MonitorInfo>() as u32, ..Default::default() };
+    // SAFETY: `info` is valid for writing and announces its own size.
+    let ok = unsafe { GetMonitorInfoW(MonitorFromPoint(Point { x: x as i32, y: y as i32 }, MONITOR_DEFAULTTONEAREST), &mut info) };
+    (ok != 0).then(|| info.work.map(|v| v as f32))
 }
 
 /// SHELLEXECUTEINFOW.

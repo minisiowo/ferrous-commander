@@ -5,7 +5,6 @@ use std::sync::atomic::Ordering;
 use egui::{Align2, CornerRadius, FontId, Frame, Key, Margin, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use crate::app::{Act, App, Dialog, DragPaths, DropTarget, Notice, ToastKind, is_computer};
-use crate::preview::{Key as PreviewKey, PreviewContent, load::PREVIEW_TEXT_MAX};
 use crate::fsx;
 use crate::icons;
 use crate::settings::Layout;
@@ -304,66 +303,6 @@ impl App {
         } else if open && !cancel {
             if chooser.loading { ctx.request_repaint_after(std::time::Duration::from_millis(100)); }
             self.app_chooser = Some(chooser);
-        }
-    }
-
-    pub fn preview_window_ui(&mut self, ctx: &egui::Context) {
-        if !self.preview_window {
-            return;
-        }
-        let i = self.active;
-        let Some(e) = self.focused_item(i) else {
-            self.preview_window = false;
-            return;
-        };
-        self.want_preview(Some(PreviewKey::of(&e)), ctx);
-        let neighbours = self.panes[i].cursor.map_or_else(Vec::new, |row| {
-            [row.wrapping_sub(1), row + 1].into_iter().filter_map(|r| self.entry_at(i, r)).filter(|n| !n.is_dir).map(PreviewKey::of).collect()
-        });
-        self.prefetch_preview(neighbours, ctx);
-        let screen = ctx.content_rect();
-        let mut open = true;
-        let pal = self.pal;
-        egui::Window::new(format!("Preview — {}", e.name))
-            .id(egui::Id::unique("preview_win"))
-            .open(&mut open)
-            .collapsible(false)
-            .default_size(vec2(screen.width() * 0.7, screen.height() * 0.75))
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                let avail = ui.available_size().max(vec2(200.0, 200.0));
-                match &self.preview.content {
-                    PreviewContent::Text(t, trimmed) => {
-                        let (t, trimmed) = (t.clone(), *trimmed);
-                        egui::ScrollArea::both().max_height(avail.y).show(ui, |ui| {
-                            let l = egui::Label::new(RichText::new(&*t).monospace().size(12.0)).wrap_mode(egui::TextWrapMode::Extend);
-                            ui.add(l);
-                            if trimmed {
-                                let msg = format!("Preview trimmed to first {}K characters", PREVIEW_TEXT_MAX / 1000);
-                                ui.label(RichText::new(msg).color(pal.text_weak));
-                            }
-                        });
-                    }
-                    PreviewContent::Loading => {
-                        ui.label("Loading...");
-                    }
-                    PreviewContent::Binary | PreviewContent::Error(_) => {
-                        let (r, _) = ui.allocate_exact_size(vec2(avail.x, avail.y - 24.0), Sense::hover());
-                        self.preview_box(ui, r, Some(&e));
-                        let msg = match &self.preview.content {
-                            PreviewContent::Error(m) => m.clone(),
-                            _ => "No preview".into(),
-                        };
-                        ui.label(RichText::new(msg).color(pal.text_weak));
-                    }
-                    _ => {
-                        let (r, _) = ui.allocate_exact_size(avail, Sense::hover());
-                        self.preview_box(ui, r, Some(&e));
-                    }
-                }
-            });
-        if !open {
-            self.preview_window = false;
         }
     }
 

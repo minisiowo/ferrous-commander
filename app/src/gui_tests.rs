@@ -1496,3 +1496,28 @@ fn locked_archives_ask_again_until_the_password_fits() {
     assert_eq!(std::fs::read(root.join("in/d/a.txt")).unwrap(), b"hello\n");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn space_opens_the_preview_arrows_change_its_file_and_escape_closes_it() {
+    let (root, file, ctx, mut app) = safety_app("preview_keys");
+    std::fs::write(root.join("second.txt"), b"two").unwrap();
+    app.request_folder(&root, true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.panes[0].view.len() != 2 {
+        assert!(std::time::Instant::now() < deadline, "folder load timed out");
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    app.panes[0].cursor = Some(0);
+    frame(&ctx, &mut app, vec![Event::Text(" ".into())], Modifiers::NONE);
+    assert!(app.preview_window);
+    assert_eq!(app.preview.path.as_ref(), Some(&file));
+    key(&ctx, &mut app, Key::ArrowDown, Modifiers::NONE);
+    assert_eq!(app.preview.path.as_ref(), Some(&root.join("second.txt")));
+    key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    assert!(!app.preview_window);
+    assert!(app.quick.is_none());
+    frame(&ctx, &mut app, vec![Event::Text(" ".into())], Modifiers::NONE);
+    assert!(app.preview_window, "a preview closed from the list opens again at once");
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -1125,7 +1125,7 @@ impl App {
         let p = ui.painter_at(r);
         let current = e.is_some_and(|e| self.preview.path.as_ref() == Some(&e.path));
         match (&self.preview.content, current) {
-            (PreviewContent::Image(tex, _), true) => {
+            (PreviewContent::Image(tex, ..), true) => {
                 let s = tex.size_vec2();
                 let scale = (r.width() / s.x).min(r.height() / s.y).min(1.0);
                 let ir = Rect::from_center_size(r.center(), s * scale);
@@ -1136,7 +1136,7 @@ impl App {
                     Color32::WHITE,
                 );
             }
-            (PreviewContent::Text(t, _), true) if r.width() > 160.0 && !t.is_empty() => {
+            (PreviewContent::Text(t), true) if r.width() > 160.0 && !t.text.is_empty() => {
                 p.rect_filled(
                     r,
                     CornerRadius::same(1),
@@ -1149,6 +1149,7 @@ impl App {
                 let tr = r.shrink(6.0);
                 let lines = ((tr.height() / 13.0) as usize).max(1);
                 let snippet: String = t
+                    .text
                     .lines()
                     .take(lines)
                     .map(|l| l.chars().take(200).collect::<String>())
@@ -1198,7 +1199,7 @@ impl App {
                     format!("{} in files at top level", fsx::fmt_size(*size, mb)),
                 ));
             }
-            PreviewContent::Image(_, [w, h]) if current => {
+            PreviewContent::Image(_, [w, h], _) if current => {
                 v.push((
                     "Size",
                     format!("{}  ({} bytes)", fsx::fmt_size(e.size, mb), e.size),
