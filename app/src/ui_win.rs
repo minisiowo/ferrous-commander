@@ -633,7 +633,9 @@ impl App {
             Some(DropTarget::Folder(_)) => {
                 format!("{} · {n} {}", if ctrl { "COPY" } else { "MOVE" }, if n == 1 { "item" } else { "items" })
             }
-            Some(DropTarget::Favorites(_)) => "Add to Favorites".into(),
+            Some(DropTarget::Favorites { group, .. }) => {
+                format!("Add to {}", self.st.favorites.get(*group).map_or("group", |g| g.name.as_str()))
+            }
             None => format!("{n} item(s)"),
         };
         // Give the tooltip its own width: an Area otherwise inherits the tiny
@@ -666,10 +668,8 @@ impl App {
                 Some(DropTarget::Folder(p)) if !is_computer(&p) => {
                     self.acts.push(Act::Drop { target: p, paths: payload.0.clone(), copy: ctrl });
                 }
-                Some(DropTarget::Favorites(g)) => {
-                    for p in payload.0.iter() {
-                        self.acts.push(Act::AddFavorite(g, p.clone()));
-                    }
+                Some(DropTarget::Favorites { group, at }) => {
+                    self.acts.push(Act::PlaceFavorites { group, at, paths: payload.0.clone() });
                 }
                 _ => {}
             }

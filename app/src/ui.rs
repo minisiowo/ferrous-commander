@@ -219,6 +219,52 @@ fn side_metadata(path: &Path) -> (bool, bool) {
     })
 }
 
+/// Whether files can be dropped into a sidebar row's folder.
+fn accepts_files(path: &Path) -> bool {
+    let (exists, is_file) = side_metadata(path);
+    exists && !is_file && !is_computer(path)
+}
+
+/// Where a drag at height `y` lands among a group's rows.
+enum RowDrop {
+    /// Inside the folder of this row.
+    Into(usize),
+    /// Between rows, before this index.
+    At(usize),
+}
+
+/// A row that can take files keeps its top and bottom edges for placing a
+/// shortcut beside it; other rows are simply split in half.
+fn row_drop(rows: &[Rect], y: f32, accepts: impl Fn(usize) -> bool) -> RowDrop {
+    let Some(k) = rows.iter().position(|r| y < r.bottom()) else { return RowDrop::At(rows.len()) };
+    let r = rows[k];
+    let edge = if accepts(k) { r.height() * 0.3 } else { r.height() / 2.0 };
+    if y < r.top() + edge {
+        RowDrop::At(k)
+    } else if y >= r.bottom() - edge {
+        RowDrop::At(k + 1)
+    } else {
+        RowDrop::Into(k)
+    }
+}
+
+/// Draws the line showing where a shortcut will land in a group.
+fn insertion_line(ui: &Ui, card: Rect, rows: &[Rect], at: usize, color: Color32) {
+    let y = match (rows.get(at), rows.last()) {
+        (Some(row), _) => row.top(),
+        (None, Some(last)) => last.bottom(),
+        (None, None) => card.bottom() - 4.0,
+    };
+    ui.painter().hline(card.shrink2(vec2(6.0, 0.0)).x_range(), y, Stroke::new(2.0, color));
+}
+
+/// Marks a sidebar row as the folder that dragged files will go into.
+fn highlight_drop_row(ui: &Ui, row: Rect, color: Color32) {
+    let painter = ui.painter();
+    painter.rect_filled(row, CornerRadius::same(1), color.gamma_multiply(0.25));
+    painter.rect_stroke(row, CornerRadius::same(1), Stroke::new(1.5, color), egui::StrokeKind::Inside);
+}
+
 impl App {
     pub fn draw(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
@@ -573,7 +619,22 @@ impl App {
     }
 
     fn side_item(&mut self, ui: &mut Ui, path: &Path, label: &str) -> egui::Response {
-        self.side_item_with(ui, path, label, Sense::click())
+        let resp = self.side_item_with(ui, path, label, Sense::click());
+        self.side_row_drop(ui, resp.rect, path);
+        resp
+    }
+
+    /// Lets a sidebar row outside the favorite groups take dragged files.
+    fn side_row_drop(&mut self, ui: &Ui, row: Rect, path: &Path) {
+        // A scrolled-away row must not catch a drop aimed at what covers it.
+        let row = row.intersect(ui.clip_rect());
+        if !accepts_files(path) { return; }
+        self.drop_zones.push((row, DropTarget::Folder(path.to_path_buf())));
+        let dragged = egui::DragAndDrop::payload::<DragPaths>(ui.ctx());
+        if dragged.is_some_and(|d| !d.0.iter().any(|p| p == path))
+            && ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| row.contains(p)) {
+            highlight_drop_row(ui, row, self.pal.accent);
+        }
     }
 
     fn side_item_with(&mut self, ui: &mut Ui, path: &Path, label: &str, sense: Sense) -> egui::Response {
@@ -665,15 +726,30 @@ impl App {
     fn fav_item_drop(&mut self, ui: &mut Ui, card: &egui::Response, g: usize, rows: &[Rect]) {
         if card.dnd_hover_payload::<FavDrag>().is_none() { return; }
         let Some(y) = ui.input(|i| i.pointer.hover_pos()).map(|p| p.y) else { return };
-        let at = rows.iter().position(|r| y < r.center().y).unwrap_or(rows.len());
-        let line_y = match (rows.get(at), rows.last()) {
-            (Some(row), _) => row.top(),
-            (None, Some(last)) => last.bottom(),
-            (None, None) => card.rect.bottom() - 4.0,
-        };
-        ui.painter().hline(card.rect.shrink2(vec2(6.0, 0.0)).x_range(), line_y, Stroke::new(2.0, self.pal.accent));
+        let (RowDrop::At(at) | RowDrop::Into(at)) = row_drop(rows, y, |_| false);
+        insertion_line(ui, card.rect, rows, at, self.pal.accent);
         if let Some(drag) = card.dnd_release_payload::<FavDrag>() {
             self.acts.push(Act::MoveFavorite { from: drag.group, index: drag.index, to: g, at });
+        }
+    }
+
+    /// What releasing dragged files on a group does, shown on the group as it is
+    /// decided: a highlighted folder, or a line between two shortcuts.
+    fn fav_paths_target(&self, ui: &Ui, card: Rect, g: usize, paths: &[PathBuf], rows: &[Rect]) -> DropTarget {
+        let end = DropTarget::Favorites { group: g, at: paths.len() };
+        let Some(dragged) = egui::DragAndDrop::payload::<DragPaths>(ui.ctx()) else { return end };
+        let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| card.contains(*p) && ui.clip_rect().contains(*p));
+        let Some(pos) = pointer else { return end };
+        let accent = self.pal.accent;
+        match row_drop(rows, pos.y, |k| accepts_files(&paths[k]) && !dragged.0.contains(&paths[k])) {
+            RowDrop::Into(k) => {
+                highlight_drop_row(ui, rows[k], accent);
+                DropTarget::Folder(paths[k].clone())
+            }
+            RowDrop::At(at) => {
+                insertion_line(ui, card, rows, at, accent);
+                DropTarget::Favorites { group: g, at }
+            }
         }
     }
 
@@ -761,8 +837,8 @@ impl App {
         });
         self.fav_item_drop(ui, &r.response, g, &rows);
         self.sidebar_group_drop(ui, &r.response, SidebarSection::Favorite(g));
-        self.drop_zones
-            .push((r.response.rect, DropTarget::Favorites(g)));
+        let target = self.fav_paths_target(ui, r.response.rect, g, paths, &rows);
+        self.drop_zones.push((r.response.rect, target));
     }
 
     fn drives_card(&mut self, ui: &mut Ui) {
@@ -773,6 +849,7 @@ impl App {
             ui.spacing_mut().item_spacing.y = 2.0;
             for d in &drives {
                 let resp = self.drive_row(ui, d, true);
+                self.side_row_drop(ui, resp.rect, &d.path);
                 self.eject_controls(ui, &resp, d);
             }
         });

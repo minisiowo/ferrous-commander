@@ -525,7 +525,7 @@ fn sidebar_drag_and_offline_location() {
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
     let group_rect = |app: &App, index| app.drop_zones.iter().find_map(|(r, t)| {
-        matches!(t, DropTarget::Favorites(g) if *g == index).then_some(*r)
+        matches!(t, DropTarget::Favorites { group, .. } if *group == index).then_some(*r)
     }).unwrap();
     let first = group_rect(&app, 0);
     let second = group_rect(&app, 1);
@@ -579,7 +579,7 @@ fn sidebar_shortcuts_rename_and_drag() {
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
     let group_rect = |app: &App, index| app.drop_zones.iter().find_map(|(r, t)| {
-        matches!(t, DropTarget::Favorites(g) if *g == index).then_some(*r)
+        matches!(t, DropTarget::Favorites { group, .. } if *group == index).then_some(*r)
     }).unwrap();
     // Three rows are bottom-aligned inside the card's 6 px margin, 1 px apart.
     let row_h = app.row_h() + 2.0;
@@ -614,6 +614,47 @@ fn sidebar_shortcuts_rename_and_drag() {
     frame(&ctx, &mut app, vec![Event::PointerButton { pos: second.center(), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }], Modifiers::NONE);
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
     assert!(app.st.favorites[1].paths.contains(&dropped), "file drop on a group adds the shortcut");
+}
+
+#[test]
+fn dragged_files_pick_a_place_in_a_group() {
+    use crate::app::{DragPaths, DropTarget};
+    use crate::settings::{FavGroup, SidebarSection};
+    use std::path::PathBuf;
+    let dir = std::env::temp_dir().join(format!("fc-sidebar-drop-{}", std::process::id()));
+    let (folder, last) = (dir.join("folder"), dir.join("last"));
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::create_dir_all(&last).unwrap();
+    let dropped = dir.join("dropped.txt");
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(std::env::temp_dir().join("unused-place.png")));
+    app.st.favorites = vec![FavGroup::new("Beloved", vec![folder.clone(), last.clone()])];
+    app.st.sidebar_order = vec![SidebarSection::Favorite(0), SidebarSection::Drives,
+        SidebarSection::Cloud, SidebarSection::History];
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    let card = app.drop_zones.iter().find_map(|(r, t)| matches!(t, DropTarget::Favorites { .. }).then_some(*r)).unwrap();
+    // Two rows sit at the bottom of the card, inside its 6 px margin.
+    let h = app.row_h() + 1.0;
+    let top_row = card.max.y - 6.0 - 2.0 * h - 1.0;
+    let x = card.min.x + 40.0;
+    egui::DragAndDrop::set_payload(&ctx, DragPaths(vec![dropped.clone()]));
+    let mut target_at = |y: f32| {
+        frame(&ctx, &mut app, vec![Event::PointerMoved(pos2(x, y))], Modifiers::NONE);
+        app.drop_zones.iter().find_map(|(r, t)| r.contains(pos2(x, y)).then(|| t.clone())).unwrap()
+    };
+    assert!(matches!(target_at(top_row + 1.0), DropTarget::Favorites { at: 0, .. }), "top edge is above the row");
+    assert!(matches!(target_at(top_row + h - 1.0), DropTarget::Favorites { at: 1, .. }), "bottom edge is below the row");
+    assert!(matches!(target_at(top_row + h / 2.0), DropTarget::Folder(p) if p == folder), "middle is the folder");
+    egui::DragAndDrop::clear_payload(&ctx);
+
+    assert!(app.st.place_favorites(0, 1, vec![dropped.clone()]));
+    assert_eq!(app.st.favorites[0].paths, [folder.clone(), dropped.clone(), last.clone()]);
+    assert!(app.st.place_favorites(0, 0, vec![last.clone()]), "a shortcut already in the group moves");
+    assert_eq!(app.st.favorites[0].paths, [last.clone(), folder.clone(), dropped.clone()]);
+    assert!(!app.st.place_favorites(0, 1, vec![last.clone()]), "a shortcut already there stays");
+    assert!(!app.st.place_favorites(0, 0, vec![PathBuf::from("relative")]));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn drag_tab(ctx: &egui::Context, app: &mut App, start: Pos2, end: Pos2) {

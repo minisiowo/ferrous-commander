@@ -243,7 +243,8 @@ pub struct FavDrag {
 #[derive(Clone)]
 pub enum DropTarget {
     Folder(PathBuf),
-    Favorites(usize),
+    /// A place between a group's shortcuts; `at` indexes the group's paths.
+    Favorites { group: usize, at: usize },
 }
 
 pub enum Act {
@@ -286,6 +287,7 @@ pub enum Act {
     AddFavorite(usize, PathBuf),
     RemoveFavorite(usize, usize),
     MoveFavorite { from: usize, index: usize, to: usize, at: usize },
+    PlaceFavorites { group: usize, at: usize, paths: Vec<PathBuf> },
     DeleteGroup(usize),
     MoveGroup(usize, i32),
     Refresh,
@@ -2028,6 +2030,11 @@ impl App {
                     self.mark_dirty();
                 } else if from != to {
                     self.toast(ToastKind::Info, "This group already has that shortcut");
+                }
+            }
+            Act::PlaceFavorites { group, at, paths } => {
+                if self.st.place_favorites(group, at, paths) {
+                    self.mark_dirty();
                 }
             }
             Act::DeleteGroup(g) => {

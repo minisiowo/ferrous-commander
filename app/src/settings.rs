@@ -208,6 +208,24 @@ impl Settings {
         true
     }
 
+    /// Puts shortcuts at `at`, an index into the group as it looks before the
+    /// call. Paths already in the group move there and keep their custom names.
+    /// Returns false when nothing changed.
+    pub fn place_favorites(&mut self, group: usize, at: usize, paths: Vec<PathBuf>) -> bool {
+        let Some(target) = self.favorites.get_mut(group) else { return false };
+        let before = target.paths.clone();
+        let mut at = at.min(target.paths.len());
+        for path in paths.into_iter().filter(|p| p.is_absolute()) {
+            if let Some(old) = target.paths.iter().position(|p| *p == path) {
+                target.paths.remove(old);
+                if old < at { at -= 1; }
+            }
+            target.paths.insert(at, path);
+            at += 1;
+        }
+        target.paths != before
+    }
+
     pub fn load() -> Settings {
         let Some(base) = dirs::config_dir() else { return Self::default() };
         Self::load_from(&base)
