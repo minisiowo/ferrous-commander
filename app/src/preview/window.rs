@@ -1033,7 +1033,7 @@ mod tests {
         use egui::{Event, Modifiers, PointerButton, RawInput};
         let ctx = egui::Context::default();
         let mut s = model_on_screen(&ctx);
-        let mut run = |s: &mut Shared, events: Vec<Event>| {
+        let run = |s: &mut Shared, events: Vec<Event>| {
             let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), events, ..Default::default() };
             let mut out = ctx.run_ui(input, |ui| draw(ui, s, ViewportClass::Deferred));
             out.textures_delta.clear();
