@@ -326,14 +326,23 @@ impl App {
     // ================================================================= keyboard
 
     fn keyboard(&mut self, ctx: &egui::Context) {
-        if self.dialog.is_some() || !self.notices.is_empty() || ctx.text_edit_focused() || self.recording_shortcut() {
+        let mut events = ctx.input(|inp| inp.events.clone());
+        // Before anything returns, so that a release is never missed.
+        keymap::drop_held_pastes(&mut events, &mut self.paste_held);
+        let away = events.iter().any(|e| matches!(e, egui::Event::WindowFocused(false)));
+        let busy = self.dialog.is_some() || !self.notices.is_empty() || ctx.text_edit_focused() || self.recording_shortcut();
+        if away || busy {
             self.matcher.clear();
+        }
+        if busy {
             return;
         }
         #[cfg(target_os = "linux")]
-        if self.properties.is_some() { return; }
+        if self.properties.is_some() {
+            self.matcher.clear();
+            return;
+        }
         let i = self.active;
-        let events = ctx.input(|inp| inp.events.clone());
         let (back, fwd) = ctx.input(|inp| {
             (
                 inp.pointer.button_pressed(egui::PointerButton::Extra1),
@@ -349,6 +358,7 @@ impl App {
         let page = ((self.panes[i].list_h / self.row_h()).floor() as usize).max(1);
         if !self.st.vim_keys {
             self.panes[i].vim_visual = false;
+            self.panes[i].vim_filtering = false;
         }
         // A key that did something must not also type its character.
         let mut swallow = false;
@@ -363,10 +373,13 @@ impl App {
                     swallow = false;
                     if self.st.vim_keys && self.panes[i].vim_filtering {
                         if self.filter_key(i, chord) {
+                            self.matcher.clear();
                             swallow = true;
                             continue;
                         }
                         if chord.is_typing() {
+                            // A shortcut begun before typing must not finish after it.
+                            self.matcher.clear();
                             if let Some(text) = text {
                                 self.typed(i, &text);
                             }
@@ -528,7 +541,10 @@ impl App {
             }
             Command::ParentOrErase => {
                 if self.panes[i].filter.is_empty() {
-                    self.acts.push(Act::Up(i));
+                    // A held key that has just emptied the filter must not go on up the folders.
+                    if !repeat {
+                        self.acts.push(Act::Up(i));
+                    }
                 } else {
                     self.panes[i].filter.pop();
                 }
@@ -545,7 +561,11 @@ impl App {
                     self.clip = None;
                 }
             }
-            Command::Filter => self.panes[i].vim_filtering = true,
+            Command::Filter => {
+                // The selection's anchor is a row number, which filtering would change.
+                if visual { self.end_visual(i); }
+                self.panes[i].vim_filtering = true;
+            }
             Command::Visual if visual => self.end_visual(i),
             Command::Visual => {
                 if n > 0 {

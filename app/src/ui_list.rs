@@ -387,6 +387,7 @@ impl App {
                                 .clicked()
                             {
                                 self.panes[i].filter.clear();
+                                self.panes[i].vim_filtering = false;
                             }
                         }
                     });

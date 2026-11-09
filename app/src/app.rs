@@ -337,6 +337,8 @@ pub struct App {
     pub keys: crate::keymap::Keymap,
     pub matcher: crate::keymap::Matcher,
     pub shortcuts: Option<crate::ui_keys::ShortcutsWindow>,
+    /// A paste was taken and its key has not been released yet.
+    pub paste_held: bool,
     pub which_key_delay: Duration,
     pub pal: Palette,
     pub panes: Vec<Pane>,
@@ -586,6 +588,7 @@ impl App {
             keys: crate::keymap::Keymap::new(&st.keymap),
             matcher: Default::default(),
             shortcuts: None,
+            paste_held: false,
             which_key_delay: crate::ui_keys::WHICH_KEY_DELAY,
             st,
             panes,

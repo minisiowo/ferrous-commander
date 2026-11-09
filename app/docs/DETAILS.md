@@ -140,7 +140,8 @@ filter as you type.
 | `Ctrl+W` then `q` or `c` | Close tab |
 | `v` or `V` | Select rows: moving extends, `y` copies, `d` cuts, Esc ends |
 | `yy` / `dd` / `p` | Copy, cut, paste. `dd` only marks the files; nothing is deleted until you paste |
-| `/` | Filter. Enter keeps the filter, Esc clears it, Backspace on an empty filter leaves it |
+| `/` | Filter. Enter keeps the filter, Esc clears it, and the Backspace that empties it leaves it |
+| `Ctrl+O` / `Ctrl+I` | Back, forward |
 
 The leader key starts short sequences grouped as in LazyVim. It is `Ctrl+B` by default. Change it in the
 Neovim layer of **Customize shortcuts…**, for example to Space, and every shortcut built on it follows.
@@ -151,6 +152,7 @@ Space then stops opening the preview in this layer, and leader `u` `p` does that
 | `b` then `n` / `d` / `u` | New tab, close tab, reopen closed tab |
 | `f` then `f` / `p` / `t` | Search, edit path, open in command shell |
 | `f` then `n` / `d` / `c` / `r` / `y` | New file, new folder, duplicate, rename, copy path |
+| `f` then `x` | Move to the trash |
 | `w` then `h` `j` `k` `l` / `w` | Panel in that direction, next panel |
 | `w` then `n` / `d` / `s` | New panel, close panel, flip split |
 | `u` then `h` / `c` / `p` | Hidden files, folder columns, preview |

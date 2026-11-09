@@ -548,6 +548,7 @@ impl App {
                     let favorites = std::mem::take(&mut self.st.favorites);
                     let tags = std::mem::take(&mut self.st.tags);
                     self.st = crate::settings::Settings { favorites, tags, ..Default::default() };
+                    self.keymap_changed();
                 }
                 ui.label(RichText::new("Settings are saved automatically").color(weak).size(11.0));
             });

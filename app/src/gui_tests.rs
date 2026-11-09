@@ -2181,6 +2181,49 @@ fn the_leader_runs_shortcuts_and_can_be_changed_in_the_window() {
 }
 
 #[test]
+fn the_leader_cannot_be_recorded_as_a_shortcut_of_its_own() {
+    use crate::keymap::{Command, Layer};
+    use crate::ui_keys::Capture;
+    let (ctx, mut app, root) = neovim_app("record_leader");
+    recording(&mut app, Layer::Neovim, Capture::command(Command::Refresh));
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    type_key(&ctx, &mut app, Key::B, Modifiers::COMMAND, None);
+    assert!(!paints_text(&ctx, &mut app, "Replace"));
+    click_button(&ctx, &mut app, "Save");
+    assert!(app.shortcuts.as_ref().unwrap().capture.is_some(), "Save stays off");
+    assert!(app.st.keymap.neovim.bindings.is_empty(), "no leader shortcut was taken away");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn restoring_settings_restores_the_shortcuts_in_use() {
+    use crate::keymap::{Command, Layer, Mode, parse_keys};
+    let (ctx, mut app, root) = neovim_app("restore_keys");
+    app.st.vim_keys = false;
+    app.st.keymap.set_keys(Layer::Standard, Command::Refresh.info(), &[parse_keys("ctrl+y").unwrap()]);
+    app.keys = crate::keymap::Keymap::new(&app.st.keymap);
+    assert_eq!(app.keys.label(Mode::Standard, Command::Refresh).as_deref(), Some("Ctrl+Y"));
+    app.settings_open = true;
+    click_button(&ctx, &mut app, "Restore to default");
+    assert_eq!(app.keys.label(Mode::Standard, Command::Refresh).as_deref(), Some("F5"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_sequence_from_before_the_filter_does_not_finish_after_it() {
+    let (ctx, mut app, root) = neovim_app("filter_sequence");
+    assert_eq!(app.panes[0].tabs.len(), 1);
+    type_key(&ctx, &mut app, Key::Slash, Modifiers::NONE, Some("/"));
+    assert!(app.panes[0].vim_filtering);
+    type_key(&ctx, &mut app, Key::W, Modifiers::COMMAND, None);
+    letter(&ctx, &mut app, 'q');
+    assert_eq!(app.panes[0].filter, "q");
+    assert!(app.matcher.keys().is_empty());
+    key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn a_recorded_shortcut_replaces_its_old_owner_and_works() {
     use crate::keymap::{Command, Layer, parse_keys};
     use crate::ui_keys::Capture;

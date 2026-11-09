@@ -189,8 +189,8 @@ pub const COMMANDS: &[Info] = &[
     c(K::Right, "right", "Expand, or enter the column", Folders, &["right"], &[], true),
     c(K::ParentOrErase, "parent_or_erase", "Parent folder, or erase the filter", Folders, &["backspace"], &[], true),
     c(K::Parent, "parent", "Parent folder", Folders, &["alt+up"], &[], true),
-    c(K::Back, "back", "Back", Folders, &["alt+left"], &[], true),
-    c(K::Forward, "forward", "Forward", Folders, &["alt+right"], &[], true),
+    c(K::Back, "back", "Back", Folders, &["alt+left"], &["ctrl+o"], true),
+    c(K::Forward, "forward", "Forward", Folders, &["alt+right"], &["ctrl+i"], true),
     c(K::GoHome, "go_home", "Home folder", Folders, &[], &["g h"], false),
     c(K::EditPath, "edit_path", "Edit path", Folders, &["\\", "alt+d"], &[], false),
     c(K::EditPathSelected, "edit_path_selected", "Edit path, all of it selected", Folders, &["ctrl+l"], &["leader f p"], false),
@@ -207,7 +207,7 @@ pub const COMMANDS: &[Info] = &[
     c(K::CopyPath, "copy_path", "Copy path", Files, &["ctrl+shift+c"], &["leader f y"], false),
     c(K::Rename, "rename", "Rename", Files, &["f2"], &["leader f r"], false),
     c(K::Duplicate, "duplicate", "Duplicate", Files, &["ctrl+d"], &["leader f c"], false),
-    c(K::Delete, "delete", "Delete", Files, &["delete"], &[], false),
+    c(K::Delete, "delete", "Delete", Files, &["delete"], &["leader f x"], false),
     c(K::DeleteForever, "delete_forever", "Delete for good", Files, &["shift+delete"], &[], false),
     c(K::NewFile, "new_file", "New file", Files, &["ctrl+n"], &["leader f n"], false),
     c(K::NewFolder, "new_folder", "New folder", Files, &["ctrl+shift+n"], &["leader f d"], false),
@@ -426,9 +426,10 @@ impl KeymapSettings {
     pub fn clear_conflicts(&mut self, layer: Layer, keys: &[Chord], own: &Target) {
         let visual = matches!(own, Target::Command(c) if c.visual_only());
         for info in COMMANDS.iter().filter(|i| i.command.visual_only() == visual) {
-            if *own == Target::Command(info.command) { continue; }
+            let mine = *own == Target::Command(info.command);
             let before = self.keys_of(layer, info);
-            let kept: Vec<Vec<Chord>> = before.iter().filter(|k| !clashes(k, keys)).cloned().collect();
+            // Its own shortcut is in the way only when one would cut the other short.
+            let kept: Vec<Vec<Chord>> = before.iter().filter(|k| !clashes(k, keys) || (mine && k.as_slice() == keys)).cloned().collect();
             if kept.len() != before.len() {
                 self.set_keys(layer, info, &kept);
             }
@@ -588,7 +589,7 @@ pub fn conflict(settings: &KeymapSettings, layer: Layer, keys: &[Chord], own: &T
     let visual = matches!(own, Target::Command(c) if c.visual_only());
     layer_bindings(settings, layer).into_iter()
         .filter(|b| is_visual_only(b) == visual)
-        .find(|b| b.target != *own && clashes(&b.keys, keys))
+        .find(|b| clashes(&b.keys, keys) && (b.target != *own || b.keys != keys))
         .map(|b| b.target)
 }
 
@@ -641,12 +642,15 @@ pub struct Matcher {
     count: Option<usize>,
     /// When the sequence in `keys` was started.
     since: Option<std::time::Instant>,
+    /// The key that finished a sequence: while held, it must not run on its own.
+    finished: Option<Key>,
 }
 
 impl Matcher {
     pub fn clear(&mut self) {
         self.keys.clear();
         self.count = None;
+        self.finished = None;
     }
 
     /// The keys of the unfinished shortcut.
@@ -670,6 +674,7 @@ impl Matcher {
         if repeat {
             return self.feed_held(map, mode, chord);
         }
+        self.finished = None;
         let plain = !chord.ctrl && !chord.alt && !chord.shift;
         if self.keys.is_empty() && mode != Mode::Standard && plain
             && let Some(d) = digit(chord.key).filter(|d| *d > 0 || self.count.is_some())
@@ -694,7 +699,14 @@ impl Matcher {
             }
             Some(Step::Exact(target)) => {
                 let count = self.count.take();
+                if self.keys.len() > 1 {
+                    self.finished = Some(chord.key);
+                }
                 self.keys.clear();
+                // Esc after a count takes back the count, like Esc in a sequence.
+                if count.is_some() && target == Target::Command(Command::Escape) {
+                    return Outcome::Cancelled;
+                }
                 return Outcome::Run { target, count, extend: false };
             }
             None => {}
@@ -710,7 +722,7 @@ impl Matcher {
     }
 
     fn feed_held(&mut self, map: &Keymap, mode: Mode, chord: Chord) -> Outcome {
-        if !self.keys.is_empty() {
+        if !self.keys.is_empty() || self.finished == Some(chord.key) {
             return Outcome::Waiting;
         }
         let (target, extend) = match map.single(mode, chord) {
@@ -740,6 +752,8 @@ pub enum Input {
 pub fn presses(events: &[Event]) -> Vec<Input> {
     let command = |key| Input::Press { chord: Chord::new(key, Modifiers::COMMAND), repeat: false, text: None };
     let mut out = Vec::new();
+    // egui sends a key before the character it typed, so the character can use what the key said.
+    let (mut repeating, mut skip_text) = (false, false);
     for event in events {
         match event {
             Event::Copy => out.push(command(Key::C)),
@@ -747,17 +761,35 @@ pub fn presses(events: &[Event]) -> Vec<Input> {
             Event::Paste(_) => out.push(command(Key::V)),
             Event::Key { key, pressed: true, repeat, modifiers, .. } => {
                 let chord = Chord::new(*key, *modifiers);
+                repeating = *repeat;
+                skip_text = false;
                 if is_punctuation(*key) && !chord.ctrl && !chord.alt { continue; }
+                // Alt lets the character through too, and it would count as a second press.
+                skip_text = is_punctuation(*key) && chord.alt && !chord.ctrl;
                 out.push(Input::Press { chord, repeat: *repeat, text: None });
             }
+            Event::Text(_) if std::mem::take(&mut skip_text) => {}
             Event::Text(text) => match Key::from_name(text).filter(|k| is_punctuation(*k)) {
-                Some(key) => out.push(Input::Press { chord: Chord::plain(key), repeat: false, text: Some(text.clone()) }),
+                Some(key) => out.push(Input::Press { chord: Chord::plain(key), repeat: repeating, text: Some(text.clone()) }),
                 None => out.push(Input::Text(text.clone())),
             },
             _ => {}
         }
     }
     out
+}
+
+/// egui-winit turns every autorepeat of Ctrl+V into another paste without saying it is one,
+/// so a paste counts only after the key was let go or the window lost the keyboard.
+pub fn drop_held_pastes(events: &mut Vec<Event>, held: &mut bool) {
+    events.retain(|event| match event {
+        Event::Key { key: Key::V, pressed: false, .. } | Event::WindowFocused(false) => {
+            *held = false;
+            true
+        }
+        Event::Paste(_) => !std::mem::replace(held, true),
+        _ => true,
+    });
 }
 
 #[cfg(test)]
@@ -1021,6 +1053,46 @@ mod tests {
     }
 
     #[test]
+    fn holding_the_last_key_of_a_sequence_does_not_run_that_key_alone() {
+        let map = Keymap::default_for_tests();
+        let mut m = Matcher::default();
+        assert_eq!(feed_all(&mut m, &map, Mode::Normal, "ctrl+b w h").pop().unwrap(), run(Command::FocusLeft));
+        let h = keys("h")[0];
+        assert_eq!(m.feed(&map, Mode::Normal, h, true), Outcome::Waiting);
+        assert_eq!(m.feed(&map, Mode::Normal, keys("j")[0], true), run(Command::CursorDown), "other keys are unaffected");
+        assert_eq!(m.feed(&map, Mode::Normal, h, false), run(Command::FolderOut), "a new press counts");
+        assert_eq!(m.feed(&map, Mode::Normal, h, true), run(Command::FolderOut), "and that one may repeat");
+    }
+
+    #[test]
+    fn escape_after_a_count_only_takes_back_the_count() {
+        let map = Keymap::default_for_tests();
+        let mut m = Matcher::default();
+        assert_eq!(feed_all(&mut m, &map, Mode::Normal, "5 escape"), [Outcome::Waiting, Outcome::Cancelled]);
+        assert_eq!(m.pending(), "");
+        assert_eq!(last(&map, Mode::Normal, "escape"), run(Command::Escape));
+    }
+
+    #[test]
+    fn a_longer_shortcut_of_the_same_command_is_a_conflict_to_confirm() {
+        let mut settings = KeymapSettings::default();
+        let close = Target::Command(Command::CloseTab);
+        assert_eq!(conflict(&settings, Layer::Standard, &keys("ctrl+w x"), &close), Some(close.clone()));
+        settings.clear_conflicts(Layer::Standard, &keys("ctrl+w x"), &close);
+        settings.assign(Layer::Standard, &close, keys("ctrl+w x"));
+        assert_eq!(settings.keys_of(Layer::Standard, Command::CloseTab.info()), [keys("ctrl+w x")]);
+        assert_eq!(conflict(&settings, Layer::Standard, &keys("ctrl+w x"), &close), None, "the very same keys are no clash");
+    }
+
+    #[test]
+    fn the_new_neovim_defaults_work() {
+        let map = Keymap::default_for_tests();
+        assert_eq!(last(&map, Mode::Normal, "ctrl+b f x"), run(Command::Delete));
+        assert_eq!(last(&map, Mode::Normal, "ctrl+o"), run(Command::Back));
+        assert_eq!(last(&map, Mode::Normal, "ctrl+i"), run(Command::Forward));
+    }
+
+    #[test]
     fn the_leader_starts_named_groups_and_does_not_need_ctrl_held() {
         let map = Keymap::default_for_tests();
         assert_eq!(last(&map, Mode::Normal, "ctrl+b b d"), run(Command::CloseTab));
@@ -1093,6 +1165,30 @@ mod tests {
         assert_eq!(got, [Input::Press { chord: keys("/")[0], repeat: false, text: Some("/".into()) }]);
         let with_ctrl = presses(&[key_event(Key::Slash, Modifiers::COMMAND)]);
         assert_eq!(with_ctrl, [Input::Press { chord: keys("ctrl+/")[0], repeat: false, text: None }]);
+    }
+
+    #[test]
+    fn a_held_punctuation_key_is_a_repeat() {
+        let held = Event::Key { key: Key::Space, physical_key: None, pressed: true, repeat: true, modifiers: Modifiers::NONE };
+        assert_eq!(presses(&[held, Event::Text(" ".into())]), [Input::Press { chord: keys("space")[0], repeat: true, text: Some(" ".into()) }]);
+    }
+
+    #[test]
+    fn alt_and_punctuation_is_one_press() {
+        let got = presses(&[key_event(Key::Slash, Modifiers::ALT), Event::Text("/".into())]);
+        assert_eq!(got, [Input::Press { chord: keys("alt+/")[0], repeat: false, text: None }]);
+    }
+
+    #[test]
+    fn a_paste_counts_once_until_the_key_is_released() {
+        let paste = || Event::Paste("x".into());
+        let release = Event::Key { key: Key::V, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE };
+        let mut held = false;
+        let mut run = |mut events: Vec<Event>| { drop_held_pastes(&mut events, &mut held); events.iter().filter(|e| matches!(e, Event::Paste(_))).count() };
+        assert_eq!(run(vec![paste(), paste()]), 1);
+        assert_eq!(run(vec![paste()]), 0, "still held");
+        assert_eq!(run(vec![release, paste()]), 1);
+        assert_eq!(run(vec![Event::WindowFocused(false), paste()]), 1, "focus loss forgets the key");
     }
 
     #[test]

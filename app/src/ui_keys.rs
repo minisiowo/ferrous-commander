@@ -131,7 +131,7 @@ impl App {
             Event::Key { .. } | Event::Text(_) | Event::Copy | Event::Cut | Event::Paste(_))));
     }
 
-    fn keymap_changed(&mut self) {
+    pub(crate) fn keymap_changed(&mut self) {
         self.keys = keymap::Keymap::new(&self.st.keymap);
         self.matcher.clear();
         self.mark_dirty();
@@ -244,8 +244,13 @@ impl App {
         if let Subject::Folder(FolderForm { original: Some(original), .. }) = &capture.subject {
             others.remove_folder(layer, original);
         }
-        let clash = target.as_ref().filter(|_| !capture.keys.is_empty())
+        // Replacing here would remove every shortcut built on the leader, one by one.
+        let is_leader = layer == Layer::Neovim && capture.keys.len() == 1 && self.st.keymap.leader() == capture.keys.first().copied();
+        let clash = target.as_ref().filter(|_| !capture.keys.is_empty() && !is_leader)
             .and_then(|t| keymap::conflict(&others, layer, &capture.keys, t));
+        if is_leader {
+            ui.label(RichText::new("This is the leader key. To use another one, change the Leader key below.").color(red));
+        }
         if let Some(clash) = &clash {
             ui.label(RichText::new(format!("Already used by: {}", clash.label())).color(red));
         }
@@ -255,7 +260,7 @@ impl App {
         let (mut save, mut clear, mut cancel) = (false, false, false);
         ui.horizontal(|ui| {
             let text = if clash.is_some() { "Replace" } else { "Save" };
-            save = ui.add_enabled(target.is_some() && !capture.keys.is_empty(), Button::new(text)).clicked();
+            save = ui.add_enabled(target.is_some() && !capture.keys.is_empty() && !is_leader, Button::new(text)).clicked();
             clear = ui.add_enabled(!capture.keys.is_empty(), Button::new("Clear keys")).clicked();
             cancel = ui.button("Cancel").clicked();
         });
