@@ -403,6 +403,8 @@ pub struct App {
     pub acts: Vec<Act>,
     /// Last highlighted child per (pane, column) so a column scrolls to it once.
     pub col_hl: HashMap<(usize, PathBuf), PathBuf>,
+    /// The user has been told that settings cannot be saved.
+    save_warned: bool,
 }
 
 /// Checks visible folders on its own timer, so that an idle window does not redraw
@@ -618,6 +620,7 @@ impl App {
                 lines: vec![problem, "Default settings are in use, and changes will not be saved until the file is fixed.".to_string()],
             }).into_iter().collect(),
             closing: false,
+            save_warned: false,
             #[cfg(target_os = "linux")]
             properties: None,
             #[cfg(not(windows))]
@@ -946,7 +949,15 @@ impl App {
             })
             .collect();
         self.st.tiles = Some(self.tiles.clone());
-        self.st.save();
+        // Once per run of failures: this repeats on a timer, and one message says it all.
+        match self.st.save_result() {
+            Ok(_) => self.save_warned = false,
+            Err(e) if !self.save_warned => {
+                self.save_warned = true;
+                self.toast(ToastKind::Error, format!("Settings could not be saved: {e}"));
+            }
+            Err(_) => {}
+        }
         self.dirty = false;
         self.last_save = Instant::now();
     }

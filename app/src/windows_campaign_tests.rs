@@ -632,6 +632,75 @@ fn campaign_paths_beyond_the_old_limit() {
     }
 }
 
+fn user_name() -> String { format!("{}\\{}", std::env::var("USERDOMAIN").unwrap(), std::env::var("USERNAME").unwrap()) }
+
+#[test]
+#[ignore = "Campaign: writes to C:\\FerrousTest and the test disks"]
+fn campaign_h2_a_folder_too_large_for_the_bin_with_an_unreadable_part() {
+    let work = Work::new(disk("FCNTFS1G"), "h2-acl");
+    let name = format!("{PREFIX}h2-acl");
+    let folder = work.sub(&name);
+    let locked = folder.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    let big = std::fs::File::create(locked.join("large.bin")).unwrap();
+    big.set_len(600 << 20).unwrap();
+    drop(big);
+    let plain = crate::windows_fs::shown(&locked);
+    let icacls = |args: &[&str]| assert!(std::process::Command::new("icacls").arg(&plain).args(args).output().unwrap().status.success(), "{args:?}");
+    let deny = format!("{}:(OI)(CI)(RX)", user_name());
+    icacls(&["/deny", &deny]);
+    let src = exact(&crate::windows_fs::shown(&folder)).unwrap();
+    let blocked = recycle_blocker(&src);
+    icacls(&["/remove:d", &user_name()]);
+    eprintln!("[H2 unreadable] {blocked:?}");
+    assert!(blocked.is_some(), "a folder over the limit passed because part of it could not be measured, and the Shell would destroy it");
+}
+
+#[test]
+#[ignore = "Campaign: writes to C:\\FerrousTest and the test disks"]
+fn campaign_sparse_and_compressed_files_keep_their_content() {
+    for (tag, place, _) in targets() {
+        let (src, dst) = (Work::new(LOCAL, "sparse-src"), Work::new(&place, "sparse-dst"));
+        let plain = crate::windows_fs::shown(&src.0);
+        let sparse = plain.join("sparse.bin");
+        std::fs::write(&sparse, b"head").unwrap();
+        assert!(std::process::Command::new("fsutil").args(["sparse", "setflag"]).arg(&sparse).output().unwrap().status.success(), "fsutil");
+        let file = std::fs::OpenOptions::new().write(true).open(&sparse).unwrap();
+        file.set_len(1 << 29).unwrap();
+        drop(file);
+        let compressed = plain.join("compressed.bin");
+        std::fs::write(&compressed, vec![3u8; 1 << 22]).unwrap();
+        assert!(std::process::Command::new("compact").args(["/c"]).arg(&compressed).output().unwrap().status.success(), "compact");
+        for file in [&sparse, &compressed] {
+            let want = hash(file);
+            let result = copy_item(file, &dst.0, &no(false));
+            no_stage(&dst.0);
+            match result {
+                Ok(done) => {
+                    assert_eq!(hash(&done), want, "{tag} {file:?}");
+                    eprintln!("[sparse {tag}] {:?}: copied, attributes {:#x}", file.file_name().unwrap(), std::fs::metadata(&done).unwrap().file_attributes());
+                }
+                Err(e) => eprintln!("[sparse {tag}] {:?}: {e}", file.file_name().unwrap()),
+            }
+            assert_eq!(hash(file), want, "{tag}: the source changed");
+        }
+    }
+}
+
+#[test]
+#[ignore = "Campaign: writes to C:\\FerrousTest and the test disks"]
+fn campaign_report_what_happens_to_private_permissions_on_a_move() {
+    let (src, dst) = (Work::new(LOCAL, "acl-src"), Work::new(disk("FCNTFS1G"), "acl-dst"));
+    let file = src.0.join("private.txt");
+    std::fs::write(&file, b"secret").unwrap();
+    let plain = crate::windows_fs::shown(&file);
+    assert!(std::process::Command::new("icacls").arg(&plain).args(["/inheritance:r", "/grant:r", &format!("{}:F", user_name())]).output().unwrap().status.success());
+    let moved = move_item(&file, &dst.0, &no(false)).unwrap();
+    assert_eq!(std::fs::read(&moved).unwrap(), b"secret");
+    let shown = std::process::Command::new("icacls").arg(crate::windows_fs::shown(&moved)).output().unwrap();
+    eprintln!("[acl] {}", String::from_utf8_lossy(&shown.stdout).replace(['\r', '\n'], " "));
+}
+
 // ---------- archives ----------
 
 fn zip_of(path: &Path, entries: &[(&str, &[u8])]) {

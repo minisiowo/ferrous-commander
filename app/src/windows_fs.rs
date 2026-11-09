@@ -13,6 +13,7 @@ unsafe extern "system" {
     fn FindFirstFileW(name: *const u16, data: *mut FindData) -> *mut c_void;
     fn FindClose(find: *mut c_void) -> i32;
     fn GetVolumePathNameW(path: *const u16, volume: *mut u16, len: u32) -> i32;
+    fn GetDiskFreeSpaceExW(root: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
     fn GetVolumeNameForVolumeMountPointW(mount: *const u16, volume: *mut u16, len: u32) -> i32;
     fn GetDriveTypeW(root: *const u16) -> u32;
     fn FindFirstStreamW(name: *const u16, level: i32, data: *mut StreamData, flags: u32) -> *mut c_void;
@@ -402,12 +403,17 @@ fn registry_dword(root: isize, key: &str, name: &str) -> Option<u32> {
 }
 
 /// Whether the total size passes `limit`, stopping as soon as it does. Links count as nothing.
+/// A part that cannot be measured counts as passing it: the Shell would destroy the whole
+/// item if the unseen part turned out to be too large, so "unknown" must not mean "fits".
 fn exceeds(path: &Path, limit: u64, total: &mut u64) -> bool {
-    let Ok(md) = fs::symlink_metadata(path) else { return false };
+    let md = match fs::symlink_metadata(path) {
+        Ok(md) => md,
+        Err(e) => return e.kind() != io::ErrorKind::NotFound,
+    };
     if md.file_type().is_symlink() { return false; }
     if md.is_dir() {
-        let Ok(list) = fs::read_dir(path) else { return false };
-        return list.map_while(Result::ok).any(|child| exceeds(&child.path(), limit, total));
+        let Ok(list) = fs::read_dir(path) else { return true };
+        return list.into_iter().any(|child| child.map_or(true, |child| exceeds(&child.path(), limit, total)));
     }
     *total = total.saturating_add(md.len());
     *total > limit
@@ -444,17 +450,31 @@ pub fn recycle_blocker(path: &Path) -> Option<String> {
         return Some("the Recycle Bin is turned off by policy".into());
     }
     let mut volume = [0u16; 64];
-    // SAFETY: the length matches the buffer. Subst drives fail here and keep the defaults.
-    if unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), volume.as_mut_ptr(), volume.len() as u32) } == 0 { return None; }
-    let end = volume.iter().position(|c| *c == 0).unwrap_or(volume.len());
-    let volume = String::from_utf16_lossy(&volume[..end]);
-    let guid = volume.trim_start_matches(r"\\?\Volume").trim_end_matches('\\');
-    let key = format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{guid}");
-    if registry_dword(HKCU, &key, "NukeOnDelete") == Some(1) {
-        return Some("the Recycle Bin is turned off for this drive".into());
+    let mut megabytes = None;
+    // SAFETY: the length matches the buffer.
+    if unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), volume.as_mut_ptr(), volume.len() as u32) } != 0 {
+        let end = volume.iter().position(|c| *c == 0).unwrap_or(volume.len());
+        let volume = String::from_utf16_lossy(&volume[..end]);
+        let guid = volume.trim_start_matches(r"\\?\Volume").trim_end_matches('\\');
+        let key = format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{guid}");
+        if registry_dword(HKCU, &key, "NukeOnDelete") == Some(1) {
+            return Some("the Recycle Bin is turned off for this drive".into());
+        }
+        megabytes = registry_dword(HKCU, &key, "MaxCapacity");
     }
-    let megabytes = u64::from(registry_dword(HKCU, &key, "MaxCapacity")?);
-    exceeds(path, megabytes << 20, &mut 0).then(|| format!("it is larger than this drive's Recycle Bin ({megabytes} MB)"))
+    let mut volume_bytes = 0u64;
+    // SAFETY: `root` is NUL-terminated and the output pointer is live; the others may be null.
+    if megabytes.is_none() && unsafe { GetDiskFreeSpaceExW(root.as_ptr(), std::ptr::null_mut(), &mut volume_bytes, std::ptr::null_mut()) } == 0 { volume_bytes = 0; }
+    exceeds(path, recycle_limit(megabytes, volume_bytes), &mut 0).then(|| match megabytes {
+        Some(megabytes) => format!("it is, or may be, larger than this drive's Recycle Bin ({megabytes} MB)"),
+        None => "it may be larger than this drive's Recycle Bin".into(),
+    })
+}
+
+/// The size the Recycle Bin is sure to take. Without a configured limit Windows reserves
+/// at least 5% of the volume, so that much is safe; an unknown volume size allows nothing.
+fn recycle_limit(megabytes: Option<u32>, volume_bytes: u64) -> u64 {
+    megabytes.map_or(volume_bytes / 20, |megabytes| u64::from(megabytes) << 20)
 }
 
 /// For our reserved staging directory and for what the user confirmed deleting for good:
@@ -474,6 +494,14 @@ pub fn remove_staged(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_recycle_bin_limit_never_lets_a_large_item_through() {
+        assert_eq!(recycle_limit(Some(100), 1 << 40), 100 << 20);
+        assert_eq!(recycle_limit(None, 2000 << 20), 100 << 20);
+        assert_eq!(recycle_limit(None, 0), 0);
+    }
+
     struct Sandbox(std::path::PathBuf);
     impl Sandbox {
         fn new(name: &str) -> Self {

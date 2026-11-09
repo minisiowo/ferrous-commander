@@ -268,10 +268,6 @@ impl Settings {
         serde_json::from_value(crate::lua_config::decode(text)?).map_err(|e| e.to_string())
     }
 
-    pub fn save(&self) {
-        let _ = self.save_result();
-    }
-
     pub fn save_result(&self) -> std::io::Result<PathBuf> {
         let dir = config_directory().ok_or_else(|| std::io::Error::other("User configuration directory is unavailable"))?;
         self.save_over(&dir.join("settings.lua"))?;
