@@ -237,7 +237,7 @@ impl Command {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
     Command(Command),
-    Folder(PathBuf),
+    Folder { path: PathBuf, new_tab: bool },
 }
 
 impl Target {
@@ -245,14 +245,18 @@ impl Target {
     pub fn label(&self) -> String {
         match self {
             Target::Command(command) => command.info().label.to_string(),
-            Target::Folder(path) => format!("Go to {}", path.display()),
+            Target::Folder { path, new_tab: false } => format!("Go to {}", path.display()),
+            Target::Folder { path, new_tab: true } => format!("Open {} in a new tab", path.display()),
         }
     }
 
     /// A name that fits a small hint.
     pub fn short_label(&self) -> String {
         match self {
-            Target::Folder(path) => format!("Go to {}", path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())),
+            Target::Folder { path, new_tab } => {
+                let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                if *new_tab { format!("{name} in a new tab") } else { format!("Go to {name}") }
+            }
             Target::Command(_) => self.label(),
         }
     }
@@ -270,6 +274,14 @@ pub struct Binding {
 pub struct FolderKey {
     pub keys: String,
     pub path: PathBuf,
+    /// Opens in a new tab instead of the current one.
+    pub new_tab: bool,
+}
+
+impl FolderKey {
+    pub fn target(&self) -> Target {
+        Target::Folder { path: self.path.clone(), new_tab: self.new_tab }
+    }
 }
 
 /// What the user changed in one layer. A command listed here replaces its defaults: its
@@ -341,9 +353,13 @@ impl KeymapSettings {
         }
         if !visual {
             self.layer_mut(layer).folders.retain(|f| {
-                Target::Folder(f.path.clone()) == *own || parse_keys(&f.keys).is_none_or(|k| !clashes(&k, keys))
+                f.target() == *own || parse_keys(&f.keys).is_none_or(|k| !clashes(&k, keys))
             });
         }
+    }
+
+    pub fn remove_folder(&mut self, layer: Layer, target: &Target) {
+        self.layer_mut(layer).folders.retain(|f| f.target() != *target);
     }
 
     /// Gives a command one more shortcut, or a folder its only one.
@@ -357,12 +373,12 @@ impl KeymapSettings {
                 }
                 self.set_keys(layer, info, &all);
             }
-            Target::Folder(path) => {
+            Target::Folder { path, new_tab } => {
                 let stored = stored_keys(&keys);
                 let folders = &mut self.layer_mut(layer).folders;
-                match folders.iter_mut().find(|f| f.path == *path) {
+                match folders.iter_mut().find(|f| f.target() == *target) {
                     Some(folder) => folder.keys = stored,
-                    None => folders.push(FolderKey { keys: stored, path: path.clone() }),
+                    None => folders.push(FolderKey { keys: stored, path: path.clone(), new_tab: *new_tab }),
                 }
             }
         }
@@ -396,7 +412,7 @@ fn layer_bindings(settings: &KeymapSettings, layer: Layer) -> Vec<Binding> {
     }
     for folder in &settings.layer(layer).folders {
         if let Some(keys) = parse_keys(&folder.keys) {
-            out.push(Binding { keys, target: Target::Folder(folder.path.clone()) });
+            out.push(Binding { keys, target: folder.target() });
         }
     }
     out
@@ -771,14 +787,14 @@ mod tests {
     #[test]
     fn hints_group_longer_shortcuts_and_name_folders_briefly() {
         let mut settings = KeymapSettings::default();
-        settings.neovim.folders.push(FolderKey { keys: "g p".into(), path: PathBuf::from("/home/me/Projects") });
-        settings.neovim.folders.push(FolderKey { keys: "g x a".into(), path: PathBuf::from("/a") });
-        settings.neovim.folders.push(FolderKey { keys: "g x b".into(), path: PathBuf::from("/b") });
+        settings.neovim.folders.push(FolderKey { keys: "g p".into(), path: PathBuf::from("/home/me/Projects"), new_tab: false });
+        settings.neovim.folders.push(FolderKey { keys: "g x a".into(), path: PathBuf::from("/a"), new_tab: false });
+        settings.neovim.folders.push(FolderKey { keys: "g x b".into(), path: PathBuf::from("/b"), new_tab: true });
         let map = Keymap::new(&settings);
         let got = hints(&map, Mode::Normal, "g");
         assert!(got.contains(&("p".to_string(), "Go to Projects".to_string())), "{got:?}");
         assert!(got.contains(&("x".to_string(), "+2 more".to_string())), "{got:?}");
-        assert_eq!(hints(&map, Mode::Normal, "g x"), [("a".to_string(), "Go to a".to_string()), ("b".to_string(), "Go to b".to_string())]);
+        assert_eq!(hints(&map, Mode::Normal, "g x"), [("a".to_string(), "Go to a".to_string()), ("b".to_string(), "b in a new tab".to_string())]);
     }
 
     #[test]
@@ -857,9 +873,9 @@ mod tests {
     #[test]
     fn user_folders_open_from_their_own_sequences() {
         let mut settings = KeymapSettings::default();
-        settings.neovim.folders.push(FolderKey { keys: "g p".into(), path: PathBuf::from("/projects") });
+        settings.neovim.folders.push(FolderKey { keys: "g p".into(), path: PathBuf::from("/projects"), new_tab: true });
         let map = Keymap::new(&settings);
-        let expected = Outcome::Run { target: Target::Folder(PathBuf::from("/projects")), count: None, extend: false };
+        let expected = Outcome::Run { target: Target::Folder { path: PathBuf::from("/projects"), new_tab: true }, count: None, extend: false };
         assert_eq!(last(&map, Mode::Normal, "g p"), expected);
     }
 
@@ -892,10 +908,10 @@ mod tests {
     #[test]
     fn a_folder_has_one_shortcut_and_replacing_can_remove_it() {
         let mut settings = KeymapSettings::default();
-        let folder = Target::Folder(PathBuf::from("/projects"));
+        let folder = Target::Folder { path: PathBuf::from("/projects"), new_tab: false };
         settings.assign(Layer::Neovim, &folder, keys("g p"));
         settings.assign(Layer::Neovim, &folder, keys("g o"));
-        assert_eq!(settings.neovim.folders, [FolderKey { keys: "g o".into(), path: "/projects".into() }]);
+        assert_eq!(settings.neovim.folders, [FolderKey { keys: "g o".into(), path: "/projects".into(), new_tab: false }]);
         let down = Target::Command(Command::CursorDown);
         settings.clear_conflicts(Layer::Neovim, &keys("g o"), &down);
         assert!(settings.neovim.folders.is_empty());

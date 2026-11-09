@@ -381,7 +381,8 @@ impl App {
                             swallow = true;
                             match target {
                                 Target::Command(command) => self.run_command(i, command, extend, count, repeat, page),
-                                Target::Folder(path) => self.acts.push(Act::Navigate(i, path)),
+                                Target::Folder { path, new_tab: false } => self.acts.push(Act::Navigate(i, path)),
+                                Target::Folder { path, new_tab: true } => self.acts.push(Act::OpenNewTab(i, path, true)),
                             }
                         }
                     }

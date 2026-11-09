@@ -6,17 +6,61 @@ use egui::{Align2, Button, CornerRadius, Event, Frame, Margin, RichText, Stroke,
 
 use crate::app::{App, is_computer};
 use crate::chrome::{self, Icon, Panel};
-use crate::keymap::{self, COMMANDS, Chord, Command, Group, Info, Input, Layer, MAX_KEYS, Mode, Target};
+use crate::keymap::{self, COMMANDS, Chord, Command, FolderKey, Group, Info, Input, Layer, MAX_KEYS, Mode, Target};
 use crate::theme::hex;
 
 /// How long an unfinished shortcut waits before its next keys are shown, so that
 /// typing a familiar sequence quickly never flashes a panel.
 pub const WHICH_KEY_DELAY: Duration = Duration::from_millis(300);
 
-/// A shortcut being recorded: everything pressed goes here until Save or Cancel.
+/// A command of the user's own: a folder and where it opens.
+pub struct FolderForm {
+    pub path: String,
+    pub new_tab: bool,
+    /// The entry being changed, when this is not a new one.
+    original: Option<Target>,
+}
+
+pub enum Subject {
+    Command(Command),
+    Folder(FolderForm),
+}
+
+/// A shortcut being recorded: every key pressed outside a text field goes here until
+/// Save or Cancel.
 pub struct Capture {
-    pub target: Target,
+    pub subject: Subject,
     pub keys: Vec<Chord>,
+    /// The keys shown are the old ones, and the first press starts over.
+    replace_keys: bool,
+}
+
+impl Capture {
+    pub fn command(command: Command) -> Capture {
+        Capture { subject: Subject::Command(command), keys: Vec::new(), replace_keys: false }
+    }
+
+    pub fn folder(path: String) -> Capture {
+        let form = FolderForm { path, new_tab: false, original: None };
+        Capture { subject: Subject::Folder(form), keys: Vec::new(), replace_keys: false }
+    }
+
+    fn edit(folder: &FolderKey) -> Capture {
+        let form = FolderForm { path: folder.path.display().to_string(), new_tab: folder.new_tab, original: Some(folder.target()) };
+        let keys = keymap::parse_keys(&folder.keys).unwrap_or_default();
+        Capture { subject: Subject::Folder(form), keys, replace_keys: true }
+    }
+
+    /// What Save would bind the keys to; `None` until a full folder path is entered.
+    fn target(&self) -> Option<Target> {
+        match &self.subject {
+            Subject::Command(command) => Some(Target::Command(*command)),
+            Subject::Folder(form) => {
+                let path = crate::ui_list::typed_path(&form.path);
+                path.is_absolute().then_some(Target::Folder { path, new_tab: form.new_tab })
+            }
+        }
+    }
 }
 
 pub struct ShortcutsWindow {
@@ -35,9 +79,11 @@ impl ShortcutsWindow {
 /// A change picked in the list, applied once the list has been drawn.
 enum Change {
     Remove(&'static Info, usize),
-    Record(Target),
+    Record(Command),
     ResetRow(&'static Info),
-    RemoveFolder(std::path::PathBuf),
+    NewFolder,
+    EditFolder(FolderKey),
+    RemoveFolder(Target),
     ResetLayer,
 }
 
@@ -64,11 +110,15 @@ impl App {
     /// Takes every key press for the recording, so nothing else reacts to it.
     fn read_capture(&mut self, ctx: &egui::Context, window: &mut ShortcutsWindow) {
         let Some(capture) = &mut window.capture else { return };
+        if ctx.text_edit_focused() { return; }
         for input in ctx.input(|i| keymap::presses(&i.events)) {
-            if let Input::Press { chord, repeat: false, .. } = input
-                && capture.keys.len() < MAX_KEYS
-            {
-                capture.keys.push(chord);
+            if let Input::Press { chord, repeat: false, .. } = input {
+                if std::mem::take(&mut capture.replace_keys) {
+                    capture.keys.clear();
+                }
+                if capture.keys.len() < MAX_KEYS {
+                    capture.keys.push(chord);
+                }
             }
         }
         ctx.input_mut(|i| i.events.retain(|e| !matches!(e,
@@ -144,31 +194,72 @@ impl App {
 
     fn capture_strip(&mut self, ui: &mut egui::Ui, window: &mut ShortcutsWindow) {
         let layer = window.layer;
-        let Some(capture) = &window.capture else { return };
+        let active = self.panes[self.active].path().to_path_buf();
         let weak = self.pal.text_weak;
-        ui.label(RichText::new(format!("New shortcut for: {}", capture.target.label())).strong());
+        let red = hex("#ef7063");
+        let Some(capture) = &mut window.capture else { return };
+        match &mut capture.subject {
+            Subject::Command(command) => {
+                ui.label(RichText::new(format!("New shortcut for: {}", command.info().label)).strong());
+            }
+            Subject::Folder(form) => {
+                ui.label(RichText::new("Your command").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Folder");
+                    ui.add(TextEdit::singleline(&mut form.path).hint_text("/path/to/folder").desired_width(340.0));
+                    if ui.add_enabled(!is_computer(&active), Button::new("Use active panel")).clicked() {
+                        form.path = active.display().to_string();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Open in");
+                    ui.selectable_value(&mut form.new_tab, false, "This tab");
+                    ui.selectable_value(&mut form.new_tab, true, "New tab");
+                });
+            }
+        }
         if capture.keys.is_empty() {
-            ui.label(RichText::new("Press the keys in order, then click Save.").color(weak));
+            let prompt = if ui.ctx().text_edit_focused() {
+                "Click outside the field, then press the keys in order."
+            } else {
+                "Press the keys in order, then click Save."
+            };
+            ui.label(RichText::new(prompt).color(weak));
         } else {
             ui.label(RichText::new(keymap::keys_label(&capture.keys)).monospace().strong());
         }
-        let clash = keymap::conflict(&self.st.keymap, layer, &capture.keys, &capture.target).filter(|_| !capture.keys.is_empty());
-        if let Some(clash) = &clash {
-            ui.label(RichText::new(format!("Already used by: {}", clash.label())).color(hex("#ef7063")));
+        let target = capture.target();
+        // An entry being changed must not clash with its own old keys.
+        let mut others = self.st.keymap.clone();
+        if let Subject::Folder(FolderForm { original: Some(original), .. }) = &capture.subject {
+            others.remove_folder(layer, original);
         }
-        let mut save = false;
-        let mut cancel = false;
+        let clash = target.as_ref().filter(|_| !capture.keys.is_empty())
+            .and_then(|t| keymap::conflict(&others, layer, &capture.keys, t));
+        if let Some(clash) = &clash {
+            ui.label(RichText::new(format!("Already used by: {}", clash.label())).color(red));
+        }
+        if target.is_none() {
+            ui.label(RichText::new("Enter a full folder path, or start it with ~.").color(weak));
+        }
+        let (mut save, mut clear, mut cancel) = (false, false, false);
         ui.horizontal(|ui| {
             let text = if clash.is_some() { "Replace" } else { "Save" };
-            save = ui.add_enabled(!capture.keys.is_empty(), Button::new(text)).clicked();
+            save = ui.add_enabled(target.is_some() && !capture.keys.is_empty(), Button::new(text)).clicked();
+            clear = ui.add_enabled(!capture.keys.is_empty(), Button::new("Clear keys")).clicked();
             cancel = ui.button("Cancel").clicked();
         });
-        if save && let Some(capture) = window.capture.take() {
-            self.st.keymap.clear_conflicts(layer, &capture.keys, &capture.target);
-            self.st.keymap.assign(layer, &capture.target, capture.keys);
-            self.keymap_changed();
+        if clear {
+            capture.keys.clear();
+            capture.replace_keys = false;
         }
-        if cancel {
+        if save && let Some(target) = target {
+            others.clear_conflicts(layer, &capture.keys, &target);
+            others.assign(layer, &target, std::mem::take(&mut capture.keys));
+            self.st.keymap = others;
+            window.capture = None;
+            self.keymap_changed();
+        } else if cancel {
             window.capture = None;
         }
         ui.separator();
@@ -198,13 +289,19 @@ impl App {
                 self.st.keymap.set_keys(layer, info, &keys);
                 self.keymap_changed();
             }
-            Some(Change::Record(target)) => window.capture = Some(Capture { target, keys: Vec::new() }),
+            Some(Change::Record(command)) => window.capture = Some(Capture::command(command)),
+            Some(Change::NewFolder) => {
+                let current = self.panes[self.active].path();
+                let path = if is_computer(current) { String::new() } else { current.display().to_string() };
+                window.capture = Some(Capture::folder(path));
+            }
+            Some(Change::EditFolder(folder)) => window.capture = Some(Capture::edit(&folder)),
             Some(Change::ResetRow(info)) => {
                 self.st.keymap.layer_mut(layer).bindings.remove(info.id);
                 self.keymap_changed();
             }
-            Some(Change::RemoveFolder(path)) => {
-                self.st.keymap.layer_mut(layer).folders.retain(|f| f.path != path);
+            Some(Change::RemoveFolder(target)) => {
+                self.st.keymap.remove_folder(layer, &target);
                 self.keymap_changed();
             }
             Some(Change::ResetLayer) => {
@@ -247,7 +344,7 @@ impl App {
                             }
                         }
                         if ui.add(Button::new("+").small()).on_hover_text("Add a shortcut").clicked() {
-                            change = Some(Change::Record(Target::Command(info.command)));
+                            change = Some(Change::Record(info.command));
                         }
                         if self.st.keymap.layer(layer).bindings.contains_key(info.id)
                             && ui.add(Button::new("Reset").small()).on_hover_text("Back to the default shortcuts").clicked() {
@@ -266,7 +363,7 @@ impl App {
         let layer = window.layer;
         let mut change = None;
         ui.add_space(6.0);
-        ui.label(RichText::new("Your folders").strong().color(self.pal.accent));
+        ui.label(RichText::new("Your commands").strong().color(self.pal.accent));
         let folders = &self.st.keymap.layer(layer).folders;
         if !folders.is_empty() {
             egui::Grid::new("shortcut_folders").num_columns(2).min_col_width(230.0).spacing(vec2(16.0, 4.0)).show(ui, |ui| {
@@ -274,11 +371,12 @@ impl App {
                     ui.label(folder.path.display().to_string());
                     ui.horizontal(|ui| {
                         let label = keymap::parse_keys(&folder.keys).map_or(folder.keys.clone(), |k| keymap::keys_label(&k));
-                        if ui.add(Button::new(label).small()).on_hover_text("Record other keys").clicked() {
-                            change = Some(Change::Record(Target::Folder(folder.path.clone())));
+                        if ui.add(Button::new(label).small()).on_hover_text("Change this command").clicked() {
+                            change = Some(Change::EditFolder(folder.clone()));
                         }
-                        if ui.add(Button::new("×").small()).on_hover_text("Remove this folder").clicked() {
-                            change = Some(Change::RemoveFolder(folder.path.clone()));
+                        ui.label(RichText::new(if folder.new_tab { "new tab" } else { "this tab" }).color(self.pal.text_weak).size(11.0));
+                        if ui.add(Button::new("×").small()).on_hover_text("Remove this command").clicked() {
+                            change = Some(Change::RemoveFolder(folder.target()));
                         }
                     });
                     ui.end_row();
@@ -287,10 +385,8 @@ impl App {
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let current = self.panes[self.active].path().to_path_buf();
-            let add = Button::new("+ Folder").small();
-            if ui.add_enabled(!is_computer(&current), add).on_hover_text("Give the active panel's folder a shortcut").clicked() {
-                change = Some(Change::Record(Target::Folder(current)));
+            if ui.add(Button::new("+ Command").small()).on_hover_text("Open a folder of your choice with your own keys").clicked() {
+                change = Some(Change::NewFolder);
             }
             let text = if window.confirm_reset { "Really reset this layer?" } else { "Reset all" };
             if ui.add(Button::new(text).small()).clicked() {

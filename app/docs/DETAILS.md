@@ -115,8 +115,8 @@ and follows `omarchy theme set` within a second, without a restart.
 
 Every shortcut can be changed in Settings → **Customize shortcuts…**. Pick a layer, click **+** beside a
 command, press the keys in order and click **Save**. Enter and Esc can be recorded too. If the keys are taken
-or start another shortcut, the window names the owner and offers **Replace**. **+ Folder** gives the active
-panel's folder a shortcut of its own, such as `g p`.
+or start another shortcut, the window names the owner and offers **Replace**. **+ Command** makes a command of
+your own: choose a folder, whether it opens in this tab or a new one, and its keys, such as `g o`.
 
 A shortcut can be a sequence of up to four keys. After the first one the app waits, without a time limit, and
 the status bar shows what has been typed. A key outside the sequence abandons it and does nothing else.
@@ -148,7 +148,7 @@ takes one text, with shortcuts separated by commas, and an empty text removes it
 ```lua
 keymap = {
   standard = { bindings = { new_tab = "ctrl+y, g t", refresh = "" }, folders = {} },
-  neovim = { bindings = {}, folders = { { keys = "g p", path = "/home/me/Projects" } } },
+  neovim = { bindings = {}, folders = { { keys = "g p", path = "/home/me/Projects", new_tab = true } } },
 },
 ```
 

@@ -474,7 +474,7 @@ mod tests {
         let mut changed = Settings::default();
         changed.vim_keys = true;
         changed.keymap.standard.bindings.insert("new_tab".into(), String::new());
-        changed.keymap.neovim.folders.push(crate::keymap::FolderKey { keys: "g p".into(), path: "/projects".into() });
+        changed.keymap.neovim.folders.push(crate::keymap::FolderKey { keys: "g p".into(), path: "/projects".into(), new_tab: true });
         let text = crate::lua_config::encode(&serde_json::to_value(&changed).unwrap());
         let back = Settings::from_lua(&text).unwrap();
         assert!(back.vim_keys);

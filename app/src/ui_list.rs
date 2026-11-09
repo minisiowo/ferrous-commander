@@ -113,7 +113,7 @@ fn visible_cols(width: f32) -> Vec<(Col, &'static str, f32, bool)> {
 
 /// What a typed path means. Without a trailing separator, because folder settings are
 /// stored under the path's text.
-fn typed_path(text: &str) -> PathBuf {
+pub(crate) fn typed_path(text: &str) -> PathBuf {
     let raw = text.trim().trim_matches('"');
     let path = match raw.strip_prefix('~') {
         Some(rest) => dirs::home_dir()

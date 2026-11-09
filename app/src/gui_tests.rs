@@ -2045,9 +2045,9 @@ fn screen() -> Rect {
     Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))
 }
 
-fn recording(app: &mut App, layer: crate::keymap::Layer, target: crate::keymap::Target) {
+fn recording(app: &mut App, layer: crate::keymap::Layer, capture: crate::ui_keys::Capture) {
     let mut window = crate::ui_keys::ShortcutsWindow::new(layer);
-    window.capture = Some(crate::ui_keys::Capture { target, keys: Vec::new() });
+    window.capture = Some(capture);
     app.shortcuts = Some(window);
 }
 
@@ -2063,10 +2063,11 @@ fn click_button(ctx: &egui::Context, app: &mut App, text: &str) {
 
 #[test]
 fn a_recorded_shortcut_replaces_its_old_owner_and_works() {
-    use crate::keymap::{Command, Layer, Target, parse_keys};
+    use crate::keymap::{Command, Layer, parse_keys};
+    use crate::ui_keys::Capture;
     let (ctx, mut app, root) = neovim_app("record");
     app.st.vim_keys = false;
-    recording(&mut app, Layer::Standard, Target::Command(Command::Refresh));
+    recording(&mut app, Layer::Standard, Capture::command(Command::Refresh));
     for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
 
     key(&ctx, &mut app, Key::T, Modifiers::COMMAND);
@@ -2088,9 +2089,10 @@ fn a_recorded_shortcut_replaces_its_old_owner_and_works() {
 
 #[test]
 fn cancelling_a_recording_changes_nothing() {
-    use crate::keymap::{Command, Layer, Target};
+    use crate::keymap::{Command, Layer};
+    use crate::ui_keys::Capture;
     let (ctx, mut app, root) = neovim_app("cancel");
-    recording(&mut app, Layer::Neovim, Target::Command(Command::Refresh));
+    recording(&mut app, Layer::Neovim, Capture::command(Command::Refresh));
     for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
     word(&ctx, &mut app, "q");
     assert_eq!(recorded(&app).len(), 1);
@@ -2103,10 +2105,11 @@ fn cancelling_a_recording_changes_nothing() {
 
 #[test]
 fn a_folder_of_your_own_opens_from_a_recorded_sequence() {
-    use crate::keymap::{Layer, Target, parse_keys};
+    use crate::keymap::{Layer, parse_keys};
+    use crate::ui_keys::Capture;
     let (ctx, mut app, root) = neovim_app("folder");
     let wanted = root.join("dir07");
-    recording(&mut app, Layer::Neovim, Target::Folder(wanted.clone()));
+    recording(&mut app, Layer::Neovim, Capture::folder(wanted.display().to_string()));
     for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
     word(&ctx, &mut app, "gp");
     assert_eq!(recorded(&app), parse_keys("g p").unwrap());
@@ -2121,9 +2124,10 @@ fn a_folder_of_your_own_opens_from_a_recorded_sequence() {
 
 #[test]
 fn enter_and_punctuation_can_be_recorded() {
-    use crate::keymap::{Command, Layer, Target, parse_keys};
+    use crate::keymap::{Command, Layer, parse_keys};
+    use crate::ui_keys::Capture;
     let (ctx, mut app, root) = neovim_app("special");
-    recording(&mut app, Layer::Neovim, Target::Command(Command::Refresh));
+    recording(&mut app, Layer::Neovim, Capture::command(Command::Refresh));
     for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
     key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
     type_key(&ctx, &mut app, Key::Slash, Modifiers::NONE, Some("/"));
@@ -2159,5 +2163,71 @@ fn which_key_appears_after_a_pause_and_goes_away() {
     word(&ctx, &mut app, "g");
     for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
     assert!(!paints_text(&ctx, &mut app, "Home folder"), "the setting turns it off");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn your_own_command_picks_a_folder_and_where_it_opens() {
+    use crate::keymap::{Layer, parse_keys};
+    use crate::ui_keys::{Capture, Subject};
+    let (ctx, mut app, root) = neovim_app("command");
+    let wanted = root.join("dir03");
+    recording(&mut app, Layer::Neovim, Capture::folder(String::new()));
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+
+    // Typing in the folder field is not recording.
+    let field = painted_at(&ctx, &mut app, "/path/to/folder", screen());
+    click(&ctx, &mut app, field, Modifiers::NONE);
+    frame(&ctx, &mut app, vec![Event::Text(wanted.display().to_string())], Modifiers::NONE);
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    let form = |app: &App| match &app.shortcuts.as_ref().unwrap().capture.as_ref().unwrap().subject {
+        Subject::Folder(f) => (f.path.clone(), f.new_tab),
+        _ => panic!("not a folder form"),
+    };
+    assert_eq!(form(&app).0, wanted.display().to_string());
+    assert!(recorded(&app).is_empty());
+
+    // Away from the field the keys are recorded again.
+    click_button(&ctx, &mut app, "New tab");
+    assert!(form(&app).1);
+    word(&ctx, &mut app, "go");
+    assert_eq!(recorded(&app), parse_keys("g o").unwrap());
+    click_button(&ctx, &mut app, "Save");
+    app.shortcuts = None;
+
+    let tabs = app.panes[0].tabs.len();
+    word(&ctx, &mut app, "go");
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.panes[0].tabs.len(), tabs + 1, "it opened a new tab");
+    assert_eq!(app.panes[0].path(), wanted.as_path());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_command_can_be_changed_without_clashing_with_itself() {
+    use crate::keymap::{FolderKey, Layer, Target, parse_keys};
+    let (ctx, mut app, root) = neovim_app("change");
+    let (first, second) = (root.join("dir01"), root.join("dir02"));
+    app.st.keymap.neovim.folders.push(FolderKey { keys: "g o".into(), path: first.clone(), new_tab: false });
+    let mut window = crate::ui_keys::ShortcutsWindow::new(Layer::Neovim);
+    window.search = "no such command".into(); // Keeps the list short enough to show the row.
+    app.shortcuts = Some(window);
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    let chip = painted_at(&ctx, &mut app, "g o", screen());
+    click(&ctx, &mut app, chip, Modifiers::NONE);
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    assert_eq!(recorded(&app), parse_keys("g o").unwrap(), "the old keys are shown");
+    if let Some(crate::ui_keys::Subject::Folder(form)) = app.shortcuts.as_mut().unwrap().capture.as_mut().map(|c| &mut c.subject) {
+        form.path = second.display().to_string();
+    }
+    click_button(&ctx, &mut app, "Save");
+    let folders = &app.st.keymap.neovim.folders;
+    assert_eq!(folders.len(), 1, "the entry is changed, not added to");
+    assert_eq!(folders[0].target(), Target::Folder { path: second.clone(), new_tab: false });
+    app.keys = crate::keymap::Keymap::new(&app.st.keymap);
+    app.shortcuts = None;
+    word(&ctx, &mut app, "go");
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.panes[0].path(), second.as_path());
     std::fs::remove_dir_all(root).unwrap();
 }
