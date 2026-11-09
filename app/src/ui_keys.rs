@@ -24,6 +24,7 @@ pub struct FolderForm {
 pub enum Subject {
     Command(Command),
     Folder(FolderForm),
+    Leader,
 }
 
 /// A shortcut being recorded: every key pressed outside a text field goes here until
@@ -45,9 +46,12 @@ impl Capture {
         Capture { subject: Subject::Folder(form), keys: Vec::new(), replace_keys: false }
     }
 
-    fn edit(folder: &FolderKey) -> Capture {
+    pub fn leader() -> Capture {
+        Capture { subject: Subject::Leader, keys: Vec::new(), replace_keys: false }
+    }
+
+    fn edit(folder: &FolderKey, keys: Vec<Chord>) -> Capture {
         let form = FolderForm { path: folder.path.display().to_string(), new_tab: folder.new_tab, original: Some(folder.target()) };
-        let keys = keymap::parse_keys(&folder.keys).unwrap_or_default();
         Capture { subject: Subject::Folder(form), keys, replace_keys: true }
     }
 
@@ -55,6 +59,7 @@ impl Capture {
     fn target(&self) -> Option<Target> {
         match &self.subject {
             Subject::Command(command) => Some(Target::Command(*command)),
+            Subject::Leader => None,
             Subject::Folder(form) => {
                 let path = crate::ui_list::typed_path(&form.path);
                 path.is_absolute().then_some(Target::Folder { path, new_tab: form.new_tab })
@@ -113,7 +118,8 @@ impl App {
         if ctx.text_edit_focused() { return; }
         for input in ctx.input(|i| keymap::presses(&i.events)) {
             if let Input::Press { chord, repeat: false, .. } = input {
-                if std::mem::take(&mut capture.replace_keys) {
+                // The leader is one key, so a new press takes the place of the last.
+                if std::mem::take(&mut capture.replace_keys) || matches!(capture.subject, Subject::Leader) {
                     capture.keys.clear();
                 }
                 if capture.keys.len() < MAX_KEYS {
@@ -202,6 +208,7 @@ impl App {
         let red = hex("#ef7063");
         let Some(capture) = &mut window.capture else { return };
         match &mut capture.subject {
+            Subject::Leader => return self.leader_strip(ui, window),
             Subject::Command(command) => {
                 ui.label(RichText::new(format!("New shortcut for: {}", command.info().label)).strong());
             }
@@ -268,6 +275,34 @@ impl App {
         ui.separator();
     }
 
+    fn leader_strip(&mut self, ui: &mut egui::Ui, window: &mut ShortcutsWindow) {
+        let Some(capture) = &mut window.capture else { return };
+        let chord = capture.keys.first().copied();
+        ui.label(RichText::new("New leader key").strong());
+        match chord {
+            Some(chord) => { ui.label(RichText::new(chord.label()).monospace().strong()); }
+            None => { ui.label(RichText::new("Press one key, then click Save. Every shortcut built on the leader moves with it.").color(self.pal.text_weak)); }
+        }
+        let clash = chord.and_then(|c| self.st.keymap.leader_clash(c));
+        if let Some(clash) = &clash {
+            ui.label(RichText::new(format!("Already used by: {}", clash.label())).color(hex("#ef7063")));
+        }
+        let (mut save, mut cancel) = (false, false);
+        ui.horizontal(|ui| {
+            let text = if clash.is_some() { "Replace" } else { "Save" };
+            save = ui.add_enabled(chord.is_some(), Button::new(text)).clicked();
+            cancel = ui.button("Cancel").clicked();
+        });
+        if save && let Some(chord) = chord {
+            self.st.keymap.set_leader(chord);
+            window.capture = None;
+            self.keymap_changed();
+        } else if cancel {
+            window.capture = None;
+        }
+        ui.separator();
+    }
+
     fn shortcuts_header(&mut self, ui: &mut egui::Ui, window: &mut ShortcutsWindow) {
         ui.spacing_mut().item_spacing.y = 6.0;
         self.capture_strip(ui, window);
@@ -279,6 +314,13 @@ impl App {
             });
             if window.layer == Layer::Neovim {
                 ui.label(RichText::new("These take priority over the standard shortcuts while Neovim-style keys are on.").color(self.pal.text_weak).size(11.0));
+                ui.horizontal(|ui| {
+                    ui.label("Leader key");
+                    let label = self.st.keymap.leader().map_or("None".to_string(), |c| c.label());
+                    if ui.add(Button::new(label).small()).on_hover_text("Change the key that starts the leader shortcuts").clicked() {
+                        window.capture = Some(Capture::leader());
+                    }
+                });
             }
         });
     }
@@ -303,7 +345,10 @@ impl App {
                 let path = if is_computer(current) { String::new() } else { current.display().to_string() };
                 window.capture = Some(Capture::folder(path));
             }
-            Some(Change::EditFolder(folder)) => window.capture = Some(Capture::edit(&folder)),
+            Some(Change::EditFolder(folder)) => {
+                let keys = self.st.keymap.parse(layer, &folder.keys).unwrap_or_default();
+                window.capture = Some(Capture::edit(&folder, keys));
+            }
             Some(Change::ResetRow(info)) => {
                 self.st.keymap.layer_mut(layer).bindings.remove(info.id);
                 self.keymap_changed();
@@ -313,7 +358,7 @@ impl App {
                 self.keymap_changed();
             }
             Some(Change::ResetLayer) => {
-                *self.st.keymap.layer_mut(layer) = Default::default();
+                self.st.keymap.reset_layer(layer);
                 self.keymap_changed();
             }
             None => {}
@@ -376,7 +421,7 @@ impl App {
     fn command_rows(&self, ui: &mut egui::Ui, window: &ShortcutsWindow) -> Option<Change> {
         let weak = self.pal.text_weak;
         let query = window.search.to_lowercase();
-        let keys_of = |folder: &FolderKey| keymap::parse_keys(&folder.keys).map_or(folder.keys.clone(), |k| keymap::keys_label(&k));
+        let keys_of = |folder: &FolderKey| self.st.keymap.parse(window.layer, &folder.keys).map_or(folder.keys.clone(), |k| keymap::keys_label(&k));
         let all = &self.st.keymap.layer(window.layer).folders;
         let shown: Vec<&FolderKey> = all.iter().filter(|f| query.is_empty()
             || f.path.display().to_string().to_lowercase().contains(&query)

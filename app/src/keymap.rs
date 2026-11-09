@@ -10,6 +10,19 @@ use serde::{Deserialize, Serialize};
 /// The longest key sequence a shortcut can have.
 pub const MAX_KEYS: usize = 4;
 
+/// Stands for the leader key in the settings and in the Neovim defaults, so that
+/// every shortcut built on it follows when the leader changes.
+const LEADER: &str = "leader";
+const DEFAULT_LEADER: &str = "ctrl+b";
+
+/// The names shown for the groups of shortcuts under the leader.
+const LEADER_GROUPS: [(Key, &str); 4] = [
+    (Key::B, "+Tabs"),
+    (Key::F, "+Files"),
+    (Key::U, "+View"),
+    (Key::W, "+Panels"),
+];
+
 /// One press: a key and the modifiers held with it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Chord {
@@ -100,10 +113,16 @@ impl Chord {
     }
 }
 
+fn parse_with(text: &str, leader: Option<Chord>) -> Option<Vec<Chord>> {
+    let keys: Vec<Chord> = text.split_whitespace()
+        .map(|part| if part.eq_ignore_ascii_case(LEADER) { leader } else { Chord::parse(part) })
+        .collect::<Option<_>>()?;
+    (!keys.is_empty() && keys.len() <= MAX_KEYS).then_some(keys)
+}
+
 /// `g h` or `ctrl+shift+n`; `None` when any part is not a known key.
 pub fn parse_keys(text: &str) -> Option<Vec<Chord>> {
-    let keys: Vec<Chord> = text.split_whitespace().map(Chord::parse).collect::<Option<_>>()?;
-    (!keys.is_empty() && keys.len() <= MAX_KEYS).then_some(keys)
+    parse_with(text, None)
 }
 
 pub fn stored_keys(keys: &[Chord]) -> String {
@@ -174,8 +193,8 @@ pub const COMMANDS: &[Info] = &[
     c(K::Forward, "forward", "Forward", Folders, &["alt+right"], &[], true),
     c(K::GoHome, "go_home", "Home folder", Folders, &[], &["g h"], false),
     c(K::EditPath, "edit_path", "Edit path", Folders, &["\\", "alt+d"], &[], false),
-    c(K::EditPathSelected, "edit_path_selected", "Edit path, all of it selected", Folders, &["ctrl+l"], &[], false),
-    c(K::Search, "search", "Search", Folders, &["ctrl+f"], &[], false),
+    c(K::EditPathSelected, "edit_path_selected", "Edit path, all of it selected", Folders, &["ctrl+l"], &["leader f p"], false),
+    c(K::Search, "search", "Search", Folders, &["ctrl+f"], &["leader f f"], false),
     c(K::Filter, "filter", "Filter this folder", Folders, &[], &["/"], false),
 
     c(K::SelectAll, "select_all", "Select all", Files, &["ctrl+a"], &[], false),
@@ -185,37 +204,37 @@ pub const COMMANDS: &[Info] = &[
     c(K::Paste, "paste", "Paste", Files, &["ctrl+v"], &["p"], false),
     c(K::VisualCopy, "visual_copy", "Copy selected rows", Files, &[], &["y"], false),
     c(K::VisualCut, "visual_cut", "Cut selected rows", Files, &[], &["d"], false),
-    c(K::CopyPath, "copy_path", "Copy path", Files, &["ctrl+shift+c"], &[], false),
-    c(K::Rename, "rename", "Rename", Files, &["f2"], &[], false),
-    c(K::Duplicate, "duplicate", "Duplicate", Files, &["ctrl+d"], &[], false),
+    c(K::CopyPath, "copy_path", "Copy path", Files, &["ctrl+shift+c"], &["leader f y"], false),
+    c(K::Rename, "rename", "Rename", Files, &["f2"], &["leader f r"], false),
+    c(K::Duplicate, "duplicate", "Duplicate", Files, &["ctrl+d"], &["leader f c"], false),
     c(K::Delete, "delete", "Delete", Files, &["delete"], &[], false),
     c(K::DeleteForever, "delete_forever", "Delete for good", Files, &["shift+delete"], &[], false),
-    c(K::NewFile, "new_file", "New file", Files, &["ctrl+n"], &[], false),
-    c(K::NewFolder, "new_folder", "New folder", Files, &["ctrl+shift+n"], &[], false),
+    c(K::NewFile, "new_file", "New file", Files, &["ctrl+n"], &["leader f n"], false),
+    c(K::NewFolder, "new_folder", "New folder", Files, &["ctrl+shift+n"], &["leader f d"], false),
     c(K::Refresh, "refresh", "Refresh", Files, &["f5"], &[], false),
-    c(K::Terminal, "terminal", "Open in command shell", Files, &["f10"], &[], false),
+    c(K::Terminal, "terminal", "Open in command shell", Files, &["f10"], &["leader f t"], false),
     c(K::Properties, "properties", "Properties", Files, PROPERTIES, &[], false),
 
-    c(K::NewTab, "new_tab", "New tab", Tabs, &["ctrl+t"], &[], false),
-    c(K::CloseTab, "close_tab", "Close tab", Tabs, &["ctrl+w"], &["ctrl+w q", "ctrl+w c"], false),
-    c(K::ReopenTab, "reopen_tab", "Reopen closed tab", Tabs, &["ctrl+shift+t"], &[], false),
+    c(K::NewTab, "new_tab", "New tab", Tabs, &["ctrl+t"], &["leader b n"], false),
+    c(K::CloseTab, "close_tab", "Close tab", Tabs, &["ctrl+w"], &["leader b d", "ctrl+w q", "ctrl+w c"], false),
+    c(K::ReopenTab, "reopen_tab", "Reopen closed tab", Tabs, &["ctrl+shift+t"], &["leader b u"], false),
     c(K::NextTab, "next_tab", "Next tab", Tabs, &["ctrl+tab"], &["shift+l"], true),
     c(K::PrevTab, "prev_tab", "Previous tab", Tabs, &["ctrl+shift+tab"], &["shift+h"], true),
 
-    c(K::NewPanel, "new_panel", "New panel", Panels, &["ctrl+shift+enter"], &[], false),
-    c(K::ClosePanel, "close_panel", "Close panel", Panels, &["ctrl+shift+q"], &[], false),
-    c(K::ToggleSplit, "toggle_split", "Flip split", Panels, &["ctrl+shift+j"], &[], false),
-    c(K::FocusLeft, "focus_left", "Panel to the left", Panels, &["ctrl+alt+left"], &["ctrl+w h"], true),
-    c(K::FocusRight, "focus_right", "Panel to the right", Panels, &["ctrl+alt+right"], &["ctrl+w l"], true),
-    c(K::FocusUp, "focus_up", "Panel above", Panels, &["ctrl+alt+up"], &["ctrl+w k"], true),
-    c(K::FocusDown, "focus_down", "Panel below", Panels, &["ctrl+alt+down"], &["ctrl+w j"], true),
-    c(K::NextPanel, "next_panel", "Next panel", Panels, &["tab"], &["ctrl+w w"], true),
+    c(K::NewPanel, "new_panel", "New panel", Panels, &["ctrl+shift+enter"], &["leader w n"], false),
+    c(K::ClosePanel, "close_panel", "Close panel", Panels, &["ctrl+shift+q"], &["leader w d"], false),
+    c(K::ToggleSplit, "toggle_split", "Flip split", Panels, &["ctrl+shift+j"], &["leader w s"], false),
+    c(K::FocusLeft, "focus_left", "Panel to the left", Panels, &["ctrl+alt+left"], &["leader w h", "ctrl+w h"], true),
+    c(K::FocusRight, "focus_right", "Panel to the right", Panels, &["ctrl+alt+right"], &["leader w l", "ctrl+w l"], true),
+    c(K::FocusUp, "focus_up", "Panel above", Panels, &["ctrl+alt+up"], &["leader w k", "ctrl+w k"], true),
+    c(K::FocusDown, "focus_down", "Panel below", Panels, &["ctrl+alt+down"], &["leader w j", "ctrl+w j"], true),
+    c(K::NextPanel, "next_panel", "Next panel", Panels, &["tab"], &["leader w w", "ctrl+w w"], true),
     c(K::PrevPanel, "prev_panel", "Previous panel", Panels, &["shift+tab"], &[], true),
 
     c(K::Escape, "escape", "Clear filter, then selection", View, &["escape"], &[], false),
-    c(K::ToggleHidden, "toggle_hidden", "Hidden files", View, &["ctrl+h"], &[], false),
-    c(K::ToggleColumns, "toggle_columns", "Folder columns", View, &["`"], &[], false),
-    c(K::TogglePreview, "toggle_preview", "Preview", View, &["space"], &[], false),
+    c(K::ToggleHidden, "toggle_hidden", "Hidden files", View, &["ctrl+h"], &["leader u h"], false),
+    c(K::ToggleColumns, "toggle_columns", "Folder columns", View, &["`"], &["leader u c"], false),
+    c(K::TogglePreview, "toggle_preview", "Preview", View, &["space"], &["leader u p"], false),
 ];
 
 impl Command {
@@ -293,11 +312,19 @@ pub struct LayerSettings {
     pub folders: Vec<FolderKey>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeymapSettings {
+    /// The key that `leader` stands for in the Neovim layer. Empty means none.
+    pub leader: String,
     pub standard: LayerSettings,
     pub neovim: LayerSettings,
+}
+
+impl Default for KeymapSettings {
+    fn default() -> KeymapSettings {
+        KeymapSettings { leader: DEFAULT_LEADER.to_string(), standard: Default::default(), neovim: Default::default() }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -318,18 +345,73 @@ impl KeymapSettings {
         match layer { Layer::Standard => &mut self.standard, Layer::Neovim => &mut self.neovim }
     }
 
+    pub fn leader(&self) -> Option<Chord> {
+        Chord::parse(self.leader.trim())
+    }
+
+    fn leader_in(&self, layer: Layer) -> Option<Chord> {
+        self.leader().filter(|_| layer == Layer::Neovim)
+    }
+
+    /// Reads keys from the settings, where `leader` can stand for the leader key.
+    pub fn parse(&self, layer: Layer, text: &str) -> Option<Vec<Chord>> {
+        parse_with(text, self.leader_in(layer))
+    }
+
+    /// Keys in the settings' form: a sequence that starts with the leader says so.
+    fn stored(&self, layer: Layer, keys: &[Chord]) -> String {
+        match keys.split_first() {
+            Some((first, rest)) if !rest.is_empty() && Some(*first) == self.leader_in(layer) => {
+                format!("{LEADER} {}", stored_keys(rest))
+            }
+            _ => stored_keys(keys),
+        }
+    }
+
+    /// The shortcut in the Neovim layer that a new leader would take the key from.
+    pub fn leader_clash(&self, chord: Chord) -> Option<Target> {
+        let without_leader = KeymapSettings { leader: String::new(), ..self.clone() };
+        layer_bindings(&without_leader, Layer::Neovim).into_iter().find(|b| b.keys[0] == chord).map(|b| b.target)
+    }
+
+    /// Moves everything built on the leader to `chord`, and removes the shortcuts in its way.
+    pub fn set_leader(&mut self, chord: Chord) {
+        let in_the_way = |text: &str| parse_keys(text).is_some_and(|k| k[0] == chord);
+        for info in COMMANDS {
+            let stored = self.neovim.bindings.get(info.id).cloned();
+            let texts: Vec<String> = match &stored {
+                Some(text) => text.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+                None => info.neovim.iter().map(|t| t.to_string()).collect(),
+            };
+            let kept: Vec<String> = texts.iter().filter(|t| !in_the_way(t)).cloned().collect();
+            if kept.len() != texts.len() {
+                self.neovim.bindings.insert(info.id.to_string(), kept.join(", "));
+            }
+        }
+        self.neovim.folders.retain(|f| !in_the_way(&f.keys));
+        self.leader = chord.stored();
+    }
+
+    /// Everything in the layer back to its defaults.
+    pub fn reset_layer(&mut self, layer: Layer) {
+        *self.layer_mut(layer) = Default::default();
+        if layer == Layer::Neovim {
+            self.leader = DEFAULT_LEADER.to_string();
+        }
+    }
+
     /// The shortcuts a command has in a layer, valid ones only.
     pub fn keys_of(&self, layer: Layer, info: &Info) -> Vec<Vec<Chord>> {
         match self.layer(layer).bindings.get(info.id) {
-            Some(text) => text.split(',').filter_map(parse_keys).collect(),
-            None => info.defaults(layer).iter().filter_map(|t| parse_keys(t)).collect(),
+            Some(text) => text.split(',').filter_map(|t| self.parse(layer, t)).collect(),
+            None => info.defaults(layer).iter().filter_map(|t| self.parse(layer, t)).collect(),
         }
     }
 
     /// Stores a command's shortcuts, or drops the entry when they equal the defaults.
     pub fn set_keys(&mut self, layer: Layer, info: &Info, keys: &[Vec<Chord>]) {
-        let text = keys.iter().map(|k| stored_keys(k)).collect::<Vec<_>>().join(", ");
-        let defaults: Vec<String> = info.defaults(layer).iter().filter_map(|t| parse_keys(t)).map(|k| stored_keys(&k)).collect();
+        let text = keys.iter().map(|k| self.stored(layer, k)).collect::<Vec<_>>().join(", ");
+        let defaults: Vec<String> = info.defaults(layer).iter().filter_map(|t| self.parse(layer, t)).map(|k| self.stored(layer, &k)).collect();
         let bindings = &mut self.layer_mut(layer).bindings;
         if text == defaults.join(", ") {
             bindings.remove(info.id);
@@ -352,8 +434,9 @@ impl KeymapSettings {
             }
         }
         if !visual {
+            let leader = self.leader_in(layer);
             self.layer_mut(layer).folders.retain(|f| {
-                f.target() == *own || parse_keys(&f.keys).is_none_or(|k| !clashes(&k, keys))
+                f.target() == *own || parse_with(&f.keys, leader).is_none_or(|k| !clashes(&k, keys))
             });
         }
     }
@@ -374,7 +457,7 @@ impl KeymapSettings {
                 self.set_keys(layer, info, &all);
             }
             Target::Folder { path, new_tab } => {
-                let stored = stored_keys(&keys);
+                let stored = self.stored(layer, &keys);
                 let folders = &mut self.layer_mut(layer).folders;
                 match folders.iter_mut().find(|f| f.target() == *target) {
                     Some(folder) => folder.keys = stored,
@@ -395,6 +478,7 @@ pub struct Keymap {
     standard: Vec<Binding>,
     neovim: Vec<Binding>,
     visual: Vec<Binding>,
+    leader: Option<Chord>,
 }
 
 /// Two shortcuts in the same place clash when one is the start of the other.
@@ -411,7 +495,7 @@ fn layer_bindings(settings: &KeymapSettings, layer: Layer) -> Vec<Binding> {
         }
     }
     for folder in &settings.layer(layer).folders {
-        if let Some(keys) = parse_keys(&folder.keys) {
+        if let Some(keys) = settings.parse(layer, &folder.keys) {
             out.push(Binding { keys, target: folder.target() });
         }
     }
@@ -426,7 +510,7 @@ impl Keymap {
     pub fn new(settings: &KeymapSettings) -> Keymap {
         let (visual, neovim) = layer_bindings(settings, Layer::Neovim).into_iter().partition(is_visual_only);
         let standard = layer_bindings(settings, Layer::Standard).into_iter().filter(|b| !is_visual_only(b)).collect();
-        Keymap { standard, neovim, visual }
+        Keymap { standard, neovim, visual, leader: settings.leader() }
     }
 
     fn layers(&self, mode: Mode) -> Vec<&[Binding]> {
@@ -448,6 +532,11 @@ impl Keymap {
         })
     }
 
+    fn group_name(&self, mode: Mode, prefix: &[Chord], key: Chord) -> Option<&'static str> {
+        if mode == Mode::Standard || prefix != self.leader.as_slice() { return None; }
+        LEADER_GROUPS.iter().find(|(k, _)| Chord::plain(*k) == key).map(|(_, name)| *name)
+    }
+
     /// The keys that can follow `prefix`, from the layer that owns it, in key order.
     pub fn hints(&self, mode: Mode, prefix: &[Chord]) -> Vec<Hint> {
         for layer in self.layers(mode) {
@@ -460,7 +549,7 @@ impl Keymap {
                 let same: Vec<&&Binding> = next.iter().filter(|b| b.keys[prefix.len()] == key).collect();
                 let label = match same.as_slice() {
                     [only] if only.keys.len() == prefix.len() + 1 => only.target.short_label(),
-                    many => format!("+{} more", many.len()),
+                    many => self.group_name(mode, prefix, key).map_or_else(|| format!("+{} more", many.len()), str::to_string),
                 };
                 hints.push(Hint { key, label });
             }
@@ -696,8 +785,10 @@ mod tests {
         let mut ids = std::collections::HashSet::new();
         for info in COMMANDS {
             assert!(ids.insert(info.id), "duplicate id {}", info.id);
-            for text in info.standard.iter().chain(info.neovim) {
-                assert!(parse_keys(text).is_some(), "{} has bad keys {text}", info.id);
+            for (layer, texts) in [(Layer::Standard, info.standard), (Layer::Neovim, info.neovim)] {
+                for text in texts {
+                    assert!(KeymapSettings::default().parse(layer, text).is_some(), "{} has bad keys {text}", info.id);
+                }
             }
         }
     }
@@ -921,9 +1012,67 @@ mod tests {
     fn labels_skip_shortcuts_another_layer_covers() {
         let map = Keymap::default_for_tests();
         assert_eq!(map.label(Mode::Standard, Command::Duplicate).as_deref(), Some("Ctrl+D"));
-        assert_eq!(map.label(Mode::Normal, Command::Duplicate), None, "Ctrl+D scrolls here");
-        assert_eq!(map.label(Mode::Normal, Command::Rename).as_deref(), Some("F2"));
-        assert_eq!(map.label(Mode::Normal, Command::CloseTab).as_deref(), Some("Ctrl+W q"));
+        assert_eq!(map.label(Mode::Normal, Command::Duplicate).as_deref(), Some("Ctrl+B f c"));
+        let mut settings = KeymapSettings::default();
+        settings.set_keys(Layer::Neovim, Command::Duplicate.info(), &[]);
+        assert_eq!(Keymap::new(&settings).label(Mode::Normal, Command::Duplicate), None, "Ctrl+D scrolls here");
+        assert_eq!(map.label(Mode::Normal, Command::Refresh).as_deref(), Some("F5"));
+        assert_eq!(map.label(Mode::Normal, Command::CloseTab).as_deref(), Some("Ctrl+B b d"));
+    }
+
+    #[test]
+    fn the_leader_starts_named_groups_and_does_not_need_ctrl_held() {
+        let map = Keymap::default_for_tests();
+        assert_eq!(last(&map, Mode::Normal, "ctrl+b b d"), run(Command::CloseTab));
+        assert_eq!(last(&map, Mode::Normal, "ctrl+b ctrl+b ctrl+d"), run(Command::CloseTab), "with Ctrl still held");
+        assert_eq!(last(&map, Mode::Normal, "ctrl+b z"), Outcome::Cancelled);
+        assert_eq!(last(&map, Mode::Standard, "ctrl+b"), Outcome::Unbound, "only in the Neovim layer");
+        assert_eq!(hints(&map, Mode::Normal, "ctrl+b"), [
+            ("b".to_string(), "+Tabs".to_string()), ("f".to_string(), "+Files".to_string()),
+            ("u".to_string(), "+View".to_string()), ("w".to_string(), "+Panels".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn changing_the_leader_moves_every_shortcut_built_on_it() {
+        let mut settings = KeymapSettings::default();
+        let refresh = Target::Command(Command::Refresh);
+        settings.assign(Layer::Neovim, &refresh, keys("ctrl+b r"));
+        assert_eq!(settings.neovim.bindings["refresh"], "leader r");
+        let folder = Target::Folder { path: PathBuf::from("/projects"), new_tab: false };
+        settings.assign(Layer::Neovim, &folder, keys("ctrl+b o"));
+        assert_eq!(settings.neovim.folders[0].keys, "leader o");
+
+        settings.set_leader(keys("space")[0]);
+        let map = Keymap::new(&settings);
+        assert_eq!(last(&map, Mode::Normal, "space b d"), run(Command::CloseTab));
+        assert_eq!(last(&map, Mode::Normal, "space r"), run(Command::Refresh));
+        assert!(matches!(last(&map, Mode::Normal, "space o"), Outcome::Run { target: Target::Folder { .. }, .. }));
+        assert_eq!(last(&map, Mode::Normal, "ctrl+b"), Outcome::Unbound, "the old key is free again");
+        assert!(settings.neovim.bindings.get("close_tab").is_none(), "defaults stay unstored");
+    }
+
+    #[test]
+    fn a_new_leader_replaces_only_the_shortcuts_in_its_way() {
+        let mut settings = KeymapSettings::default();
+        assert_eq!(settings.leader_clash(keys("space")[0]), None, "Space belongs to the standard layer");
+        assert_eq!(settings.leader_clash(keys("ctrl+b")[0]), None, "its own sequences are no clash");
+        let g = keys("g")[0];
+        assert_eq!(settings.leader_clash(g), Some(Target::Command(Command::First)));
+        settings.set_leader(g);
+        let map = Keymap::new(&settings);
+        assert_eq!(last(&map, Mode::Normal, "g b d"), run(Command::CloseTab));
+        assert!(settings.keys_of(Layer::Neovim, Command::GoHome.info()).is_empty());
+    }
+
+    #[test]
+    fn resetting_the_neovim_layer_restores_the_leader() {
+        let mut settings = KeymapSettings::default();
+        settings.set_leader(keys("space")[0]);
+        settings.reset_layer(Layer::Standard);
+        assert_eq!(settings.leader, "space");
+        settings.reset_layer(Layer::Neovim);
+        assert_eq!(settings, KeymapSettings::default());
     }
 
     fn key_event(key: Key, modifiers: Modifiers) -> Event {

@@ -2116,6 +2116,29 @@ fn click_button(ctx: &egui::Context, app: &mut App, text: &str) {
 }
 
 #[test]
+fn the_leader_runs_shortcuts_and_can_be_changed_in_the_window() {
+    use crate::keymap::Layer;
+    use crate::ui_keys::Capture;
+    let (ctx, mut app, root) = neovim_app("leader");
+    type_key(&ctx, &mut app, Key::B, Modifiers::COMMAND, None);
+    word(&ctx, &mut app, "bn");
+    assert_eq!(app.panes[0].tabs.len(), 2, "Ctrl+B b n opens a tab");
+
+    recording(&mut app, Layer::Neovim, Capture::leader());
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    type_key(&ctx, &mut app, Key::Space, Modifiers::NONE, Some(" "));
+    click_button(&ctx, &mut app, "Save");
+    assert_eq!(app.st.keymap.leader, "space");
+    app.shortcuts = None;
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+
+    type_key(&ctx, &mut app, Key::Space, Modifiers::NONE, Some(" "));
+    word(&ctx, &mut app, "bd");
+    assert_eq!(app.panes[0].tabs.len(), 1, "Space b d closes the tab");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn a_recorded_shortcut_replaces_its_old_owner_and_works() {
     use crate::keymap::{Command, Layer, parse_keys};
     use crate::ui_keys::Capture;

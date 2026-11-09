@@ -142,13 +142,27 @@ filter as you type.
 | `yy` / `dd` / `p` | Copy, cut, paste. `dd` only marks the files; nothing is deleted until you paste |
 | `/` | Filter. Enter keeps the filter, Esc clears it, Backspace on an empty filter leaves it |
 
+The leader key starts short sequences grouped as in LazyVim. It is `Ctrl+B` by default. Change it in the
+Neovim layer of **Customize shortcuts…**, for example to Space, and every shortcut built on it follows.
+Space then stops opening the preview in this layer, and leader `u` `p` does that instead.
+
+| After the leader | Action |
+|---|---|
+| `b` then `n` / `d` / `u` | New tab, close tab, reopen closed tab |
+| `f` then `f` / `p` / `t` | Search, edit path, open in command shell |
+| `f` then `n` / `d` / `c` / `r` / `y` | New file, new folder, duplicate, rename, copy path |
+| `w` then `h` `j` `k` `l` / `w` | Panel in that direction, next panel |
+| `w` then `n` / `d` / `s` | New panel, close panel, flip split |
+| `u` then `h` / `c` / `p` | Hidden files, folder columns, preview |
+
 Changes are stored in `settings.lua` under `keymap`, only where they differ from the defaults. Each command
 takes one text, with shortcuts separated by commas, and an empty text removes its shortcuts:
 
 ```lua
 keymap = {
+  leader = "space",
   standard = { bindings = { new_tab = "ctrl+y, g t", refresh = "" }, folders = {} },
-  neovim = { bindings = {}, folders = { { keys = "g p", path = "/home/me/Projects", new_tab = true } } },
+  neovim = { bindings = { refresh = "leader r" }, folders = { { keys = "g p", path = "/home/me/Projects", new_tab = true } } },
 },
 ```
 

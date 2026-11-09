@@ -473,6 +473,7 @@ mod tests {
         assert!(!s.vim_keys && s.keymap == Default::default());
         let mut changed = Settings::default();
         changed.vim_keys = true;
+        changed.keymap.leader = "space".into();
         changed.keymap.standard.bindings.insert("new_tab".into(), String::new());
         changed.keymap.neovim.folders.push(crate::keymap::FolderKey { keys: "g p".into(), path: "/projects".into(), new_tab: true });
         let text = crate::lua_config::encode(&serde_json::to_value(&changed).unwrap());
