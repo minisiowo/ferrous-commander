@@ -7,6 +7,7 @@ use egui::{
     Stroke, Ui, UiBuilder, pos2, vec2,
 };
 
+use crate::keymap::{self, Chord, Command, Input, Mode, Outcome, Target};
 use crate::app::{Act, App, CrumbDrag, Dialog, DragPaths, DropTarget, FavDrag, ToastKind, is_computer};
 use crate::fsx;
 use crate::icons;
@@ -311,6 +312,7 @@ impl App {
 
     fn keyboard(&mut self, ctx: &egui::Context) {
         if self.dialog.is_some() || !self.notices.is_empty() || ctx.text_edit_focused() {
+            self.matcher.clear();
             return;
         }
         #[cfg(target_os = "linux")]
@@ -330,117 +332,183 @@ impl App {
             self.acts.push(Act::Forward(i));
         }
         let page = ((self.panes[i].list_h / self.row_h()).floor() as usize).max(1);
-        for ev in events {
-            match ev {
-                egui::Event::Copy => self.acts.push(Act::Copy(i)),
-                egui::Event::Cut => self.acts.push(Act::Cut(i)),
-                egui::Event::Paste(_) => self.acts.push(Act::Paste(i, None)),
-                egui::Event::Text(t) => match t.as_str() {
-                    // ` toggles columns navigation (resource ColumnsToggle_S)
-                    "`" => {
-                        self.st.show_columns = !self.st.show_columns;
-                        self.mark_dirty();
+        if !self.st.vim_keys {
+            self.panes[i].vim_visual = false;
+        }
+        // A key that did something must not also type its character.
+        let mut swallow = false;
+        for input in keymap::presses(&events) {
+            match input {
+                Input::Text(text) => {
+                    if !std::mem::take(&mut swallow) {
+                        self.typed(i, &text);
                     }
-                    // \ edits the path (resource EditPath_S)
-                    "\\" => {
-                        self.panes[i].path_edit = Some(self.panes[i].path().display().to_string())
+                }
+                Input::Press { chord, repeat, text } => {
+                    swallow = false;
+                    if self.st.vim_keys && self.panes[i].vim_filtering {
+                        if self.filter_key(i, chord) {
+                            swallow = true;
+                            continue;
+                        }
+                        if chord.is_typing() {
+                            if let Some(text) = text {
+                                self.typed(i, &text);
+                            }
+                            continue;
+                        }
                     }
-                    // Space previews (setting PreviewShortcut)
-                    " " if self.preview_may_toggle() => self.preview_window = !self.preview_window,
-                    " " => {}
-                    _ => {
-                        self.panes[i].filter.push_str(&t);
-                        self.panes[i].pending_select = None;
-                        self.panes[i].cursor = Some(0);
-                        self.panes[i].cursor_path = None;
+                    let mode = self.key_mode(i);
+                    match self.matcher.feed(&self.keys, mode, chord, repeat) {
+                        Outcome::Unbound => {
+                            if let Some(text) = text {
+                                self.typed(i, &text);
+                            }
+                        }
+                        Outcome::Waiting | Outcome::Cancelled => swallow = true,
+                        Outcome::Run { target, count, extend } => {
+                            swallow = true;
+                            match target {
+                                Target::Command(command) => self.run_command(i, command, extend, count, repeat, page),
+                                Target::Folder(path) => self.acts.push(Act::Navigate(i, path)),
+                            }
+                        }
                     }
-                },
-                egui::Event::Key {
-                    key,
-                    pressed: true,
-                    repeat,
-                    modifiers: m,
-                    ..
-                // Autorepeat must not act on file after file while a key is held down.
-                } if (!repeat || !matches!(key, Key::Delete | Key::D | Key::Enter)) => { self.key(i, key, m, page) },
-                _ => {}
+                }
             }
         }
     }
 
-    pub(crate) fn key(&mut self, i: usize, key: Key, m: Modifiers, page: usize) {
+    pub(crate) fn key_mode(&self, i: usize) -> Mode {
+        match (self.st.vim_keys, self.panes[i].vim_visual) {
+            (false, _) => Mode::Standard,
+            (true, false) => Mode::Normal,
+            (true, true) => Mode::Visual,
+        }
+    }
+
+    /// Characters no shortcut took go to the filter, unless Neovim mode owns the letters.
+    fn typed(&mut self, i: usize, text: &str) {
+        if self.st.vim_keys && !self.panes[i].vim_filtering {
+            return;
+        }
+        self.panes[i].filter.push_str(text);
+        self.panes[i].pending_select = None;
+        self.panes[i].cursor = Some(0);
+        self.panes[i].cursor_path = None;
+    }
+
+    /// The keys that end typing a filter in Neovim mode.
+    fn filter_key(&mut self, i: usize, chord: Chord) -> bool {
+        if chord.ctrl || chord.alt || chord.shift {
+            return false;
+        }
+        let pane = &mut self.panes[i];
+        match chord.key {
+            Key::Enter => pane.vim_filtering = false,
+            Key::Escape => {
+                pane.vim_filtering = false;
+                pane.filter.clear();
+            }
+            Key::Backspace => {
+                pane.filter.pop();
+                pane.vim_filtering = !pane.filter.is_empty();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn end_visual(&mut self, i: usize) {
+        self.panes[i].vim_visual = false;
+        if let Some(row) = self.panes[i].cursor {
+            self.set_cursor(i, row, Modifiers::NONE);
+        }
+    }
+
+    pub(crate) fn run_command(&mut self, i: usize, command: Command, extend: bool, count: Option<usize>, repeat: bool, page: usize) {
         let n = self.panes[i].view.len();
         let cur = self.panes[i].cursor;
+        let visual = self.panes[i].vim_visual;
         let mv = |s: &mut Self, to: usize| {
             if n > 0 {
                 let mods = Modifiers {
-                    shift: m.shift,
+                    shift: extend || visual,
                     ..Default::default()
                 };
                 s.set_cursor(i, to.min(n - 1), mods);
             }
         };
-        let ctrl = m.command;
+        let by = count.unwrap_or(1);
+        let half = (page / 2).max(1).saturating_mul(by);
+        let row = |count: usize| count.saturating_sub(1);
         let columns = self.st.layout == Layout::Columns;
-        match key {
-            Key::ArrowDown if !m.alt => mv(self, cur.map_or(0, |c| c + 1)),
-            Key::ArrowUp if !m.alt => mv(self, cur.map_or(0, |c| c.saturating_sub(1))),
-            Key::PageDown => mv(self, cur.map_or(0, |c| c + page)),
-            Key::PageUp => mv(self, cur.map_or(0, |c| c.saturating_sub(page))),
-            Key::Home => mv(self, 0),
-            Key::End => mv(self, n.saturating_sub(1)),
-            Key::ArrowUp if m.alt && !ctrl => self.acts.push(Act::Up(i)),
-            Key::ArrowLeft if m.alt && !ctrl => self.acts.push(Act::Back(i)),
-            Key::ArrowRight if m.alt && !ctrl => self.acts.push(Act::Forward(i)),
-            Key::ArrowRight if self.st.tree_files && !ctrl => {
-                if let Some(e) = self.cursor_entry(i) {
-                    if e.is_dir && !self.panes[i].expanded.contains(&e.path) {
-                        self.toggle_tree_folder(i, e.path.clone());
-                    } else { mv(self, cur.map_or(0, |c| c + 1)); }
+        let tree = self.st.tree_files;
+        match command {
+            Command::CursorDown => mv(self, cur.map_or(0, |c| c.saturating_add(by))),
+            Command::CursorUp => mv(self, cur.map_or(0, |c| c.saturating_sub(by))),
+            Command::PageDown => mv(self, cur.map_or(0, |c| c.saturating_add(page.saturating_mul(by)))),
+            Command::PageUp => mv(self, cur.map_or(0, |c| c.saturating_sub(page.saturating_mul(by)))),
+            Command::HalfPageDown => mv(self, cur.map_or(0, |c| c.saturating_add(half))),
+            Command::HalfPageUp => mv(self, cur.map_or(0, |c| c.saturating_sub(half))),
+            Command::First => mv(self, count.map_or(0, row)),
+            Command::Last => mv(self, count.map_or(n.saturating_sub(1), row)),
+            Command::Parent => self.acts.push(Act::Up(i)),
+            Command::Back => self.acts.push(Act::Back(i)),
+            Command::Forward => self.acts.push(Act::Forward(i)),
+            Command::Right if tree => self.tree_right(i, page),
+            Command::Left if tree => self.tree_left(i),
+            Command::Left if columns => self.acts.push(Act::Up(i)),
+            Command::Right if columns => self.enter_column(i),
+            Command::Left | Command::Right => {}
+            Command::FolderOut if visual => {}
+            Command::FolderOut if tree => self.tree_left(i),
+            Command::FolderOut => self.acts.push(Act::Up(i)),
+            Command::FolderIn if visual => {}
+            Command::FolderIn => {
+                let Some((dir, path)) = self.cursor_entry(i).map(|e| (e.is_dir, e.path.clone())) else { return };
+                if dir && tree {
+                    self.tree_right(i, page);
+                } else if dir && columns {
+                    self.acts.push(Act::Navigate(i, path));
+                } else if dir || !repeat {
+                    // Holding the key walks into folders but never opens file after file.
+                    self.acts.push(Act::Open(i, path));
                 }
             }
-            Key::ArrowLeft if self.st.tree_files && !ctrl => {
-                if let Some(e) = self.cursor_entry(i) {
-                    let path = e.path.clone();
-                    if self.panes[i].expanded.contains(&path) {
-                        self.toggle_tree_folder(i, path);
-                    } else if let Some(parent) = path.parent()
-                        && let Some(row) = (0..n).find(|&row| self.entry_at(i, row).is_some_and(|e| e.path == parent)) {
-                            mv(self, row);
-                        }
+            Command::GoHome => {
+                if let Some(home) = dirs::home_dir() {
+                    self.acts.push(Act::Navigate(i, home));
                 }
             }
-            Key::ArrowLeft if columns && !ctrl => self.acts.push(Act::Up(i)),
-            Key::ArrowRight if columns && !ctrl => {
-                if let Some(e) = self.cursor_entry(i)
-                    && e.is_dir {
-                        self.acts.push(Act::Navigate(i, e.path.clone()));
-                    }
-            }
-            #[cfg(target_os = "linux")]
-            Key::Enter if m.alt => {
+            Command::Properties => {
+                #[cfg(target_os = "linux")]
                 if let Some(e) = self.cursor_entry(i) { self.acts.push(Act::Properties(e.path.clone())); }
             }
-            Key::Enter if !(ctrl && m.shift) => {
+            Command::Open => {
                 if let Some(e) = self.cursor_entry(i) {
                     let p = e.path.clone();
-                    self.acts.push(if ctrl && e.is_dir {
-                        Act::OpenNewTab(i, p, true)
-                    } else {
-                        Act::Open(i, p)
-                    });
+                    self.acts.push(Act::Open(i, p));
                 }
             }
-            Key::Backspace => {
+            Command::OpenNewTab => {
+                if let Some(e) = self.cursor_entry(i) {
+                    let p = e.path.clone();
+                    self.acts.push(if e.is_dir { Act::OpenNewTab(i, p, true) } else { Act::Open(i, p) });
+                }
+            }
+            Command::ParentOrErase => {
                 if self.panes[i].filter.is_empty() {
                     self.acts.push(Act::Up(i));
                 } else {
                     self.panes[i].filter.pop();
                 }
             }
-            Key::Escape => {
+            Command::Escape => {
                 if self.preview_window {
                     self.preview_window = false;
+                } else if visual {
+                    self.end_visual(i);
                 } else if !self.panes[i].filter.is_empty() {
                     self.panes[i].filter.clear();
                 } else {
@@ -448,48 +516,62 @@ impl App {
                     self.clip = None;
                 }
             }
-            Key::A if ctrl => self.acts.push(Act::SelectAll(i)),
-            Key::Delete if m.shift && !ctrl && !m.alt => self.acts.push(Act::DeleteForever(i)),
-            Key::Delete => self.acts.push(Act::Delete(i)),
-            Key::F2 => self.acts.push(Act::Rename(i)),
-            Key::F5 => self.acts.push(Act::Refresh),
-            Key::F10 => self.acts.push(Act::Terminal(self.panes[i].path().to_path_buf())),
-            Key::N if ctrl && m.shift => self.acts.push(Act::NewFolder(i)),
-            Key::N if ctrl => self.acts.push(Act::NewFile(i)),
-            Key::D if ctrl => self.acts.push(Act::Duplicate(i)),
-            Key::T if ctrl && m.shift => self.acts.push(Act::ReopenTab(i)),
-            Key::T if ctrl => self.acts.push(Act::NewTab(i)),
-            Key::W if ctrl => {
+            Command::Filter => self.panes[i].vim_filtering = true,
+            Command::Visual if visual => self.end_visual(i),
+            Command::Visual => {
+                if n > 0 {
+                    self.set_cursor(i, cur.unwrap_or(0).min(n - 1), Modifiers::NONE);
+                    self.panes[i].vim_visual = true;
+                }
+            }
+            Command::VisualCopy => {
+                self.panes[i].vim_visual = false;
+                self.acts.push(Act::Copy(i));
+            }
+            Command::VisualCut => {
+                self.panes[i].vim_visual = false;
+                self.acts.push(Act::Cut(i));
+            }
+            Command::Copy => self.acts.push(Act::Copy(i)),
+            Command::Cut => self.acts.push(Act::Cut(i)),
+            Command::Paste => self.acts.push(Act::Paste(i, None)),
+            Command::SelectAll => self.acts.push(Act::SelectAll(i)),
+            Command::Delete => self.acts.push(Act::Delete(i)),
+            Command::DeleteForever => self.acts.push(Act::DeleteForever(i)),
+            Command::Rename => self.acts.push(Act::Rename(i)),
+            Command::Refresh => self.acts.push(Act::Refresh),
+            Command::Terminal => self.acts.push(Act::Terminal(self.panes[i].path().to_path_buf())),
+            Command::NewFolder => self.acts.push(Act::NewFolder(i)),
+            Command::NewFile => self.acts.push(Act::NewFile(i)),
+            Command::Duplicate => self.acts.push(Act::Duplicate(i)),
+            Command::CopyPath => self.acts.push(Act::CopyPath(i)),
+            Command::ReopenTab => self.acts.push(Act::ReopenTab(i)),
+            Command::NewTab => self.acts.push(Act::NewTab(i)),
+            Command::CloseTab => {
                 let t = self.panes[i].active;
                 self.acts.push(Act::CloseTab(i, t));
             }
-            Key::Tab if ctrl => {
+            Command::NextTab | Command::PrevTab => {
                 let len = self.panes[i].tabs.len();
                 let t = self.panes[i].active;
-                let nt = if m.shift {
-                    (t + len - 1) % len
-                } else {
-                    (t + 1) % len
-                };
-                self.acts.push(Act::SwitchTab(i, nt));
+                let next = if command == Command::PrevTab { (t + len - 1) % len } else { (t + 1) % len };
+                self.acts.push(Act::SwitchTab(i, next));
             }
             // panels, Hyprland style
-            Key::Enter if ctrl && m.shift => self.acts.push(Act::OpenPanel(i, None)),
-            Key::Q if ctrl && m.shift => self.acts.push(Act::ClosePanel(i)),
-            Key::J if ctrl && m.shift => self.acts.push(Act::ToggleSplit(i)),
-            Key::ArrowLeft if ctrl && m.alt => self.focus_dir(-1.0, 0.0),
-            Key::ArrowRight if ctrl && m.alt => self.focus_dir(1.0, 0.0),
-            Key::ArrowUp if ctrl && m.alt => self.focus_dir(0.0, -1.0),
-            Key::ArrowDown if ctrl && m.alt => self.focus_dir(0.0, 1.0),
-            Key::Tab if self.panes.len() > 1 => {
+            Command::NewPanel => self.acts.push(Act::OpenPanel(i, None)),
+            Command::ClosePanel => self.acts.push(Act::ClosePanel(i)),
+            Command::ToggleSplit => self.acts.push(Act::ToggleSplit(i)),
+            Command::FocusLeft => self.focus_dir(-1.0, 0.0),
+            Command::FocusRight => self.focus_dir(1.0, 0.0),
+            Command::FocusUp => self.focus_dir(0.0, -1.0),
+            Command::FocusDown => self.focus_dir(0.0, 1.0),
+            Command::NextPanel | Command::PrevPanel => {
                 let n = self.panes.len();
-                self.set_active(if m.shift {
-                    (i + n - 1) % n
-                } else {
-                    (i + 1) % n
-                });
+                if n > 1 {
+                    self.set_active(if command == Command::PrevPanel { (i + n - 1) % n } else { (i + 1) % n });
+                }
             }
-            Key::H if ctrl => {
+            Command::ToggleHidden => {
                 self.st.show_hidden = !self.st.show_hidden;
                 let msg = if self.st.show_hidden {
                     "Showing hidden files"
@@ -499,17 +581,56 @@ impl App {
                 self.toast(ToastKind::Info, msg);
                 self.mark_dirty();
             }
-            Key::F if ctrl => self.acts.push(Act::Search(i)),
-            Key::D if m.alt => {
+            Command::Search => self.acts.push(Act::Search(i)),
+            Command::EditPath => {
                 self.panes[i].path_edit = Some(self.panes[i].path().display().to_string())
             }
-            Key::L if ctrl => {
+            Command::EditPathSelected => {
                 self.panes[i].path_edit = Some(self.panes[i].path().display().to_string());
                 self.panes[i].path_select_all = true;
             }
-            Key::C if ctrl && m.shift => self.acts.push(Act::CopyPath(i)),
-            _ => {}
+            // ` toggles columns navigation (resource ColumnsToggle_S)
+            Command::ToggleColumns => {
+                self.st.show_columns = !self.st.show_columns;
+                self.mark_dirty();
+            }
+            // Space previews (setting PreviewShortcut)
+            Command::TogglePreview => {
+                if self.preview_may_toggle() {
+                    self.preview_window = !self.preview_window;
+                }
+            }
         }
+    }
+
+    fn tree_right(&mut self, i: usize, page: usize) {
+        if let Some(e) = self.cursor_entry(i) {
+            if e.is_dir && !self.panes[i].expanded.contains(&e.path) {
+                self.toggle_tree_folder(i, e.path.clone());
+            } else {
+                self.run_command(i, Command::CursorDown, false, None, false, page);
+            }
+        }
+    }
+
+    fn tree_left(&mut self, i: usize) {
+        let n = self.panes[i].view.len();
+        if let Some(e) = self.cursor_entry(i) {
+            let path = e.path.clone();
+            if self.panes[i].expanded.contains(&path) {
+                self.toggle_tree_folder(i, path);
+            } else if let Some(parent) = path.parent()
+                && let Some(row) = (0..n).find(|&row| self.entry_at(i, row).is_some_and(|e| e.path == parent)) {
+                    self.set_cursor(i, row, Modifiers::NONE);
+                }
+        }
+    }
+
+    fn enter_column(&mut self, i: usize) {
+        if let Some(e) = self.cursor_entry(i)
+            && e.is_dir {
+                self.acts.push(Act::Navigate(i, e.path.clone()));
+            }
     }
 
     pub fn row_h(&self) -> f32 {

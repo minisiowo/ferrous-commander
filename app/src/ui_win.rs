@@ -473,6 +473,9 @@ impl App {
             ui.checkbox(&mut self.st.show_columns, "Show folder columns   ( ` )");
             ui.checkbox(&mut self.st.show_preview, "Show preview / file details pane");
             ui.checkbox(&mut self.st.show_sidebar, "Show sidebar");
+            settings_section(ui, "Keyboard", accent);
+            ui.checkbox(&mut self.st.vim_keys, "Neovim-style keys");
+            ui.label(RichText::new("j, k, h, l move, / filters, and letters no longer filter as you type.").color(weak).size(11.0));
             settings_section(ui, "Sidebar groups", accent);
             ui.checkbox(&mut self.st.show_cloud, "Show automatically detected Cloud folders");
             ui.label(RichText::new("Cloud lists local sync folders, detected from OneDrive settings and folder names in your home directory.").color(weak).size(11.0));

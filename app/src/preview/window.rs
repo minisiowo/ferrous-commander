@@ -214,7 +214,10 @@ impl App {
                 }
                 Cmd::Detail(crop) => self.want_detail(crop, ctx),
                 Cmd::Turn(view) => self.want_model_view(view, ctx),
-                Cmd::Step(by) => self.key(i, if by > 0 { K::ArrowDown } else { K::ArrowUp }, egui::Modifiers::NONE, 1),
+                Cmd::Step(by) => {
+                    let step = if by > 0 { crate::keymap::Command::CursorDown } else { crate::keymap::Command::CursorUp };
+                    self.run_command(i, step, false, None, false, 1);
+                }
                 Cmd::Open => {
                     if let Some(e) = self.cursor_entry(i) {
                         self.acts.push(Act::Open(i, e.path.clone()));

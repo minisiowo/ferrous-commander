@@ -1797,3 +1797,246 @@ fn ctrl_l_selects_the_whole_path_like_a_browser() {
     assert_eq!(app.panes[0].path_edit, None);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Presses a key the way egui-winit reports it, with the character it types.
+fn type_key(ctx: &egui::Context, app: &mut App, k: Key, mods: Modifiers, text: Option<&str>) {
+    let mut events = vec![key_event(k, false, mods)];
+    if let Some(t) = text { events.push(Event::Text(t.into())); }
+    frame(ctx, app, events, mods);
+    // egui reports a second press as a repeat until the key has been released.
+    frame(ctx, app, vec![Event::Key { key: k, physical_key: None, pressed: false, repeat: false, modifiers: mods }], mods);
+    frame(ctx, app, vec![], Modifiers::NONE);
+}
+
+fn letter(ctx: &egui::Context, app: &mut App, c: char) {
+    let k = Key::from_name(&c.to_ascii_uppercase().to_string()).unwrap();
+    let mods = if c.is_ascii_uppercase() { Modifiers::SHIFT } else { Modifiers::NONE };
+    type_key(ctx, app, k, mods, Some(&c.to_string()));
+}
+
+fn word(ctx: &egui::Context, app: &mut App, text: &str) {
+    for c in text.chars() { letter(ctx, app, c); }
+}
+
+/// A panel on a folder of 30 subfolders, with the keys in Neovim mode.
+fn neovim_app(tag: &str) -> (egui::Context, App, std::path::PathBuf) {
+    let root = std::env::temp_dir().join(format!("fc_vim_{tag}_{}", std::process::id()));
+    for n in 0..30 { std::fs::create_dir_all(root.join(format!("dir{n:02}/inner"))).unwrap(); }
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(root.join("unused.png")));
+    app.st.vim_keys = true;
+    app.panes[0].tabs = vec![crate::app::Tab::new(root.clone())];
+    app.panes[0].active = 0;
+    app.active = 0;
+    wait_for_rows(&ctx, &mut app, 30);
+    (ctx, app, root)
+}
+
+fn wait_for_rows(ctx: &egui::Context, app: &mut App, rows: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.panes[0].view.len() != rows {
+        assert!(std::time::Instant::now() < deadline, "listing never reached {rows} rows");
+        frame(ctx, app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn neovim_keys_move_count_and_stay_off_until_enabled() {
+    let (ctx, mut app, root) = neovim_app("move");
+    app.st.vim_keys = false;
+    word(&ctx, &mut app, "j");
+    assert_eq!(app.panes[0].filter, "j", "letters filter while the mode is off");
+    key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    assert_eq!(app.panes[0].filter, "");
+    app.st.vim_keys = true;
+    wait_for_rows(&ctx, &mut app, 30);
+
+    word(&ctx, &mut app, "j");
+    assert_eq!(app.panes[0].cursor, Some(0));
+    word(&ctx, &mut app, "jj");
+    assert_eq!(app.panes[0].cursor, Some(2));
+    assert_eq!(app.panes[0].filter, "", "the mode's letters never reach the filter");
+    word(&ctx, &mut app, "k");
+    assert_eq!(app.panes[0].cursor, Some(1));
+    type_key(&ctx, &mut app, Key::Num5, Modifiers::NONE, Some("5"));
+    assert_eq!(app.matcher.pending(), "5");
+    word(&ctx, &mut app, "j");
+    assert_eq!(app.panes[0].cursor, Some(6));
+    word(&ctx, &mut app, "G");
+    assert_eq!(app.panes[0].cursor, Some(29));
+    word(&ctx, &mut app, "gg");
+    assert_eq!(app.panes[0].cursor, Some(0));
+    type_key(&ctx, &mut app, Key::Num7, Modifiers::NONE, Some("7"));
+    word(&ctx, &mut app, "G");
+    assert_eq!(app.panes[0].cursor, Some(6), "7G is row number 7");
+    type_key(&ctx, &mut app, Key::Num3, Modifiers::NONE, Some("3"));
+    word(&ctx, &mut app, "gg");
+    assert_eq!(app.panes[0].cursor, Some(2));
+    let page = ((app.panes[0].list_h / app.row_h()).floor() as usize).max(1);
+    key(&ctx, &mut app, Key::D, Modifiers::COMMAND);
+    assert_eq!(app.panes[0].cursor, Some(2 + (page / 2).max(1)));
+    assert!(app.jobs.is_empty(), "Ctrl+D scrolls here and does not duplicate");
+    key(&ctx, &mut app, Key::U, Modifiers::COMMAND);
+    assert_eq!(app.panes[0].cursor, Some(2));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn neovim_keys_walk_folders_tabs_and_panels() {
+    let (ctx, mut app, root) = neovim_app("walk");
+    word(&ctx, &mut app, "j");
+    word(&ctx, &mut app, "l");
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.panes[0].path(), root.join("dir00").as_path());
+    word(&ctx, &mut app, "h");
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.panes[0].path(), root.as_path());
+
+    word(&ctx, &mut app, "gh");
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.panes[0].path(), dirs::home_dir().unwrap().as_path());
+
+    // An unknown second key abandons the sequence and does nothing else.
+    let here = app.panes[0].path().to_path_buf();
+    word(&ctx, &mut app, "g");
+    assert_eq!(app.matcher.pending(), "g");
+    word(&ctx, &mut app, "z");
+    assert_eq!(app.matcher.pending(), "");
+    assert_eq!(app.panes[0].path(), here.as_path());
+
+    app.panes[0].tabs.push(crate::app::Tab::new(root.clone()));
+    app.panes[0].active = 0;
+    word(&ctx, &mut app, "L");
+    assert_eq!(app.panes[0].active, 1, "Shift+L is the next tab");
+    word(&ctx, &mut app, "H");
+    assert_eq!(app.panes[0].active, 0, "Shift+H is the previous tab");
+
+    assert!(app.panes.len() >= 2);
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    key(&ctx, &mut app, Key::W, Modifiers::COMMAND);
+    assert_eq!(app.panes[0].tabs.len(), 2, "Ctrl+W waits for the next key here");
+    word(&ctx, &mut app, "l");
+    assert_eq!(app.active, 1, "Ctrl+W l is the panel to the right");
+    app.active = 0;
+    key(&ctx, &mut app, Key::W, Modifiers::COMMAND);
+    word(&ctx, &mut app, "q");
+    for _ in 0..2 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.panes[0].tabs.len(), 1, "Ctrl+W q closes the tab");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn neovim_l_held_down_never_opens_a_file() {
+    let root = std::env::temp_dir().join(format!("fc_vim_hold_{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.fc-held"), b"x").unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(root.join("unused.png")));
+    app.st.vim_keys = true;
+    app.panes[0].tab().path = root.clone();
+    app.active = 0;
+    wait_for_rows(&ctx, &mut app, 1);
+    word(&ctx, &mut app, "j");
+    app.acts.clear();
+    app.run_command(0, crate::keymap::Command::FolderIn, false, None, true, 10);
+    assert!(app.acts.is_empty(), "a repeat must not open the file");
+    app.run_command(0, crate::keymap::Command::FolderIn, false, None, false, 10);
+    assert_eq!(app.acts.len(), 1, "a real press does");
+    app.acts.clear();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn neovim_tree_and_columns_use_h_and_l() {
+    let (ctx, mut app, root) = neovim_app("tree");
+    let first = root.join("dir00");
+    word(&ctx, &mut app, "j");
+    app.st.tree_files = true;
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    word(&ctx, &mut app, "l");
+    assert!(app.panes[0].expanded.contains(&first), "l expands in the tree");
+    assert_eq!(app.panes[0].path(), root.as_path());
+    word(&ctx, &mut app, "h");
+    assert!(!app.panes[0].expanded.contains(&first), "h collapses");
+    app.st.tree_files = false;
+    app.st.layout = crate::settings::Layout::Columns;
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    word(&ctx, &mut app, "l");
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.panes[0].path(), first.as_path());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn neovim_selection_and_clipboard_never_touch_the_disk() {
+    let (ctx, mut app, root) = neovim_app("clip");
+    word(&ctx, &mut app, "j");
+    word(&ctx, &mut app, "V");
+    word(&ctx, &mut app, "jj");
+    assert_eq!(app.panes[0].selected.len(), 3, "movement selects rows");
+    assert!(app.panes[0].vim_visual);
+    word(&ctx, &mut app, "hl");
+    for _ in 0..2 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.panes[0].path(), root.as_path(), "h and l do nothing while selecting");
+    key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    assert!(!app.panes[0].vim_visual);
+    assert_eq!(app.panes[0].selected.len(), 1);
+
+    word(&ctx, &mut app, "v");
+    word(&ctx, &mut app, "j");
+    word(&ctx, &mut app, "y");
+    for _ in 0..2 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(!app.panes[0].vim_visual);
+    assert!(app.clip.as_ref().is_some_and(|(p, cut)| p.len() == 2 && !*cut), "y copies the selection");
+
+    word(&ctx, &mut app, "j");
+    word(&ctx, &mut app, "dd");
+    for _ in 0..2 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(app.clip.as_ref().is_some_and(|(_, cut)| *cut), "dd cuts");
+    assert!(app.jobs.is_empty());
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 30, "dd leaves the files in place");
+    word(&ctx, &mut app, "yy");
+    for _ in 0..2 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(app.clip.as_ref().is_some_and(|(_, cut)| !*cut), "yy copies");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn neovim_slash_filters_and_gives_the_letters_back() {
+    let (ctx, mut app, root) = neovim_app("filter");
+    // On this layout the key and the character agree; both reach the app.
+    type_key(&ctx, &mut app, Key::Slash, Modifiers::NONE, Some("/"));
+    assert!(app.panes[0].vim_filtering);
+    assert_eq!(app.panes[0].filter, "", "the slash itself is not filtered for");
+    word(&ctx, &mut app, "dir2");
+    assert_eq!(app.panes[0].filter, "dir2");
+    wait_for_rows(&ctx, &mut app, 10);
+    key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
+    assert!(!app.panes[0].vim_filtering);
+    assert_eq!(app.panes[0].filter, "dir2", "Enter keeps the filter");
+    word(&ctx, &mut app, "j");
+    assert_eq!(app.panes[0].filter, "dir2", "letters are commands again");
+
+    type_key(&ctx, &mut app, Key::Slash, Modifiers::NONE, Some("/"));
+    key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    assert!(!app.panes[0].vim_filtering);
+    assert_eq!(app.panes[0].filter, "", "Esc clears it");
+
+    type_key(&ctx, &mut app, Key::Slash, Modifiers::NONE, Some("/"));
+    word(&ctx, &mut app, "a");
+    key(&ctx, &mut app, Key::Backspace, Modifiers::NONE);
+    assert!(!app.panes[0].vim_filtering, "erasing everything leaves the filter");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn neovim_letters_stay_text_in_the_path_field() {
+    let (ctx, mut app, root) = neovim_app("text");
+    app.panes[0].path_edit = Some(String::new());
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    frame(&ctx, &mut app, vec![key_event(Key::J, false, Modifiers::NONE), Event::Text("j".into())], Modifiers::NONE);
+    assert_eq!(app.panes[0].path_edit.as_deref(), Some("j"));
+    assert_eq!(app.panes[0].cursor, None);
+    std::fs::remove_dir_all(root).unwrap();
+}

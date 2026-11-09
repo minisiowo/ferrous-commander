@@ -342,7 +342,7 @@ impl App {
                             let f = self.panes[i].filter.clone();
                             let resp = chip(ui, &format!("Contains: {f}  ✖"), true, &pal);
                             if resp
-                                .on_hover_text("Typing filters this folder. Esc clears it.")
+                                .on_hover_text(if self.st.vim_keys { "/ filters this folder. Esc clears it." } else { "Typing filters this folder. Esc clears it." })
                                 .clicked()
                             {
                                 self.panes[i].filter.clear();
@@ -1473,6 +1473,19 @@ impl App {
             pal.text_weak,
         );
         let mut right = vec![];
+        if i == self.active {
+            let pending = self.matcher.pending();
+            if !pending.is_empty() {
+                right.push(pending);
+            }
+            if self.st.vim_keys {
+                right.push(match (self.panes[i].vim_filtering, self.panes[i].vim_visual) {
+                    (true, _) => "FILTER".to_string(),
+                    (_, true) => "VISUAL".to_string(),
+                    _ => "NORMAL".to_string(),
+                });
+            }
+        }
         if self.st.show_hidden {
             right.push("hidden shown".to_string());
         }

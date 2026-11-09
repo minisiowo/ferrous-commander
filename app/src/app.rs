@@ -116,6 +116,10 @@ pub struct Pane {
     pub path_edit: Option<String>,
     /// The path field selects its whole text the next time it is drawn.
     pub path_select_all: bool,
+    /// Neovim mode: moving the cursor selects rows.
+    pub vim_visual: bool,
+    /// Neovim mode: letters are going into the filter.
+    pub vim_filtering: bool,
     pub rename: Option<(PathBuf, String)>,
     pub rename_focus: bool,
     pub expanded: HashSet<PathBuf>,
@@ -159,6 +163,8 @@ impl Pane {
         self.rename = None;
         self.path_edit = None;
         self.path_select_all = false;
+        self.vim_visual = false;
+        self.vim_filtering = false;
         self.view_key = None;
         self.list_offset = 0.0;
         self.scroll_to = None;
@@ -326,6 +332,8 @@ pub struct ShotState {
 
 pub struct App {
     pub st: Settings,
+    pub keys: crate::keymap::Keymap,
+    pub matcher: crate::keymap::Matcher,
     pub pal: Palette,
     pub panes: Vec<Pane>,
     pub tiles: Tile,
@@ -571,6 +579,8 @@ impl App {
             folder_rx,
             folder_pending: HashMap::new(),
             pal: Palette::get(st.theme, accent),
+            keys: crate::keymap::Keymap::new(&st.keymap),
+            matcher: Default::default(),
             st,
             panes,
             tiles,

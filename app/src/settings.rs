@@ -101,6 +101,9 @@ pub struct Settings {
     pub tiles: Option<crate::tiles::Tile>,
     pub tags: HashMap<String, u8>,
     pub font_size: f32,
+    /// Keys work as in Neovim, on top of the standard shortcuts.
+    pub vim_keys: bool,
+    pub keymap: crate::keymap::KeymapSettings,
 }
 
 impl Default for Settings {
@@ -132,6 +135,8 @@ impl Default for Settings {
             tiles: None,
             tags: HashMap::new(),
             font_size: crate::defaults::ITEM_FONT_SIZE,
+            vim_keys: false,
+            keymap: Default::default(),
         }
     }
 }
@@ -457,5 +462,19 @@ mod tests {
         std::fs::remove_dir(base.join("ferrous")).unwrap();
         std::fs::remove_dir(base.join("ferrous-commander")).unwrap();
         std::fs::remove_dir(base).unwrap();
+    }
+
+    #[test]
+    fn settings_without_shortcuts_load_with_the_mode_off() {
+        let s = Settings::from_lua("return { font_size = 14 }").unwrap();
+        assert!(!s.vim_keys && s.keymap == Default::default());
+        let mut changed = Settings::default();
+        changed.vim_keys = true;
+        changed.keymap.standard.bindings.insert("new_tab".into(), String::new());
+        changed.keymap.neovim.folders.push(crate::keymap::FolderKey { keys: "g p".into(), path: "/projects".into() });
+        let text = crate::lua_config::encode(&serde_json::to_value(&changed).unwrap());
+        let back = Settings::from_lua(&text).unwrap();
+        assert!(back.vim_keys);
+        assert_eq!(back.keymap, changed.keymap, "an unbound command survives the Lua file");
     }
 }
