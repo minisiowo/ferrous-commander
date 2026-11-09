@@ -313,6 +313,7 @@ impl App {
         self.settings_window(&ctx);
         self.shortcuts_window(&ctx);
         self.overlays(&ctx);
+        self.which_key(&ctx);
         self.handle_drop(&ctx);
         self.end_frame(&ctx);
         self.screenshot(&ctx);

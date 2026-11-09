@@ -2130,3 +2130,34 @@ fn enter_and_punctuation_can_be_recorded() {
     assert_eq!(recorded(&app), parse_keys("enter /").unwrap());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn which_key_appears_after_a_pause_and_goes_away() {
+    let (ctx, mut app, root) = neovim_app("which");
+    app.which_key_delay = std::time::Duration::from_secs(3600);
+    word(&ctx, &mut app, "g");
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(!paints_text(&ctx, &mut app, "Home folder"), "quick typing shows no panel");
+
+    app.which_key_delay = std::time::Duration::ZERO;
+    wait_for_text(&ctx, &mut app, "Home folder");
+    assert!(paints_text(&ctx, &mut app, "First item"));
+
+    word(&ctx, &mut app, "g");
+    assert_eq!(app.matcher.pending(), "");
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(!paints_text(&ctx, &mut app, "Home folder"), "a finished shortcut closes it");
+
+    word(&ctx, &mut app, "g");
+    wait_for_text(&ctx, &mut app, "Home folder");
+    key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    assert_eq!(app.matcher.pending(), "", "Esc cancels the sequence");
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(!paints_text(&ctx, &mut app, "Home folder"));
+
+    app.st.which_key = false;
+    word(&ctx, &mut app, "g");
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(!paints_text(&ctx, &mut app, "Home folder"), "the setting turns it off");
+    std::fs::remove_dir_all(root).unwrap();
+}

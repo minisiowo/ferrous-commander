@@ -479,6 +479,7 @@ impl App {
             settings_section(ui, "Keyboard", accent);
             ui.checkbox(&mut self.st.vim_keys, "Neovim-style keys");
             ui.label(RichText::new("j, k, h, l move, / filters, and letters no longer filter as you type.").color(weak).size(11.0));
+            ui.checkbox(&mut self.st.which_key, "Show which keys can come next in a key sequence");
             if ui.button("Customize shortcuts…").clicked() {
                 let layer = if self.st.vim_keys { crate::keymap::Layer::Neovim } else { crate::keymap::Layer::Standard };
                 self.shortcuts = Some(crate::ui_keys::ShortcutsWindow::new(layer));

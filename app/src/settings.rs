@@ -103,6 +103,8 @@ pub struct Settings {
     pub font_size: f32,
     /// Keys work as in Neovim, on top of the standard shortcuts.
     pub vim_keys: bool,
+    /// While a shortcut is unfinished, show which keys can come next.
+    pub which_key: bool,
     pub keymap: crate::keymap::KeymapSettings,
 }
 
@@ -136,6 +138,7 @@ impl Default for Settings {
             tags: HashMap::new(),
             font_size: crate::defaults::ITEM_FONT_SIZE,
             vim_keys: false,
+            which_key: true,
             keymap: Default::default(),
         }
     }

@@ -240,6 +240,24 @@ pub enum Target {
     Folder(PathBuf),
 }
 
+impl Target {
+    /// The name shown in the list of shortcuts.
+    pub fn label(&self) -> String {
+        match self {
+            Target::Command(command) => command.info().label.to_string(),
+            Target::Folder(path) => format!("Go to {}", path.display()),
+        }
+    }
+
+    /// A name that fits a small hint.
+    pub fn short_label(&self) -> String {
+        match self {
+            Target::Folder(path) => format!("Go to {}", path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())),
+            Target::Command(_) => self.label(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Binding {
     pub keys: Vec<Chord>,
@@ -414,6 +432,28 @@ impl Keymap {
         })
     }
 
+    /// The keys that can follow `prefix`, from the layer that owns it, in key order.
+    pub fn hints(&self, mode: Mode, prefix: &[Chord]) -> Vec<Hint> {
+        for layer in self.layers(mode) {
+            let next: Vec<&Binding> = layer.iter().filter(|b| b.keys.len() > prefix.len() && b.keys.starts_with(prefix)).collect();
+            if next.is_empty() { continue; }
+            let mut hints: Vec<Hint> = Vec::new();
+            for binding in &next {
+                let key = binding.keys[prefix.len()];
+                if hints.iter().any(|h| h.key == key) { continue; }
+                let same: Vec<&&Binding> = next.iter().filter(|b| b.keys[prefix.len()] == key).collect();
+                let label = match same.as_slice() {
+                    [only] if only.keys.len() == prefix.len() + 1 => only.target.short_label(),
+                    many => format!("+{} more", many.len()),
+                };
+                hints.push(Hint { key, label });
+            }
+            hints.sort_by_key(|h| h.key.label().to_lowercase());
+            return hints;
+        }
+        Vec::new()
+    }
+
     /// What a single press would run, for keys held down and for Shift+movement.
     fn single(&self, mode: Mode, chord: Chord) -> Option<Target> {
         for layer in self.layers(mode) {
@@ -458,17 +498,60 @@ pub enum Outcome {
     Run { target: Target, count: Option<usize>, extend: bool },
 }
 
+/// One key that can come next in an unfinished shortcut.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hint {
+    pub key: Chord,
+    pub label: String,
+}
+
+/// How far a sequence of keys has got in the active layers.
+enum Step {
+    Longer,
+    Exact(Target),
+}
+
+fn step(map: &Keymap, mode: Mode, keys: &[Chord]) -> Option<Step> {
+    for layer in map.layers(mode) {
+        let mut exact = None;
+        let mut longer = false;
+        for binding in layer.iter().filter(|b| b.keys.starts_with(keys)) {
+            if binding.keys.len() == keys.len() { exact.get_or_insert(binding); } else { longer = true; }
+        }
+        // A longer shortcut wins, so one that starts another can never run early.
+        if longer {
+            return Some(Step::Longer);
+        }
+        if let Some(binding) = exact {
+            return Some(Step::Exact(binding.target.clone()));
+        }
+    }
+    None
+}
+
 /// Follows a key sequence across presses.
 #[derive(Clone, Debug, Default)]
 pub struct Matcher {
     keys: Vec<Chord>,
     count: Option<usize>,
+    /// When the sequence in `keys` was started.
+    since: Option<std::time::Instant>,
 }
 
 impl Matcher {
     pub fn clear(&mut self) {
         self.keys.clear();
         self.count = None;
+    }
+
+    /// The keys of the unfinished shortcut.
+    pub fn keys(&self) -> &[Chord] {
+        &self.keys
+    }
+
+    /// How long the unfinished shortcut has been waiting for its next key.
+    pub fn waited(&self) -> Option<std::time::Duration> {
+        self.since.filter(|_| !self.keys.is_empty()).map(|at| at.elapsed())
     }
 
     /// What has been typed of an unfinished shortcut.
@@ -491,22 +574,25 @@ impl Matcher {
             return Outcome::Waiting;
         }
         self.keys.push(chord);
-        for layer in map.layers(mode) {
-            let mut exact = None;
-            let mut longer = false;
-            for binding in layer.iter().filter(|b| b.keys.starts_with(&self.keys)) {
-                if binding.keys.len() == self.keys.len() { exact.get_or_insert(binding); } else { longer = true; }
-            }
-            // A longer shortcut wins, so one that starts another can never run early.
-            if longer {
+        let mut found = step(map, mode, &self.keys);
+        if found.is_none() && self.keys.len() > 1 && chord.ctrl {
+            // Neovim takes Ctrl+W Ctrl+H for Ctrl+W h, for fingers still on Ctrl.
+            *self.keys.last_mut().expect("just pushed") = Chord { ctrl: false, ..chord };
+            found = step(map, mode, &self.keys);
+        }
+        match found {
+            Some(Step::Longer) => {
+                if self.keys.len() == 1 {
+                    self.since = Some(std::time::Instant::now());
+                }
                 return Outcome::Waiting;
             }
-            if let Some(binding) = exact {
-                let target = binding.target.clone();
+            Some(Step::Exact(target)) => {
                 let count = self.count.take();
                 self.keys.clear();
                 return Outcome::Run { target, count, extend: false };
             }
+            None => {}
         }
         if self.keys.len() == 1 && let Some(target) = map.extending(mode, chord) {
             let count = self.count.take();
@@ -657,6 +743,42 @@ mod tests {
         assert_eq!(m.pending(), "");
         assert_eq!(feed_all(&mut m, &map, Mode::Normal, "g z j"), [Outcome::Waiting, Outcome::Cancelled, run(Command::CursorDown)]);
         assert_eq!(last(&map, Mode::Normal, "ctrl+w q"), run(Command::CloseTab));
+    }
+
+    #[test]
+    fn a_second_key_may_keep_ctrl_held_as_in_neovim() {
+        let map = Keymap::default_for_tests();
+        assert_eq!(last(&map, Mode::Normal, "ctrl+w ctrl+l"), run(Command::FocusRight));
+        assert_eq!(last(&map, Mode::Normal, "ctrl+w ctrl+w"), run(Command::NextPanel));
+        assert_eq!(last(&map, Mode::Normal, "ctrl+w ctrl+x"), Outcome::Cancelled);
+    }
+
+    fn hints(map: &Keymap, mode: Mode, prefix: &str) -> Vec<(String, String)> {
+        map.hints(mode, &keys(prefix)).into_iter().map(|h| (h.key.label(), h.label)).collect()
+    }
+
+    #[test]
+    fn hints_list_what_can_follow_in_key_order() {
+        let map = Keymap::default_for_tests();
+        assert_eq!(hints(&map, Mode::Normal, "g"), [("g".to_string(), "First item".to_string()), ("h".to_string(), "Home folder".to_string())]);
+        let window: Vec<String> = hints(&map, Mode::Normal, "ctrl+w").into_iter().map(|h| h.0).collect();
+        assert_eq!(window, ["c", "h", "j", "k", "l", "q", "w"]);
+        assert_eq!(hints(&map, Mode::Normal, "y"), [("y".to_string(), "Copy".to_string())]);
+        assert!(hints(&map, Mode::Normal, "j").is_empty(), "a finished shortcut has no next key");
+        assert!(hints(&map, Mode::Standard, "ctrl+w").is_empty(), "there it closes the tab at once");
+    }
+
+    #[test]
+    fn hints_group_longer_shortcuts_and_name_folders_briefly() {
+        let mut settings = KeymapSettings::default();
+        settings.neovim.folders.push(FolderKey { keys: "g p".into(), path: PathBuf::from("/home/me/Projects") });
+        settings.neovim.folders.push(FolderKey { keys: "g x a".into(), path: PathBuf::from("/a") });
+        settings.neovim.folders.push(FolderKey { keys: "g x b".into(), path: PathBuf::from("/b") });
+        let map = Keymap::new(&settings);
+        let got = hints(&map, Mode::Normal, "g");
+        assert!(got.contains(&("p".to_string(), "Go to Projects".to_string())), "{got:?}");
+        assert!(got.contains(&("x".to_string(), "+2 more".to_string())), "{got:?}");
+        assert_eq!(hints(&map, Mode::Normal, "g x"), [("a".to_string(), "Go to a".to_string()), ("b".to_string(), "Go to b".to_string())]);
     }
 
     #[test]

@@ -1,11 +1,17 @@
 //! The window where keyboard shortcuts are changed.
 
-use egui::{Button, Event, RichText, TextEdit, vec2};
+use std::time::Duration;
+
+use egui::{Align2, Button, CornerRadius, Event, Frame, Margin, RichText, Stroke, TextEdit, vec2};
 
 use crate::app::{App, is_computer};
 use crate::chrome::{self, Icon, Panel};
-use crate::keymap::{self, COMMANDS, Chord, Command, Group, Info, Input, Layer, MAX_KEYS, Target};
+use crate::keymap::{self, COMMANDS, Chord, Command, Group, Info, Input, Layer, MAX_KEYS, Mode, Target};
 use crate::theme::hex;
+
+/// How long an unfinished shortcut waits before its next keys are shown, so that
+/// typing a familiar sequence quickly never flashes a panel.
+pub const WHICH_KEY_DELAY: Duration = Duration::from_millis(300);
 
 /// A shortcut being recorded: everything pressed goes here until Save or Cancel.
 pub struct Capture {
@@ -44,13 +50,6 @@ const GROUPS: [(Group, &str); 6] = [
     (Group::View, "View"),
 ];
 
-fn target_label(target: &Target) -> String {
-    match target {
-        Target::Command(command) => command.info().label.to_string(),
-        Target::Folder(path) => format!("Go to {}", path.display()),
-    }
-}
-
 /// Commands that mean nothing in this layer or on this system stay out of the list.
 fn listed(info: &Info, layer: Layer) -> bool {
     let neovim_only = matches!(info.command, Command::Filter | Command::Visual | Command::VisualCopy | Command::VisualCut);
@@ -82,6 +81,53 @@ impl App {
         self.mark_dirty();
     }
 
+    /// Which-key: the keys that can come next, while a shortcut is unfinished.
+    pub fn which_key(&mut self, ctx: &egui::Context) {
+        if !self.st.which_key || self.recording_shortcut() { return; }
+        let Some(waited) = self.matcher.waited() else { return };
+        if waited < self.which_key_delay {
+            ctx.request_repaint_after(self.which_key_delay - waited);
+            return;
+        }
+        let hints = self.keys.hints(self.key_mode(self.active), self.matcher.keys());
+        if hints.is_empty() { return; }
+        let pal = self.pal;
+        const COLUMN: f32 = 230.0;
+        let screen = ctx.input(|i| i.content_rect());
+        let columns = (((screen.width() - 60.0) / COLUMN).floor() as usize).clamp(1, 4).min(hints.len());
+        let rows = hints.len().div_ceil(columns);
+        let pending = self.matcher.pending();
+        egui::Area::new(egui::Id::unique("which_key"))
+            .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -34.0))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .show(ctx, |ui| {
+                Frame::NONE.fill(pal.raised).corner_radius(CornerRadius::same(1))
+                    .stroke(Stroke::new(1.0, pal.accent)).inner_margin(Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(pending).monospace().strong().color(pal.accent));
+                            ui.label(RichText::new("Esc cancels").size(11.0).color(pal.text_weak));
+                        });
+                        ui.add_space(4.0);
+                        egui::Grid::new("which_key_grid").num_columns(columns * 2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
+                            for row in 0..rows {
+                                for column in 0..columns {
+                                    match hints.get(row + column * rows) {
+                                        Some(hint) => {
+                                            ui.label(RichText::new(hint.key.label()).monospace().strong().color(pal.accent));
+                                            ui.add(egui::Label::new(RichText::new(&hint.label).color(pal.text)).wrap_mode(egui::TextWrapMode::Extend));
+                                        }
+                                        None => { ui.label(""); ui.label(""); }
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    });
+            });
+    }
+
     pub fn shortcuts_window(&mut self, ctx: &egui::Context) {
         let Some(mut window) = self.shortcuts.take() else { return };
         self.read_capture(ctx, &mut window);
@@ -100,7 +146,7 @@ impl App {
         let layer = window.layer;
         let Some(capture) = &window.capture else { return };
         let weak = self.pal.text_weak;
-        ui.label(RichText::new(format!("New shortcut for: {}", target_label(&capture.target))).strong());
+        ui.label(RichText::new(format!("New shortcut for: {}", capture.target.label())).strong());
         if capture.keys.is_empty() {
             ui.label(RichText::new("Press the keys in order, then click Save.").color(weak));
         } else {
@@ -108,7 +154,7 @@ impl App {
         }
         let clash = keymap::conflict(&self.st.keymap, layer, &capture.keys, &capture.target).filter(|_| !capture.keys.is_empty());
         if let Some(clash) = &clash {
-            ui.label(RichText::new(format!("Already used by: {}", target_label(clash))).color(hex("#ef7063")));
+            ui.label(RichText::new(format!("Already used by: {}", clash.label())).color(hex("#ef7063")));
         }
         let mut save = false;
         let mut cancel = false;
@@ -189,6 +235,12 @@ impl App {
                 for (info, labels) in rows {
                     ui.label(info.label);
                     ui.horizontal_wrapped(|ui| {
+                        // A row of the upper layer can be empty and still have a working key.
+                        if labels.is_empty() && layer == Layer::Neovim
+                            && let Some(inherited) = self.keys.label(Mode::Normal, info.command)
+                        {
+                            ui.label(RichText::new(format!("Standard: {inherited}")).color(self.pal.text_weak).size(11.0));
+                        }
                         for (k, label) in labels.iter().enumerate() {
                             if ui.add(Button::new(format!("{label}  ×")).small()).on_hover_text("Remove this shortcut").clicked() {
                                 change = Some(Change::Remove(info, k));

@@ -120,6 +120,9 @@ panel's folder a shortcut of its own, such as `g p`.
 
 A shortcut can be a sequence of up to four keys. After the first one the app waits, without a time limit, and
 the status bar shows what has been typed. A key outside the sequence abandons it and does nothing else.
+If you pause for a moment, a panel lists the keys that can come next, like which-key in Neovim. It can be
+turned off in Settings. When the second key of a sequence is pressed with Ctrl still held, it also counts
+without Ctrl, so `Ctrl+W Ctrl+H` works like `Ctrl+W h`.
 
 Settings → **Neovim-style keys** adds a layer over the standard shortcuts. While it is on, letters no longer
 filter as you type.
