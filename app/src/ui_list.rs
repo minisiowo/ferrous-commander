@@ -623,6 +623,7 @@ impl App {
         let mut drag: Option<(PathBuf, bool)> = None;
         let marquee_id = ui.scope_id().with(("marquee", i));
         let mut marquee = ctx.data_mut(|d| d.get_temp::<(egui::Pos2, Vec<PathBuf>)>(marquee_id));
+        self.panes[i].rename_drawn = false;
         let out = ui.scope_builder(UiBuilder::new().max_rect(list_r), |ui| {
             // show_rows reads spacing before calling its row painter. Keep its
             // virtual row positions in sync with painting and marquee hit tests.
@@ -704,6 +705,10 @@ impl App {
             })
         });
         let so = out.inner;
+        // A field out of sight has no focus, and keys would act on the files instead.
+        if !self.panes[i].rename_drawn && !self.panes[i].rename_focus {
+            self.panes[i].rename = None;
+        }
         self.panes[i].list_offset = so.state.clamped_offset().y;
 
         // empty space below the rows
@@ -981,7 +986,18 @@ impl App {
             }
         }
         if renaming {
+            self.panes[i].rename_drawn = true;
             let focus = self.panes[i].rename_focus;
+            let id = egui::Id::unique(("rename_field", i));
+            if focus {
+                // egui drops the selection of a field that has no focus yet.
+                ui.memory_mut(|m| m.request_focus(id));
+                let chosen = if e.is_dir || e.stem().is_empty() { e.name() } else { e.stem() };
+                let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+                let (start, end) = (CharIndex(0), CharIndex(chosen.chars().count()));
+                state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(start), CCursor::new(end))));
+                egui::TextEdit::store_state(ui.ctx(), id, state);
+            }
             let enter = ui.input(|inp| inp.key_pressed(Key::Enter));
             let frame = in_place_frame(ui, 4);
             if let Some((_, text)) = self.panes[i].rename.as_mut() {
@@ -990,12 +1006,12 @@ impl App {
                     vec2((cols[0].2 - 30.0 - tree_indent).max(30.0), rh),
                 );
                 let te = egui::TextEdit::singleline(text)
+                    .id(id)
                     .font(FontId::proportional(self.st.font_size))
                     .frame(frame)
                     .align(Align2::LEFT_CENTER);
                 let r = ui.put(er, te);
                 if focus {
-                    r.request_focus();
                     self.panes[i].rename_focus = false;
                 } else if r.lost_focus() {
                     if enter {

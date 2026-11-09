@@ -122,6 +122,8 @@ pub struct Pane {
     pub vim_filtering: bool,
     pub rename: Option<(PathBuf, String)>,
     pub rename_focus: bool,
+    /// The row being renamed was painted this frame.
+    pub rename_drawn: bool,
     pub expanded: HashSet<PathBuf>,
     pub tree_entries: Vec<Entry>,
     // Expanded paths and the listing revision used to flatten this tree.
@@ -430,10 +432,10 @@ fn spawn_folder_watcher(
 impl App {
     pub fn new(shot: Option<PathBuf>) -> App {
         let persist = shot.is_none();
-        let mut st = if persist {
+        let (mut st, load_problem) = if persist {
             Settings::load()
         } else {
-            Settings::default()
+            (Settings::default(), None)
         };
         if !persist {
             // A clean, deterministic first-start picture: start in the home folder.
@@ -605,7 +607,10 @@ impl App {
             ejecting: Vec::new(),
             dialog: None,
             locked: VecDeque::new(),
-            notices: Vec::new(),
+            notices: load_problem.map(|problem| Notice::Problems {
+                title: "Your settings could not be read".to_string(),
+                lines: vec![problem, "Default settings are in use, and changes will not be saved until the file is fixed.".to_string()],
+            }).into_iter().collect(),
             closing: false,
             #[cfg(target_os = "linux")]
             properties: None,
@@ -712,6 +717,8 @@ impl App {
         self.active = fix(self.prev_active).min(self.panes.len() - 1);
         self.prev_active = self.active;
         self.col_hl.clear();
+        // It may belong to the panel that is gone, and the numbers have shifted anyway.
+        self.dialog = None;
         self.mark_dirty();
     }
 
@@ -1466,6 +1473,10 @@ impl App {
             if !self.notices.iter().any(|n| matches!(n, Notice::ConfirmRun { path, .. } if *path == p)) {
                 let link = link_target(&p);
                 self.notices.push(Notice::ConfirmRun { path: p, place, link });
+                // Asked from the search window, the question would wait behind it.
+                if let Some(ctx) = self.wake.get() {
+                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                }
             }
         } else {
             self.launch(&p);

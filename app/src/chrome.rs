@@ -114,13 +114,13 @@ impl<'a> Panel<'a> {
 
     /// Without egui's own title bar the window moves by any empty spot, so the bar
     /// needs no drag handling of its own. True when the close button was clicked.
-    pub fn show(self, ctx: &egui::Context, add: impl FnOnce(&mut Ui)) -> bool {
+    pub fn show(self, ctx: &egui::Context, add: impl FnMut(&mut Ui)) -> bool {
         // A window of one width is a small, passing question: it stays with the application.
         if ctx.embed_viewports() || self.width.is_some() { self.show_inside(ctx, add) } else { self.show_native(ctx, add) }
     }
 
     /// As a real window, free to go anywhere on the monitor.
-    fn show_native(self, ctx: &egui::Context, add: impl FnOnce(&mut Ui)) -> bool {
+    fn show_native(self, ctx: &egui::Context, mut add: impl FnMut(&mut Ui)) -> bool {
         let Panel { pal, title, icon, info, size, .. } = self;
         let id = ViewportId::from_hash_of(("ferrous_panel", title));
         let key = egui::Id::unique("ferrous_panel").with(title);
@@ -146,7 +146,6 @@ impl<'a> Panel<'a> {
             .with_min_inner_size(if locked { state.size } else { min })
             .with_max_inner_size(if locked { state.size } else { monitor.unwrap_or(Vec2::splat(16_000.0)) });
         if let Some(position) = state.position { builder = builder.with_position(position); }
-        let mut add = Some(add);
         let mut closed = false;
         ctx.show_viewport_immediate(id, builder, |ui, _class| {
             let full = ui.max_rect();
@@ -158,8 +157,9 @@ impl<'a> Panel<'a> {
             ui.painter().rect_filled(r, CornerRadius::ZERO, pal.panel);
             let bar = ui.interact(r, ui.scope_id().with("panel_bar"), Sense::click_and_drag());
             if bar.drag_started() { ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag); }
-            closed = title_bar(ui, pal, r, icon, title, info);
-            if let Some(add) = add.take() { add(ui); }
+            // egui can run this twice in a frame, and only the last run is seen.
+            closed |= title_bar(ui, pal, r, icon, title, info);
+            add(ui);
             closed |= ui.input(|i| i.viewport().close_requested());
             resize_grip(ui, full, pal);
         });
@@ -167,7 +167,7 @@ impl<'a> Panel<'a> {
         closed
     }
 
-    fn show_inside(self, ctx: &egui::Context, add: impl FnOnce(&mut Ui)) -> bool {
+    fn show_inside(self, ctx: &egui::Context, mut add: impl FnMut(&mut Ui)) -> bool {
         let Panel { window, pal, title, icon, info, width, .. } = self;
         let frame = Frame::window(&ctx.global_style()).inner_margin(0.0).fill(pal.content_fill());
         let mut closed = false;

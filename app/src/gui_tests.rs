@@ -1731,6 +1731,46 @@ fn a_hidden_sidebar_section_leaves_no_extra_gap() {
 }
 
 #[test]
+fn closing_a_panel_closes_a_dialog_that_could_point_at_it() {
+    let (ctx, mut app, root) = neovim_app("close_panel");
+    app.open_panel(0, None);
+    let last = app.panes.len() - 1;
+    app.dialog = Some(crate::app::Dialog::NewFolder { pane: last, name: String::new(), focus: true });
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    app.close_panel(last);
+    assert!(app.dialog.is_none());
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_rename_survives_a_refresh_and_ends_when_its_row_leaves_the_view() {
+    let (ctx, mut app, root) = neovim_app("rename_view");
+    let start = |app: &mut App, row: usize| {
+        let e = app.entry_at(0, row).unwrap().clone();
+        app.panes[0].rename = Some((e.path.clone(), e.name().to_string()));
+        app.panes[0].rename_focus = true;
+    };
+    start(&mut app, 0);
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    let focused = ctx.memory(|m| m.focused());
+    assert_eq!(focused, Some(egui::Id::unique(("rename_field", 0))));
+
+    // A new first row moves the one being renamed.
+    std::fs::create_dir(root.join("aaa")).unwrap();
+    app.acts.push(crate::app::Act::Refresh);
+    wait_for_rows(&ctx, &mut app, 31);
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(app.panes[0].rename.is_some());
+    assert_eq!(ctx.memory(|m| m.focused()), focused, "the field keeps the keyboard");
+
+    app.panes[0].scroll_to = Some(30);
+    for _ in 0..5 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(app.panes[0].rename.is_none(), "keys must not reach the files through a hidden field");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn text_stays_put_when_it_becomes_editable() {
     use crate::app::Tab;
     let root = std::env::temp_dir().join(format!("fc_in_place_{}", std::process::id()));
@@ -1751,6 +1791,8 @@ fn text_stays_put_when_it_becomes_editable() {
     for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
     let editing = painted_at(&ctx, &mut app, "notes.txt", pane);
     assert!(near(name, editing), "the name moved from {name:?} to {editing:?}");
+    let chosen = egui::TextEdit::load_state(&ctx, egui::Id::unique(("rename_field", 0))).unwrap().cursor.char_range().unwrap();
+    assert_eq!((chosen.secondary.index.0, chosen.primary.index.0), (0, 5), "the name is selected, not the extension");
     app.panes[0].rename = None;
 
     // The tab above carries the same folder name.

@@ -234,18 +234,23 @@ impl Settings {
         target.paths != before
     }
 
-    pub fn load() -> Settings {
-        let Some(base) = dirs::config_dir() else { return Self::default() };
+    /// The settings, and what is wrong when an existing file could not be used.
+    pub fn load() -> (Settings, Option<String>) {
+        let Some(base) = dirs::config_dir() else { return (Self::default(), None) };
         Self::load_from(&base)
     }
 
-    fn load_from(base: &std::path::Path) -> Settings {
+    fn load_from(base: &std::path::Path) -> (Settings, Option<String>) {
         let file = base.join("ferrous/settings.lua");
+        let unusable = |e: &dyn std::fmt::Display| {
+            eprintln!("Cannot load {}: {e}", file.display());
+            (Self::default(), Some(format!("{}: {e}", file.display())))
+        };
         match std::fs::read_to_string(&file) {
-            Ok(text) => Self::from_lua(&text).unwrap_or_else(|e| {
-                eprintln!("Cannot load {}: {e}", file.display());
-                Self::default()
-            }),
+            Ok(text) => match Self::from_lua(&text) {
+                Ok(settings) => (settings, None),
+                Err(e) => unusable(&e),
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Keep existing installations' preferences and sessions on migration.
                 let settings = ["ferrous/settings.json", "ferrous-commander/settings.json"]
@@ -253,9 +258,9 @@ impl Settings {
                         .ok().and_then(|text| serde_json::from_str::<Self>(&text).ok()))
                     .unwrap_or_default();
                 let _ = settings.save_to(&file);
-                settings
+                (settings, None)
             }
-            Err(_) => Self::default(),
+            Err(e) => unusable(&e),
         }
     }
 
@@ -452,13 +457,18 @@ mod tests {
             let s = Settings { font_size: 17.0, show_hidden: true, ..Settings::default() };
             let original = serde_json::to_string_pretty(&s).unwrap();
             std::fs::write(&old, &original).unwrap();
-            assert_eq!(Settings::load_from(&base).font_size, 17.0);
+            assert_eq!(Settings::load_from(&base).0.font_size, 17.0);
             let lua = base.join("ferrous/settings.lua");
             assert!(lua.exists());
             assert_eq!(std::fs::read_to_string(&old).unwrap(), original);
             std::fs::write(&lua, "return { font_size = 14, show_hidden = false }").unwrap();
-            assert_eq!(Settings::load_from(&base).font_size, 14.0);
-            assert!(!Settings::load_from(&base).show_hidden);
+            assert_eq!(Settings::load_from(&base).0.font_size, 14.0);
+            assert!(!Settings::load_from(&base).0.show_hidden);
+            assert_eq!(Settings::load_from(&base).1, None);
+            std::fs::write(&lua, "return { font_size = 'huge' }").unwrap();
+            let (settings, problem) = Settings::load_from(&base);
+            assert_eq!(settings.font_size, Settings::default().font_size);
+            assert!(problem.is_some_and(|p| p.contains("settings.lua")), "a bad file is reported");
             std::fs::remove_file(lua).unwrap();
             std::fs::remove_file(old).unwrap();
         }
