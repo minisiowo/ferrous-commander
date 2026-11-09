@@ -119,9 +119,18 @@ pub(crate) fn typed_path(text: &str) -> PathBuf {
         Some(rest) => dirs::home_dir()
             .map(|h| h.join(rest.trim_start_matches(['/', '\\'])))
             .unwrap_or_else(|| PathBuf::from(raw)),
+        // Without its separator `C:` means whichever folder that drive was last in.
+        None if cfg!(windows) && raw.len() == 2 && raw.ends_with(':') => PathBuf::from(format!("{raw}\\")),
         None => PathBuf::from(raw),
     };
     path.components().collect()
+}
+
+/// Where Enter goes: the suggestion finishes a name being typed, but a path that ends
+/// in a separator is already complete and the suggestion there is only an offer.
+fn enter_destination<'a>(text: &'a str, completion: Option<&'a str>) -> &'a str {
+    let naming = split_typed(text).is_some_and(|(_, word)| !word.is_empty());
+    completion.filter(|_| naming).unwrap_or(text)
 }
 
 /// The typed text split into its folder, separator included, and the name being typed.
@@ -250,7 +259,7 @@ impl App {
                     // The next edit shows another path, so the old cursor must not carry over.
                     egui::TextEdit::store_state(ui.ctx(), id, Default::default());
                     if ui.input(|inp| inp.key_pressed(Key::Enter)) {
-                        self.go_to_typed(i, completion.as_deref().unwrap_or(&text));
+                        self.go_to_typed(i, enter_destination(&text, completion.as_deref()));
                     }
                 }
             });
@@ -1587,6 +1596,20 @@ mod path_completion_tests {
 
     #[test]
     fn a_typed_path_drops_its_trailing_separator() {
-        assert_eq!(typed_path("/root/docs/").as_os_str(), PathBuf::from("/root/docs").as_os_str());
+        assert_eq!(typed_path("/root/docs/"), PathBuf::from("/root/docs"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_bare_drive_means_its_root() {
+        assert_eq!(typed_path("C:"), PathBuf::from("C:\\"));
+        assert!(typed_path("C:").is_absolute());
+    }
+
+    #[test]
+    fn enter_takes_a_suggestion_only_for_a_name_being_typed() {
+        assert_eq!(enter_destination("/root/Doc", Some("/root/Documents/")), "/root/Documents/");
+        assert_eq!(enter_destination("/root/Documents/", Some("/root/Documents/notes/")), "/root/Documents/");
+        assert_eq!(enter_destination("/root/Doc", None), "/root/Doc");
     }
 }
