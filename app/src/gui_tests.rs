@@ -1725,7 +1725,8 @@ fn a_hidden_sidebar_section_leaves_no_extra_gap() {
     let cards: Vec<Rect> = app.drop_zones.iter()
         .filter_map(|(r, t)| matches!(t, DropTarget::Favorites { .. }).then_some(*r)).collect();
     assert_eq!(cards.len(), 2);
-    assert_eq!(cards[1].min.y - cards[0].max.y, crate::tiles::GAP);
+    let pane = app.pane_rects.iter().map(|(_, r)| r.min.x).fold(f32::INFINITY, f32::min);
+    assert_eq!(cards[1].min.y - cards[0].max.y, pane - cards[0].max.x, "the gap beside the sidebar is the reference");
     std::fs::remove_dir_all(root).unwrap();
 }
 

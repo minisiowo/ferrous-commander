@@ -16,6 +16,10 @@ use crate::theme::{Palette, ThemeName, blend, hex};
 
 // ---- sizes ----
 pub const SIDEBAR_W: f32 = crate::defaults::SIDEBAR_WIDTH;
+/// The space around every sidebar card: above and below it, and beside the file panels.
+const SIDEBAR_GAP: i8 = 8;
+/// The part of that space beside the file panels which belongs to them.
+const PANELS_LEFT: i8 = 2;
 pub const TOOLBAR_H: f32 = 36.0;
 pub const DETAILS_H: f32 = crate::defaults::DETAILS_HEIGHT;
 pub const PREVIEW_W: f32 = crate::defaults::PREVIEW_WIDTH;
@@ -290,7 +294,7 @@ impl App {
                 .show_separator_line(false)
                 .frame(Frame::NONE.fill(pal.window).inner_margin(Margin {
                     left: 6,
-                    right: 6,
+                    right: SIDEBAR_GAP - PANELS_LEFT,
                     top: 6,
                     bottom: 0,
                 }))
@@ -298,7 +302,7 @@ impl App {
         }
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(pal.window).inner_margin(Margin {
-                left: 2,
+                left: PANELS_LEFT,
                 right: 0,
                 top: 0,
                 bottom: 0,
@@ -737,7 +741,7 @@ impl App {
                 .id_salt("sidebar_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = crate::tiles::GAP;
+                    ui.spacing_mut().item_spacing.y = f32::from(SIDEBAR_GAP);
                     self.st.normalize_sidebar();
                     for section in self.st.sidebar_order.clone() {
                         // A hidden section must add no space of its own between the cards.
