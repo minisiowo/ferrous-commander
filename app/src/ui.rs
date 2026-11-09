@@ -765,12 +765,7 @@ impl App {
                     self.st.normalize_sidebar();
                     for section in self.st.sidebar_order.clone() {
                         // A hidden section must add no space of its own between the cards.
-                        let shown = match section {
-                            SidebarSection::Cloud => self.st.show_cloud && !self.cloud.is_empty(),
-                            SidebarSection::History => self.st.show_history,
-                            _ => true,
-                        };
-                        if !shown { continue; }
+                        if !self.section_shown(section) { continue; }
                         ui.push_id(("section", format!("{section:?}")), |ui| match section {
                             SidebarSection::Drives => self.drives_card(ui),
                             SidebarSection::Cloud => self.cloud_card(ui),
@@ -1043,7 +1038,8 @@ impl App {
         self.fav_folder_drop(ui, r.response.rect, g, &rows);
         self.sidebar_group_drop(ui, &r.response, SidebarSection::Favorite(g));
         let target = self.fav_paths_target(ui, r.response.rect, g, paths, &rows);
-        self.drop_zones.push((r.response.rect, target));
+        // A scrolled-away part must not catch a drop aimed at what covers it.
+        self.drop_zones.push((r.response.rect.intersect(ui.clip_rect()), target));
     }
 
     fn drives_card(&mut self, ui: &mut Ui) {
@@ -1826,7 +1822,8 @@ impl App {
                     if resp.middle_clicked() && *is_dir {
                         self.acts.push(Act::OpenNewTab(i, path.clone(), false));
                     }
-                    if resp.drag_started() {
+                    // The entries of This PC are drives, which are not moved around.
+                    if resp.drag_started() && !is_computer(dir) {
                         egui::DragAndDrop::set_payload(ui.ctx(), DragPaths(vec![path.clone()]));
                     }
                     if *is_dir {

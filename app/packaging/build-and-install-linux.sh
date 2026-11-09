@@ -4,5 +4,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 
+# A copy from an earlier build may be running, and a running file cannot be overwritten.
+rm -f dist/ferrous-commander/ferrous-commander
 sh packaging/build-linux.sh
 sh dist/ferrous-commander/install.sh

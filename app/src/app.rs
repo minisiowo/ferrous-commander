@@ -703,6 +703,16 @@ impl App {
         new
     }
 
+    /// Whether a section of the sidebar is on screen.
+    pub fn section_shown(&self, section: crate::settings::SidebarSection) -> bool {
+        use crate::settings::SidebarSection::*;
+        match section {
+            Cloud => self.st.show_cloud && !self.cloud.is_empty(),
+            History => self.st.show_history,
+            Drives | Favorite(_) => true,
+        }
+    }
+
     pub fn close_panel(&mut self, i: usize) {
         if self.panes.len() < 2 || !self.tiles.remove(i) {
             return;
@@ -2090,8 +2100,13 @@ impl App {
                 self.st.normalize_sidebar();
                 let section = crate::settings::SidebarSection::Favorite(g);
                 if let Some(i) = self.st.sidebar_order.iter().position(|s| *s == section) {
-                    let t = i as i32 + d;
-                    if t >= 0 && (t as usize) < self.st.sidebar_order.len() {
+                    // A section that is not on screen is no place to move past visibly.
+                    let order = &self.st.sidebar_order;
+                    let mut t = i as i32 + d;
+                    while order.get(t as usize).is_some_and(|s| !self.section_shown(*s)) {
+                        t += d;
+                    }
+                    if t >= 0 && (t as usize) < order.len() {
                         self.st.sidebar_order.swap(i, t as usize);
                     }
                 }

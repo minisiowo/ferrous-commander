@@ -1771,6 +1771,28 @@ fn a_rename_survives_a_refresh_and_ends_when_its_row_leaves_the_view() {
 }
 
 #[test]
+fn moving_a_group_skips_sections_that_are_hidden() {
+    use crate::settings::{FavGroup, SidebarSection::*};
+    let root = std::env::temp_dir().join(format!("fc_group_move_{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(root.join("unused.png")));
+    app.st.favorites = vec![FavGroup::new("One", vec![root.clone()])];
+    app.st.show_cloud = false;
+    app.st.show_history = false;
+    app.st.sidebar_order = vec![Drives, Cloud, Favorite(0), History];
+    app.acts.push(crate::app::Act::MoveGroup(0, -1));
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    assert_eq!(app.st.sidebar_order, [Favorite(0), Cloud, Drives, History]);
+    app.acts.push(crate::app::Act::MoveGroup(0, -1));
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    assert_eq!(app.st.sidebar_order, [Favorite(0), Cloud, Drives, History], "already first on screen");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn text_stays_put_when_it_becomes_editable() {
     use crate::app::Tab;
     let root = std::env::temp_dir().join(format!("fc_in_place_{}", std::process::id()));

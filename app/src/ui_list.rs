@@ -287,7 +287,7 @@ impl App {
                         if icon_button(
                             ui,
                             "⬅",
-                            "Go back in tab history (Alt + Left arrow)",
+                            &self.tip("Go back in tab history", Command::Back),
                             false,
                             &pal,
                         )
@@ -299,7 +299,7 @@ impl App {
                         if icon_button(
                             ui,
                             "➡",
-                            "Go forward in tab history (Alt + Right arrow)",
+                            &self.tip("Go forward in tab history", Command::Forward),
                             false,
                             &pal,
                         )
