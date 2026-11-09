@@ -111,6 +111,46 @@ On [Omarchy](https://omarchy.org/), Settings and the theme button also offer an
 **Omarchy** theme. It takes its colours and accent from the current desktop theme
 and follows `omarchy theme set` within a second, without a restart.
 
+## Keyboard shortcuts
+
+Every shortcut can be changed in Settings → **Customize shortcuts…**. Pick a layer, click **+** beside a
+command, press the keys in order and click **Save**. Enter and Esc can be recorded too. If the keys are taken
+or start another shortcut, the window names the owner and offers **Replace**. **+ Folder** gives the active
+panel's folder a shortcut of its own, such as `g p`.
+
+A shortcut can be a sequence of up to four keys. After the first one the app waits, without a time limit, and
+the status bar shows what has been typed. A key outside the sequence abandons it and does nothing else.
+
+Settings → **Neovim-style keys** adds a layer over the standard shortcuts. While it is on, letters no longer
+filter as you type.
+
+| Keys | Action |
+|---|---|
+| `j` / `k` | Down, up (`5j` moves five rows) |
+| `h` / `l` | Leave folder / enter folder or open file; in a tree, collapse / expand |
+| `gg` / `G` | First, last row (`5G` is row 5) |
+| `Ctrl+D` / `Ctrl+U` | Half a page down, up |
+| `Shift+H` / `Shift+L` | Previous, next tab |
+| `gh` | Home folder |
+| `Ctrl+W` then `h` `j` `k` `l` | Panel in that direction |
+| `Ctrl+W` then `w` | Next panel |
+| `Ctrl+W` then `q` or `c` | Close tab |
+| `v` or `V` | Select rows: moving extends, `y` copies, `d` cuts, Esc ends |
+| `yy` / `dd` / `p` | Copy, cut, paste. `dd` only marks the files; nothing is deleted until you paste |
+| `/` | Filter. Enter keeps the filter, Esc clears it, Backspace on an empty filter leaves it |
+
+Changes are stored in `settings.lua` under `keymap`, only where they differ from the defaults. Each command
+takes one text, with shortcuts separated by commas, and an empty text removes its shortcuts:
+
+```lua
+keymap = {
+  standard = { bindings = { new_tab = "ctrl+y, g t", refresh = "" }, folders = {} },
+  neovim = { bindings = {}, folders = { { keys = "g p", path = "/home/me/Projects" } } },
+},
+```
+
+The preview window's own keys, Tab and → in the path field, and keys inside dialogs are not configurable.
+
 ## Working with files and panels
 
 Programs on removable drives and network locations ask before they run. Added drives and

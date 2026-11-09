@@ -86,6 +86,8 @@ No administrator rights are needed for the per-user install, which is also avail
 </td></tr>
 </table>
 
+These are the defaults. Every shortcut can be changed, including key sequences such as `g h`, in **Settings → Customize shortcuts…**, where **Neovim-style keys** can also be turned on. See the [full reference](docs/DETAILS.md#keyboard-shortcuts).
+
 **With the mouse:** drag to move, <kbd>Ctrl</kbd>+drag to copy, drag on empty space to select with a rectangle. Drag a tab to a panel's edge to split it, and double-click a divider to even out the panels.
 
 ## Archives

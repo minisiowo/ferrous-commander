@@ -7,6 +7,7 @@ use egui::{Align2, CornerRadius, FontId, Frame, Key, Margin, Rect, RichText, Sen
 use crate::app::{Act, App, Dialog, DragPaths, DropTarget, Notice, ToastKind, is_computer};
 use crate::chrome::{self, Icon, Panel};
 use crate::fsx;
+use crate::keymap::Command;
 use crate::icons;
 use crate::settings::Layout;
 use crate::theme::{ThemeName, hex};
@@ -451,10 +452,10 @@ impl App {
                 ui.label("Panels");
                 ui.horizontal(|ui| {
                     ui.label(format!("{} open", self.panes.len()));
-                    if ui.button("+ New panel").on_hover_text("Ctrl+Shift+Enter").clicked() {
+                    if ui.button("+ New panel").on_hover_text(self.key_hint(Command::NewPanel).unwrap_or_default()).clicked() {
                         self.acts.push(Act::OpenPanel(self.active, None));
                     }
-                    if self.panes.len() > 1 && ui.button("Close active").on_hover_text("Ctrl+Shift+Q").clicked() {
+                    if self.panes.len() > 1 && ui.button("Close active").on_hover_text(self.key_hint(Command::ClosePanel).unwrap_or_default()).clicked() {
                         self.acts.push(Act::ClosePanel(self.active));
                     }
                 });
@@ -464,18 +465,24 @@ impl App {
                 ui.end_row();
             });
             settings_section(ui, "Files & folders", accent);
-            ui.checkbox(&mut self.st.show_hidden, "Show hidden files and folders   (Ctrl+H)");
+            let label = self.tip("Show hidden files and folders", Command::ToggleHidden);
+            ui.checkbox(&mut self.st.show_hidden, label);
             ui.checkbox(&mut self.st.show_extensions, "Show file extensions");
             ui.checkbox(&mut self.st.age_colors, "Color the Age column by file age");
             ui.checkbox(&mut self.st.mebibytes, "Use old definition of Megabyte (MiB, as in Windows Explorer)");
             ui.checkbox(&mut self.st.sorting.folders_on_top, "Keep folders above files");
             settings_section(ui, "Workspace", accent);
-            ui.checkbox(&mut self.st.show_columns, "Show folder columns   ( ` )");
+            let label = self.tip("Show folder columns", Command::ToggleColumns);
+            ui.checkbox(&mut self.st.show_columns, label);
             ui.checkbox(&mut self.st.show_preview, "Show preview / file details pane");
             ui.checkbox(&mut self.st.show_sidebar, "Show sidebar");
             settings_section(ui, "Keyboard", accent);
             ui.checkbox(&mut self.st.vim_keys, "Neovim-style keys");
             ui.label(RichText::new("j, k, h, l move, / filters, and letters no longer filter as you type.").color(weak).size(11.0));
+            if ui.button("Customize shortcuts…").clicked() {
+                let layer = if self.st.vim_keys { crate::keymap::Layer::Neovim } else { crate::keymap::Layer::Standard };
+                self.shortcuts = Some(crate::ui_keys::ShortcutsWindow::new(layer));
+            }
             settings_section(ui, "Sidebar groups", accent);
             ui.checkbox(&mut self.st.show_cloud, "Show automatically detected Cloud folders");
             ui.label(RichText::new("Cloud lists local sync folders, detected from OneDrive settings and folder names in your home directory.").color(weak).size(11.0));

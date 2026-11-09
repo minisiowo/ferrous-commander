@@ -334,6 +334,7 @@ pub struct App {
     pub st: Settings,
     pub keys: crate::keymap::Keymap,
     pub matcher: crate::keymap::Matcher,
+    pub shortcuts: Option<crate::ui_keys::ShortcutsWindow>,
     pub pal: Palette,
     pub panes: Vec<Pane>,
     pub tiles: Tile,
@@ -581,6 +582,7 @@ impl App {
             pal: Palette::get(st.theme, accent),
             keys: crate::keymap::Keymap::new(&st.keymap),
             matcher: Default::default(),
+            shortcuts: None,
             st,
             panes,
             tiles,
@@ -1856,10 +1858,8 @@ impl App {
             Act::ToOther(i, mv) => {
                 let o = self.other(i);
                 if o == i {
-                    self.toast(
-                        ToastKind::Info,
-                        "Open a second panel first (Ctrl+Shift+Enter)",
-                    );
+                    let message = self.tip("Open a second panel first", crate::keymap::Command::NewPanel);
+                    self.toast(ToastKind::Info, message);
                     return;
                 }
                 let dest = self.panes[o].path().to_path_buf();

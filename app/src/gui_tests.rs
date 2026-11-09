@@ -2040,3 +2040,93 @@ fn neovim_letters_stay_text_in_the_path_field() {
     assert_eq!(app.panes[0].cursor, None);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+fn screen() -> Rect {
+    Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))
+}
+
+fn recording(app: &mut App, layer: crate::keymap::Layer, target: crate::keymap::Target) {
+    let mut window = crate::ui_keys::ShortcutsWindow::new(layer);
+    window.capture = Some(crate::ui_keys::Capture { target, keys: Vec::new() });
+    app.shortcuts = Some(window);
+}
+
+fn recorded(app: &App) -> Vec<crate::keymap::Chord> {
+    app.shortcuts.as_ref().unwrap().capture.as_ref().unwrap().keys.clone()
+}
+
+fn click_button(ctx: &egui::Context, app: &mut App, text: &str) {
+    for _ in 0..3 { frame(ctx, app, vec![], Modifiers::NONE); }
+    let at = painted_at(ctx, app, text, screen());
+    click(ctx, app, at, Modifiers::NONE);
+}
+
+#[test]
+fn a_recorded_shortcut_replaces_its_old_owner_and_works() {
+    use crate::keymap::{Command, Layer, Target, parse_keys};
+    let (ctx, mut app, root) = neovim_app("record");
+    app.st.vim_keys = false;
+    recording(&mut app, Layer::Standard, Target::Command(Command::Refresh));
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+
+    key(&ctx, &mut app, Key::T, Modifiers::COMMAND);
+    assert_eq!(recorded(&app), parse_keys("ctrl+t").unwrap());
+    assert_eq!(app.panes[0].tabs.len(), 1, "recording keeps the key from doing its usual job");
+
+    click_button(&ctx, &mut app, "Replace");
+    assert!(app.shortcuts.as_ref().unwrap().capture.is_none());
+    assert_eq!(app.st.keymap.standard.bindings["refresh"], "f5, ctrl+t");
+    assert_eq!(app.st.keymap.standard.bindings["new_tab"], "");
+    app.shortcuts = None;
+    key(&ctx, &mut app, Key::T, Modifiers::COMMAND);
+    assert_eq!(app.panes[0].tabs.len(), 1, "the old command lost its shortcut");
+    assert_eq!(app.key_hint(Command::NewTab), None);
+    assert_eq!(app.tip("Create new tab", Command::NewTab), "Create new tab");
+    assert_eq!(app.tip("Refresh", Command::Refresh), "Refresh (F5)");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cancelling_a_recording_changes_nothing() {
+    use crate::keymap::{Command, Layer, Target};
+    let (ctx, mut app, root) = neovim_app("cancel");
+    recording(&mut app, Layer::Neovim, Target::Command(Command::Refresh));
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    word(&ctx, &mut app, "q");
+    assert_eq!(recorded(&app).len(), 1);
+    assert_eq!(app.panes[0].cursor, None);
+    click_button(&ctx, &mut app, "Cancel");
+    assert!(app.shortcuts.as_ref().unwrap().capture.is_none());
+    assert_eq!(app.st.keymap, Default::default());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_folder_of_your_own_opens_from_a_recorded_sequence() {
+    use crate::keymap::{Layer, Target, parse_keys};
+    let (ctx, mut app, root) = neovim_app("folder");
+    let wanted = root.join("dir07");
+    recording(&mut app, Layer::Neovim, Target::Folder(wanted.clone()));
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    word(&ctx, &mut app, "gp");
+    assert_eq!(recorded(&app), parse_keys("g p").unwrap());
+    click_button(&ctx, &mut app, "Save");
+    assert_eq!(app.st.keymap.neovim.folders.len(), 1);
+    app.shortcuts = None;
+    word(&ctx, &mut app, "gp");
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.panes[0].path(), wanted.as_path());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn enter_and_punctuation_can_be_recorded() {
+    use crate::keymap::{Command, Layer, Target, parse_keys};
+    let (ctx, mut app, root) = neovim_app("special");
+    recording(&mut app, Layer::Neovim, Target::Command(Command::Refresh));
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
+    type_key(&ctx, &mut app, Key::Slash, Modifiers::NONE, Some("/"));
+    assert_eq!(recorded(&app), parse_keys("enter /").unwrap());
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -309,6 +309,48 @@ impl KeymapSettings {
     }
 }
 
+impl KeymapSettings {
+    /// Removes what a new shortcut would clash with, leaving the target's own shortcuts.
+    pub fn clear_conflicts(&mut self, layer: Layer, keys: &[Chord], own: &Target) {
+        let visual = matches!(own, Target::Command(c) if c.visual_only());
+        for info in COMMANDS.iter().filter(|i| i.command.visual_only() == visual) {
+            if *own == Target::Command(info.command) { continue; }
+            let before = self.keys_of(layer, info);
+            let kept: Vec<Vec<Chord>> = before.iter().filter(|k| !clashes(k, keys)).cloned().collect();
+            if kept.len() != before.len() {
+                self.set_keys(layer, info, &kept);
+            }
+        }
+        if !visual {
+            self.layer_mut(layer).folders.retain(|f| {
+                Target::Folder(f.path.clone()) == *own || parse_keys(&f.keys).is_none_or(|k| !clashes(&k, keys))
+            });
+        }
+    }
+
+    /// Gives a command one more shortcut, or a folder its only one.
+    pub fn assign(&mut self, layer: Layer, target: &Target, keys: Vec<Chord>) {
+        match target {
+            Target::Command(command) => {
+                let info = command.info();
+                let mut all = self.keys_of(layer, info);
+                if !all.contains(&keys) {
+                    all.push(keys);
+                }
+                self.set_keys(layer, info, &all);
+            }
+            Target::Folder(path) => {
+                let stored = stored_keys(&keys);
+                let folders = &mut self.layer_mut(layer).folders;
+                match folders.iter_mut().find(|f| f.path == *path) {
+                    Some(folder) => folder.keys = stored,
+                    None => folders.push(FolderKey { keys: stored, path: path.clone() }),
+                }
+            }
+        }
+    }
+}
+
 /// How the keyboard is being read right now.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode { Standard, Normal, Visual }
@@ -710,6 +752,31 @@ mod tests {
         assert_eq!(conflict(&settings, Layer::Standard, &keys("f5"), &own), None, "a command does not clash with itself");
         let visual = Target::Command(Command::VisualCopy);
         assert_eq!(conflict(&settings, Layer::Neovim, &keys("y"), &visual), None, "visual shortcuts are apart");
+    }
+
+    #[test]
+    fn replacing_takes_the_keys_from_their_old_owner() {
+        let mut settings = KeymapSettings::default();
+        let refresh = Target::Command(Command::Refresh);
+        settings.clear_conflicts(Layer::Standard, &keys("ctrl+t"), &refresh);
+        settings.assign(Layer::Standard, &refresh, keys("ctrl+t"));
+        assert!(settings.keys_of(Layer::Standard, Command::NewTab.info()).is_empty());
+        assert_eq!(settings.standard.bindings["refresh"], "f5, ctrl+t");
+        let map = Keymap::new(&settings);
+        assert_eq!(last(&map, Mode::Standard, "ctrl+t"), run(Command::Refresh));
+        assert_eq!(conflict(&settings, Layer::Standard, &keys("ctrl+t"), &refresh), None);
+    }
+
+    #[test]
+    fn a_folder_has_one_shortcut_and_replacing_can_remove_it() {
+        let mut settings = KeymapSettings::default();
+        let folder = Target::Folder(PathBuf::from("/projects"));
+        settings.assign(Layer::Neovim, &folder, keys("g p"));
+        settings.assign(Layer::Neovim, &folder, keys("g o"));
+        assert_eq!(settings.neovim.folders, [FolderKey { keys: "g o".into(), path: "/projects".into() }]);
+        let down = Target::Command(Command::CursorDown);
+        settings.clear_conflicts(Layer::Neovim, &keys("g o"), &down);
+        assert!(settings.neovim.folders.is_empty());
     }
 
     #[test]

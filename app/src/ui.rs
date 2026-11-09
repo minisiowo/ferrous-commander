@@ -93,6 +93,15 @@ pub fn fit_text(painter: &egui::Painter, text: &str, font: &FontId, max_w: f32) 
     build(lo)
 }
 
+/// A menu entry with its shortcut at the right edge.
+pub fn menu_entry(ui: &mut Ui, text: impl Into<egui::WidgetText>, keys: Option<String>) -> egui::Response {
+    let button = egui::Button::new(text.into());
+    ui.add(match keys {
+        Some(keys) => button.shortcut_text(keys),
+        None => button,
+    })
+}
+
 pub fn icon_button(ui: &mut Ui, text: &str, tip: &str, on: bool, pal: &Palette) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(vec2(26.0, 24.0), Sense::click());
     let bg = if on {
@@ -302,6 +311,7 @@ impl App {
         self.preview_window_ui(&ctx);
         self.search_window(&ctx);
         self.settings_window(&ctx);
+        self.shortcuts_window(&ctx);
         self.overlays(&ctx);
         self.handle_drop(&ctx);
         self.end_frame(&ctx);
@@ -311,7 +321,7 @@ impl App {
     // ================================================================= keyboard
 
     fn keyboard(&mut self, ctx: &egui::Context) {
-        if self.dialog.is_some() || !self.notices.is_empty() || ctx.text_edit_focused() {
+        if self.dialog.is_some() || !self.notices.is_empty() || ctx.text_edit_focused() || self.recording_shortcut() {
             self.matcher.clear();
             return;
         }
@@ -376,6 +386,19 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// The shortcut to show for a command, if it has one that works right now.
+    pub(crate) fn key_hint(&self, command: Command) -> Option<String> {
+        self.keys.label(self.key_mode(self.active), command)
+    }
+
+    /// A tooltip naming the command's shortcut.
+    pub(crate) fn tip(&self, text: &str, command: Command) -> String {
+        match self.key_hint(command) {
+            Some(keys) => format!("{text} ({keys})"),
+            None => text.to_string(),
         }
     }
 
@@ -683,14 +706,14 @@ impl App {
                         for pane in &mut self.panes { pane.view_key = None; pane.view.clear(); }
                         self.mark_dirty();
                     }
-                    let tip = "Open a new panel next to the active one (Ctrl+Shift+Enter)";
+                    let tip = &self.tip("Open a new panel next to the active one", Command::NewPanel);
                     if icon_button(ui, "#dual", tip, false, &pal).clicked() {
                         self.acts.push(Act::OpenPanel(self.active, None));
                     }
                     if icon_button(
                         ui,
                         "👁",
-                        "Toggle hidden files (Ctrl+H)",
+                        &self.tip("Toggle hidden files", Command::ToggleHidden),
                         self.st.show_hidden,
                         &pal,
                     )
@@ -699,7 +722,7 @@ impl App {
                         self.st.show_hidden = !self.st.show_hidden;
                         self.mark_dirty();
                     }
-                    let tip = "Search files starting from currently opened folder (Ctrl+F)";
+                    let tip = &self.tip("Search files starting from currently opened folder", Command::Search);
                     if icon_button(ui, "🔍", tip, self.search.is_some(), &pal).clicked() {
                         self.acts.push(Act::Search(self.active));
                     }
@@ -1455,7 +1478,7 @@ impl App {
                     FontId::proportional(14.0),
                     pal.text_weak,
                 );
-                if xresp.on_hover_text("Close tab (Ctrl+W)").clicked() {
+                if xresp.on_hover_text(self.tip("Close tab", Command::CloseTab)).clicked() {
                     self.acts.push(Act::CloseTab(i, t));
                     continue;
                 }
@@ -1540,7 +1563,7 @@ impl App {
         if panel_btn(
             ui,
             "#dual",
-            "Open a new panel next to this one (Ctrl+Shift+Enter)",
+            &self.tip("Open a new panel next to this one", Command::NewPanel),
             "split",
         ) {
             self.acts.push(Act::OpenPanel(i, None));
@@ -1549,7 +1572,7 @@ impl App {
             && panel_btn(
                 ui,
                 "#flip",
-                "Flip this panel's split direction (Ctrl+Shift+J)",
+                &self.tip("Flip this panel's split direction", Command::ToggleSplit),
                 "flip",
             )
         {
@@ -1567,7 +1590,7 @@ impl App {
             FontId::proportional(17.0),
             pal.text_weak,
         );
-        if presp.on_hover_text("Create new tab (Ctrl+T)").clicked() {
+        if presp.on_hover_text(self.tip("Create new tab", Command::NewTab)).clicked() {
             self.acts.push(Act::NewTab(i));
         }
     }

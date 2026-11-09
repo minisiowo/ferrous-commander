@@ -8,12 +8,13 @@ use egui::{
     StrokeKind, Ui, UiBuilder, pos2, vec2,
 };
 
+use crate::keymap::Command;
 use crate::app::{Act, App, CrumbDrag, DragPaths, DropTarget, ToastKind, is_computer};
 use crate::preview::{Key as PreviewKey, PreviewContent};
 use crate::fsx::{self, Entry, SortBy};
 use crate::icons;
 use crate::theme::{TAGS, blend, hex};
-use crate::ui::{chip, sort_chip, fit_text, icon_button, take_bottom, take_left, take_top};
+use crate::ui::{chip, sort_chip, fit_text, icon_button, menu_entry, take_bottom, take_left, take_top};
 
 thread_local! {
     static OPEN_WITH: std::cell::RefCell<std::collections::HashMap<String, AppMenu>> = Default::default();
@@ -238,7 +239,7 @@ impl App {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         let tab = &self.panes[i].tabs[self.panes[i].active];
                         let (can_back, can_fwd) = (!tab.back.is_empty(), !tab.fwd.is_empty());
-                        if icon_button(ui, "⬆", "Open parent folder (Backspace)", false, &pal)
+                        if icon_button(ui, "⬆", &self.tip("Open parent folder", Command::ParentOrErase), false, &pal)
                             .clicked()
                         {
                             self.acts.push(Act::Up(i));
@@ -267,7 +268,7 @@ impl App {
                         {
                             self.acts.push(Act::Forward(i));
                         }
-                        if icon_button(ui, "⟳", "Refresh content (F5)", false, &pal).clicked() {
+                        if icon_button(ui, "⟳", &self.tip("Refresh content", Command::Refresh), false, &pal).clicked() {
                             self.acts.push(Act::Refresh);
                         }
                         ui.add_space(8.0);
@@ -297,43 +298,43 @@ impl App {
                             self.acts.push(Act::ToggleFoldersOnTop(i));
                         }
                         ui.add_space(6.0);
-                        if icon_button(ui, ">_", "Open in command shell (F10)", false, &pal)
+                        if icon_button(ui, ">_", &self.tip("Open in command shell", Command::Terminal), false, &pal)
                             .clicked()
                         {
                             self.acts.push(Act::Terminal(self.panes[i].path().to_path_buf()));
                         }
-                        if icon_button(ui, "🗋", "Create new file (Ctrl+N)", false, &pal).clicked()
+                        if icon_button(ui, "🗋", &self.tip("Create new file", Command::NewFile), false, &pal).clicked()
                         {
                             self.acts.push(Act::NewFile(i));
                         }
-                        if icon_button(ui, "🗀", "Create new folder (Ctrl+Shift+N)", false, &pal)
+                        if icon_button(ui, "🗀", &self.tip("Create new folder", Command::NewFolder), false, &pal)
                             .clicked()
                         {
                             self.acts.push(Act::NewFolder(i));
                         }
                         if !self.panes[i].selected.is_empty() {
                             ui.add_space(6.0);
-                            if icon_button(ui, "🗑", "Delete selected items (Del)", false, &pal)
+                            if icon_button(ui, "🗑", &self.tip("Delete selected items", Command::Delete), false, &pal)
                                 .clicked()
                             {
                                 self.acts.push(Act::Delete(i));
                             }
-                            if icon_button(ui, "✏", "Rename (F2)", false, &pal).clicked() {
+                            if icon_button(ui, "✏", &self.tip("Rename", Command::Rename), false, &pal).clicked() {
                                 self.acts.push(Act::Rename(i));
                             }
-                            if icon_button(ui, "🗐", "Copy to Clipboard (Ctrl+C)", false, &pal)
+                            if icon_button(ui, "🗐", &self.tip("Copy to Clipboard", Command::Copy), false, &pal)
                                 .clicked()
                             {
                                 self.acts.push(Act::Copy(i));
                             }
-                            if icon_button(ui, "✂", "Cut to Clipboard (Ctrl+X)", false, &pal)
+                            if icon_button(ui, "✂", &self.tip("Cut to Clipboard", Command::Cut), false, &pal)
                                 .clicked()
                             {
                                 self.acts.push(Act::Cut(i));
                             }
                         }
                         if self.can_paste_files()
-                            && icon_button(ui, "📋", "Paste from Clipboard (Ctrl+V)", false, &pal)
+                            && icon_button(ui, "📋", &self.tip("Paste from Clipboard", Command::Paste), false, &pal)
                                 .clicked()
                         {
                             self.acts.push(Act::Paste(i, None));
@@ -503,7 +504,7 @@ impl App {
                     pal.text_weak,
                 );
             }
-            if resp.on_hover_text("Edit path (\\, Alt+D or Ctrl+L)").clicked() {
+            if resp.on_hover_text(self.tip("Edit path", Command::EditPath)).clicked() {
                 self.panes[i].path_edit = Some(path.display().to_string());
             }
         }
@@ -1012,6 +1013,12 @@ impl App {
                 ui.close();
             }
         };
+        let keyed = |ui: &mut Ui, label: &str, keys: Option<String>, a: Act, acts: &mut Vec<Act>| {
+            if menu_entry(ui, label, keys).clicked() {
+                acts.push(a);
+                ui.close();
+            }
+        };
         let mut acts = Vec::new();
         // The listing is temporarily outside the cache while rows are painted,
         // so selection(i) cannot resolve its entries here.
@@ -1079,8 +1086,8 @@ impl App {
             });
         }
         ui.separator();
-        act(ui, "Copy                 Ctrl+C", Act::Copy(i), &mut acts);
-        act(ui, "Cut                   Ctrl+X", Act::Cut(i), &mut acts);
+        keyed(ui, "Copy", self.key_hint(Command::Copy), Act::Copy(i), &mut acts);
+        keyed(ui, "Cut", self.key_hint(Command::Cut), Act::Cut(i), &mut acts);
         if self.can_paste_files() && e.is_dir {
             act(
                 ui,
@@ -1111,16 +1118,11 @@ impl App {
             });
         }
         ui.separator();
-        act(ui, "Rename               F2", Act::Rename(i), &mut acts);
-        act(
-            ui,
-            "Duplicate            Ctrl+D",
-            Act::Duplicate(i),
-            &mut acts,
-        );
+        keyed(ui, "Rename", self.key_hint(Command::Rename), Act::Rename(i), &mut acts);
+        keyed(ui, "Duplicate", self.key_hint(Command::Duplicate), Act::Duplicate(i), &mut acts);
         act(ui, "Copy as path", Act::CopyPath(i), &mut acts);
         #[cfg(target_os = "linux")]
-        act(ui, "Properties / Permissions   Alt+Enter", Act::Properties(e.path.clone()), &mut acts);
+        keyed(ui, "Properties / Permissions", self.key_hint(Command::Properties), Act::Properties(e.path.clone()), &mut acts);
         self.path_color_menu(ui, if e.is_dir { "Folder color" } else { "Tag (Color)" }, paths.clone());
         if e.is_dir {
             let groups: Vec<String> = self.st.favorites.iter().map(|g| g.name.clone()).collect();
@@ -1132,10 +1134,7 @@ impl App {
         }
         act(ui, "Compress...", Act::Compress(i, paths), &mut acts);
         ui.separator();
-        if ui
-            .button(RichText::new("Delete                Del").color(hex("#ef7063")))
-            .clicked()
-        {
+        if menu_entry(ui, RichText::new("Delete").color(hex("#ef7063")), self.key_hint(Command::Delete)).clicked() {
             acts.push(Act::Delete(i));
             ui.close();
         }
@@ -1144,21 +1143,21 @@ impl App {
 
     fn background_menu(&mut self, ui: &mut Ui, i: usize) {
         let mut acts = Vec::new();
-        if self.can_paste_files() && ui.button("Paste                 Ctrl+V").clicked() {
+        if self.can_paste_files() && menu_entry(ui, "Paste", self.key_hint(Command::Paste)).clicked() {
             acts.push(Act::Paste(i, None));
             ui.close();
         }
         ui.menu_button("New...", |ui| {
-            if ui.button("Folder     Ctrl+Shift+N").clicked() {
+            if menu_entry(ui, "Folder", self.key_hint(Command::NewFolder)).clicked() {
                 acts.push(Act::NewFolder(i));
                 ui.close();
             }
-            if ui.button("File          Ctrl+N").clicked() {
+            if menu_entry(ui, "File", self.key_hint(Command::NewFile)).clicked() {
                 acts.push(Act::NewFile(i));
                 ui.close();
             }
         });
-        if ui.button("Select all          Ctrl+A").clicked() {
+        if menu_entry(ui, "Select all", self.key_hint(Command::SelectAll)).clicked() {
             acts.push(Act::SelectAll(i));
             ui.close();
         }
@@ -1167,7 +1166,7 @@ impl App {
                 .copy_text(self.panes[i].path().display().to_string());
             ui.close();
         }
-        if ui.button("Open in command shell   F10").clicked() {
+        if menu_entry(ui, "Open in command shell", self.key_hint(Command::Terminal)).clicked() {
             acts.push(Act::Terminal(self.panes[i].path().to_path_buf()));
             ui.close();
         }
@@ -1176,7 +1175,7 @@ impl App {
             acts.push(Act::Properties(self.panes[i].path().to_path_buf()));
             ui.close();
         }
-        if ui.button("Refresh everything        F5").clicked() {
+        if menu_entry(ui, "Refresh everything", self.key_hint(Command::Refresh)).clicked() {
             acts.push(Act::Refresh);
             ui.close();
         }

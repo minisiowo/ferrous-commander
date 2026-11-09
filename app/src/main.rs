@@ -28,6 +28,7 @@ mod settings;
 mod theme;
 mod tiles;
 mod ui;
+mod ui_keys;
 mod ui_list;
 mod ui_win;
 #[cfg(windows)]
