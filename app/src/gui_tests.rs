@@ -1710,6 +1710,26 @@ fn painted_at(ctx: &egui::Context, app: &mut App, wanted: &str, pane: Rect) -> P
 }
 
 #[test]
+fn a_hidden_sidebar_section_leaves_no_extra_gap() {
+    use crate::app::DropTarget;
+    use crate::settings::{FavGroup, SidebarSection};
+    let root = std::env::temp_dir().join(format!("fc_sidebar_gap_{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(root.join("unused.png")));
+    app.st.favorites = vec![FavGroup::new("One", vec![root.clone()]), FavGroup::new("Two", vec![root.clone()])];
+    app.st.show_history = false;
+    app.st.sidebar_order = vec![SidebarSection::Favorite(0), SidebarSection::History,
+        SidebarSection::Favorite(1), SidebarSection::Drives, SidebarSection::Cloud];
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    let cards: Vec<Rect> = app.drop_zones.iter()
+        .filter_map(|(r, t)| matches!(t, DropTarget::Favorites { .. }).then_some(*r)).collect();
+    assert_eq!(cards.len(), 2);
+    assert_eq!(cards[1].min.y - cards[0].max.y, crate::tiles::GAP);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn text_stays_put_when_it_becomes_editable() {
     use crate::app::Tab;
     let root = std::env::temp_dir().join(format!("fc_in_place_{}", std::process::id()));

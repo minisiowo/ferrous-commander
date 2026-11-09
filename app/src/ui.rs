@@ -737,15 +737,21 @@ impl App {
                 .id_salt("sidebar_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 8.0;
+                    ui.spacing_mut().item_spacing.y = crate::tiles::GAP;
                     self.st.normalize_sidebar();
                     for section in self.st.sidebar_order.clone() {
+                        // A hidden section must add no space of its own between the cards.
+                        let shown = match section {
+                            SidebarSection::Cloud => self.st.show_cloud && !self.cloud.is_empty(),
+                            SidebarSection::History => self.st.show_history,
+                            _ => true,
+                        };
+                        if !shown { continue; }
                         ui.push_id(("section", format!("{section:?}")), |ui| match section {
                             SidebarSection::Drives => self.drives_card(ui),
-                            SidebarSection::Cloud if self.st.show_cloud && !self.cloud.is_empty() => self.cloud_card(ui),
+                            SidebarSection::Cloud => self.cloud_card(ui),
                             SidebarSection::Favorite(g) => self.fav_group(ui, g),
-                            SidebarSection::History if self.st.show_history => self.history_card(ui),
-                            _ => {}
+                            SidebarSection::History => self.history_card(ui),
                         });
                     }
                     ui.vertical_centered(|ui| {
