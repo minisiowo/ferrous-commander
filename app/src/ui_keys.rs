@@ -94,19 +94,19 @@ impl App {
         let pal = self.pal;
         const COLUMN: f32 = 230.0;
         let screen = ctx.input(|i| i.content_rect());
-        let columns = (((screen.width() - 60.0) / COLUMN).floor() as usize).clamp(1, 4).min(hints.len());
+        let columns = (((screen.width() - 60.0) / COLUMN).floor() as usize).clamp(1, 2).min(hints.len());
         let rows = hints.len().div_ceil(columns);
         let pending = self.matcher.pending();
         egui::Area::new(egui::Id::unique("which_key"))
-            .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -34.0))
+            .anchor(Align2::RIGHT_BOTTOM, vec2(-10.0, -34.0))
             .order(egui::Order::Foreground)
             .interactable(false)
             .show(ctx, |ui| {
-                Frame::NONE.fill(pal.raised).corner_radius(CornerRadius::same(1))
-                    .stroke(Stroke::new(1.0, pal.accent)).inner_margin(Margin::symmetric(14, 10))
+                Frame::NONE.fill(pal.panel).corner_radius(CornerRadius::same(1))
+                    .stroke(Stroke::new(1.0, pal.border)).inner_margin(Margin::symmetric(12, 8))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(pending).monospace().strong().color(pal.accent));
+                            ui.label(RichText::new(pending).monospace().color(pal.text_weak));
                             ui.label(RichText::new("Esc cancels").size(11.0).color(pal.text_weak));
                         });
                         ui.add_space(4.0);
@@ -115,8 +115,8 @@ impl App {
                                 for column in 0..columns {
                                     match hints.get(row + column * rows) {
                                         Some(hint) => {
-                                            ui.label(RichText::new(hint.key.label()).monospace().strong().color(pal.accent));
-                                            ui.add(egui::Label::new(RichText::new(&hint.label).color(pal.text)).wrap_mode(egui::TextWrapMode::Extend));
+                                            ui.label(RichText::new(hint.key.label()).monospace().color(pal.text));
+                                            ui.add(egui::Label::new(RichText::new(&hint.label).color(pal.text_weak)).wrap_mode(egui::TextWrapMode::Extend));
                                         }
                                         None => { ui.label(""); ui.label(""); }
                                     }
