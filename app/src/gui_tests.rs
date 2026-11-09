@@ -1653,6 +1653,8 @@ fn the_path_field_completes_folders_in_its_own_line() {
     let ctx = egui::Context::default();
     let mut app = App::new(Some(root.join("unused.png")));
     app.st.show_hidden = false;
+    // A temporary folder can be a long path, and a suggestion past the field's end is not seen.
+    while app.panes.len() > 1 { app.close_panel(app.panes.len() - 1); }
     app.panes[0].tab().path = root.clone();
     app.active = 0;
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
@@ -1878,7 +1880,9 @@ fn tabs_and_path_pieces_become_shortcuts_without_moving_anything() {
     assert!(app.jobs.is_empty(), "no file operation starts");
     assert!(two.is_dir() && kept.is_dir(), "folders stay where they are");
 
-    // "This PC" is no folder, so it cannot be dragged.
+    // "This PC" is no folder, so it cannot be dragged. A long path would leave it out.
+    app.panes[0].tabs = vec![Tab::new(root.ancestors().last().unwrap().to_path_buf())];
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
     let computer = painted_at(&ctx, &mut app, "This PC", a);
     let favorites = app.st.favorites[0].paths.clone();
     let c = card(&app);

@@ -785,7 +785,8 @@ impl App {
         #[cfg(windows)]
         {
             let sequence = crate::file_transfer::sequence();
-            if self.clip_sequence != sequence
+            // A picture or a test must not show what happens to be on the real clipboard.
+            if self.shot.is_none() && self.clip_sequence != sequence
                 && let Ok(files) = crate::file_transfer::read() {
                     self.clip = files.map(|(paths, cut)| (paths.into(), cut));
                     self.clip_sequence = sequence;
