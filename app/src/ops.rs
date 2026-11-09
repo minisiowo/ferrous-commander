@@ -200,20 +200,10 @@ fn recycle_blocker(_path: &Path) -> Option<String> {
     { None }
 }
 
-/// The Shell parses plain paths, so it would resolve `report.` to a neighbouring
-/// `report` and delete that instead. Renaming works on such items, because it does not
-/// go through the Shell.
-#[cfg(windows)]
-fn shell_can_address(path: &Path) -> bool {
-    path.components().all(|c| match c {
-        std::path::Component::Normal(name) => name.to_str().is_some_and(fsx::valid_name),
-        _ => true,
-    })
-}
-
 fn shell_delete(src: &Path) -> Result<Option<PathBuf>, String> {
+    // Renaming works on such items, because it does not go through the Shell.
     #[cfg(windows)]
-    if !shell_can_address(src) {
+    if !proven::shell_can_address(src) {
         return Err("Windows cannot safely delete an item with this name. Nothing was deleted; rename it first".into());
     }
     trash::delete(src).map_err(|e| e.to_string())?;
@@ -240,6 +230,12 @@ fn destroy(src: &Path) -> Result<Option<PathBuf>, String> {
         std::fs::remove_dir(src)
     } else {
         std::fs::remove_file(src)
+    };
+    // Shares and FAT honour the read-only attribute, which the user has just overruled.
+    #[cfg(windows)]
+    let removed = match removed {
+        Err(e) if e.raw_os_error() == Some(5) => proven::remove_staged(src),
+        other => other,
     };
     #[cfg(target_os = "linux")]
     if md.is_dir() && let Some(parent) = src.parent() { proven::settle_freed_folders(parent); }
@@ -502,13 +498,13 @@ fn move_by_copy(src: &Path, dest_dir: &Path, cancel: &AtomicBool) -> Result<Path
         let mut proof = Vec::new();
         let target = copy_checked(src, dest_dir, cancel, |payload| {
             proof = proven::verify(src, payload, cancel).map_err(|e| e.to_string())?;
+            #[cfg(windows)]
+            proven::streams_survive(src, payload).map_err(|e| e.to_string())?;
             Ok(())
         }).map_err(|e| if e == "Cancelled" { e } else { format!("Source kept: {e}") })?;
         #[cfg(windows)]
-        {
-            proven::flush_entry(&target);
-            proven::flush_entry(dest_dir);
-        }
+        proven::flush_entry(&target).and_then(|()| proven::flush_entry(dest_dir))
+            .map_err(|e| format!("Source kept: the copy at {} may not have reached the drive: {e}", shown(&target)))?;
         // The verified data is on the device; its final name must be too.
         #[cfg(target_os = "linux")]
         proven::sync(dest_dir).map_err(|e| format!("Source kept: the copy at {} may not have reached the drive: {e}", shown(&target)))?;

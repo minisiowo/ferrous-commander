@@ -27,6 +27,10 @@ impl Rng {
     fn chance(&mut self, percent: u64) -> bool { self.below(100) < percent }
 }
 
+#[cfg(windows)]
+#[path = "windows_campaign_tests.rs"]
+mod campaign;
+
 #[derive(Clone, Copy)]
 struct Profile { links: bool, raw_names: bool, special: bool }
 #[cfg(unix)]
@@ -342,8 +346,19 @@ fn random_trees_survive_copy_cancel_and_writes_across_filesystems() {
     let Some(there) = other_filesystem() else { eprintln!("Skipped: no second filesystem"); return };
     // A round through a share takes seconds. FERROUS_CHAOS_ROUNDS asks for the full forty.
     let count = std::env::var("FERROUS_CHAOS_ROUNDS").ok().and_then(|n| n.parse().ok());
-    rounds(&there, "cross", count.unwrap_or(if cfg!(windows) { 8 } else { 40 }), full());
+    rounds(&there, "cross", count.unwrap_or(if cfg!(windows) { 8 } else { 40 }), full_at(&there));
 }
+
+/// A share refuses new links even where Developer Mode allows them on a local disk.
+#[cfg(windows)]
+fn full_at(there: &Path) -> Profile {
+    let at = there.join(format!("fc_chaos_link_{}", std::process::id()));
+    let links = full().links && std::os::windows::fs::symlink_file("missing target", &at).is_ok();
+    let _ = std::fs::remove_file(&at);
+    Profile { links, ..full() }
+}
+#[cfg(unix)]
+fn full_at(_: &Path) -> Profile { full() }
 
 /// FERROUS_FS_TARGETS="/run/media/$USER/STICK" cargo test real_mount_chaos -- --ignored --nocapture
 #[test]

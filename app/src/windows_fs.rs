@@ -15,6 +15,8 @@ unsafe extern "system" {
     fn GetVolumePathNameW(path: *const u16, volume: *mut u16, len: u32) -> i32;
     fn GetVolumeNameForVolumeMountPointW(mount: *const u16, volume: *mut u16, len: u32) -> i32;
     fn GetDriveTypeW(root: *const u16) -> u32;
+    fn FindFirstStreamW(name: *const u16, level: i32, data: *mut StreamData, flags: u32) -> *mut c_void;
+    fn FindNextStreamW(find: *mut c_void, data: *mut StreamData) -> i32;
 }
 #[link(name = "shell32")]
 unsafe extern "system" {
@@ -29,6 +31,8 @@ unsafe extern "system" {
 struct FindData { attributes: u32, times: [u32; 6], size: [u32; 2], reserved: [u32; 2], name: [u16; 260], short: [u16; 14] }
 #[repr(C)]
 struct RecycleInfo { size: u32, bytes: i64, items: i64 }
+#[repr(C)]
+struct StreamData { size: i64, name: [u16; 296] }
 
 const REPARSE_SYMLINK: u32 = 0xA000000C;
 
@@ -57,6 +61,15 @@ pub fn shown(path: &Path) -> PathBuf {
         else if raw.starts_with(&[92, 92, 63, 92]) { raw[4..].to_vec() }
         else { raw };
     PathBuf::from(OsString::from_wide(&out))
+}
+
+/// The Shell parses plain paths, so it would resolve `report.` to a neighbouring `report`
+/// and `nul` to a device. Nothing handed to it may contain such a name.
+pub fn shell_can_address(path: &Path) -> bool {
+    path.components().all(|c| match c {
+        Component::Normal(name) => name.to_str().is_some_and(crate::fsx::valid_name),
+        _ => true,
+    })
 }
 
 /// Extended absolute UTF-16 paths, including UNC. No lossy UTF-8 conversion.
@@ -135,7 +148,7 @@ pub fn copy(src: &Path, dst: &Path, cancel: &AtomicBool) -> io::Result<()> {
         }
         let target = fs::read_link(src)?;
         return if ft.is_symlink_dir() { std::os::windows::fs::symlink_dir(target, dst) }
-            else { std::os::windows::fs::symlink_file(target, dst) };
+            else { std::os::windows::fs::symlink_file(target, dst) }.map_err(|e| naming(e, src));
     }
     // Any other reparse point (OneDrive placeholders, deduplication) is ordinary
     // content to read: Windows delivers the real data.
@@ -154,12 +167,62 @@ pub fn copy(src: &Path, dst: &Path, cancel: &AtomicBool) -> io::Result<()> {
         // FAIL_IF_EXISTS | COPY_SYMLINK. CopyFileEx retains alternate streams,
         // timestamps, extended attributes and encryption without silent decryption.
         let ok = unsafe { CopyFileExW(src_wide.as_ptr(), dst_wide.as_ptr(), Some(progress), (cancel as *const AtomicBool).cast_mut().cast(), std::ptr::null_mut(), 0x1 | 0x800) };
-        if ok == 0 { Err(io::Error::last_os_error()) } else { copy_times(dst, &md, false) }
+        if ok == 0 { Err(naming(io::Error::last_os_error(), src)) } else { copy_times(dst, &md, false).map_err(|e| naming(e, src)) }
     } else { Err(io::Error::new(io::ErrorKind::Unsupported, "Unsupported file type")) }
 }
 
 fn changed(what: &str, path: &Path) -> io::Error {
     io::Error::other(format!("{what}: {}", shown(path).display()))
+}
+
+/// One item failing stops a whole folder, so the message has to say which item it was.
+fn naming(error: io::Error, path: &Path) -> io::Error {
+    io::Error::new(error.kind(), format!("{error}: {}", shown(path).display()))
+}
+
+/// Named data streams and their sizes. Empty where the filesystem has no streams. A file's
+/// download mark does not count: it never survives outside NTFS, and nothing is lost with it.
+fn named_streams(path: &Path) -> io::Result<Vec<(Vec<u16>, i64)>> {
+    let wide = wide_path(path)?;
+    let plain: [Vec<u16>; 3] = ["::$DATA", ":Zone.Identifier:$DATA", ":SmartScreen:$DATA"].map(|n| n.encode_utf16().collect());
+    let mut found = Vec::new();
+    // SAFETY: zeroed plain data filled by the calls; the handle is closed before returning.
+    unsafe {
+        let mut data: StreamData = std::mem::zeroed();
+        let find = FindFirstStreamW(wide.as_ptr(), 0, &mut data, 0);
+        if find as isize == -1 {
+            let error = io::Error::last_os_error();
+            // No streams at all, or a filesystem that does not know the idea.
+            return if matches!(error.raw_os_error(), Some(1 | 38 | 50 | 87)) { Ok(found) } else { Err(error) };
+        }
+        loop {
+            let end = data.name.iter().position(|c| *c == 0).unwrap_or(data.name.len());
+            if !plain.iter().any(|name| name.as_slice() == &data.name[..end]) { found.push((data.name[..end].to_vec(), data.size)); }
+            if FindNextStreamW(find, &mut data) == 0 { break; }
+        }
+        let error = io::Error::last_os_error();
+        FindClose(find);
+        if error.raw_os_error() != Some(38) { return Err(error); }
+    }
+    Ok(found)
+}
+
+/// A move removes the original, so anything the destination could not store would be gone
+/// for good. CopyFileEx reports success while dropping named streams on FAT and exFAT.
+pub fn streams_survive(src: &Path, dst: &Path) -> io::Result<()> {
+    let md = fs::symlink_metadata(src)?;
+    if md.file_type().is_symlink() { return Ok(()); }
+    let there = named_streams(dst)?;
+    if named_streams(src)?.iter().any(|stream| !there.contains(stream)) {
+        return Err(changed("This drive cannot store the extra data streams attached to the item. Copy it instead if they do not matter", src));
+    }
+    if md.is_dir() {
+        for child in fs::read_dir(src)? {
+            let child = child?;
+            streams_survive(&child.path(), &dst.join(child.file_name()))?;
+        }
+    }
+    Ok(())
 }
 
 /// One source entry whose copy was proven good, in removal order (children first).
@@ -187,6 +250,7 @@ fn verify_into(src: &Path, dst: &Path, cancel: &AtomicBool, proof: &mut Vec<Veri
             // A file created in the source mid-copy has no twin here and fails the check.
             verify_into(&child.path(), &dst.join(child.file_name()), cancel, proof)?;
         }
+        flush_entry(dst)?;
         Kept::Dir
     } else {
         if !d.is_file() || s.len() != d.len() { return Err(changed("Copied file has a different size", dst)); }
@@ -206,7 +270,8 @@ fn flush(path: &Path, md: &fs::Metadata) -> io::Result<()> {
     let readonly = flags & 0x1 != 0;
     // Flushing needs write access, which the read-only attribute forbids.
     if readonly { clear_readonly(path, md)?; }
-    let result = fs::OpenOptions::new().write(true).open(path).and_then(|file| file.sync_all());
+    // FILE_FLAG_BACKUP_SEMANTICS: folders can be opened only with it.
+    let result = fs::OpenOptions::new().write(true).custom_flags(0x02000000).open(path).and_then(|file| file.sync_all());
     if readonly { attributes(path, flags)?; }
     match result {
         // ERROR_INVALID_FUNCTION: this filesystem has no flush to offer.
@@ -215,10 +280,16 @@ fn flush(path: &Path, md: &fs::Metadata) -> io::Result<()> {
     }
 }
 
-/// Best effort for the entry itself: the verified data is already on disk.
-pub fn flush_entry(path: &Path) {
-    let file = fs::OpenOptions::new().write(true).custom_flags(0x02000000).open(path);
-    if let Ok(file) = file { let _ = file.sync_all(); }
+/// Force an entry's name out to the device. The source is removed next, so a failure here
+/// must stop the move. A folder we may add to but not open for writing cannot be flushed,
+/// such as the root of a system drive: that is no sign of a failing device.
+pub fn flush_entry(path: &Path) -> io::Result<()> {
+    let md = fs::symlink_metadata(path)?;
+    if md.file_type().is_symlink() { return Ok(()); }
+    match flush(path, &md) {
+        Err(e) if md.is_dir() && e.raw_os_error() == Some(5) => Ok(()),
+        other => other,
+    }
 }
 
 /// Compare contents, reading the copy from the device and not from Windows' cache.
@@ -322,7 +393,10 @@ pub fn recycle_blocker(path: &Path) -> Option<String> {
     const HKCU: isize = 0x80000001u32 as i32 as isize;
     const HKLM: isize = 0x80000002u32 as i32 as isize;
     const POLICY: &str = r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer";
-    let name: Vec<u16> = shown(path).as_os_str().encode_wide().chain(Some(0)).collect();
+    // The Shell is handed the real folder (the `trash` crate resolves links first), so that
+    // is the place to judge: a link on C: can lead to a share that has no Recycle Bin.
+    let Some(Ok(parent)) = path.parent().map(fs::canonicalize) else { return Some("its drive could not be identified".into()) };
+    let name: Vec<u16> = shown(&parent).as_os_str().encode_wide().chain(Some(0)).collect();
     let mut root = vec![0u16; name.len().max(261) + 1];
     // SAFETY: both buffers are live, NUL-terminated and sized for the call.
     if unsafe { GetVolumePathNameW(name.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
@@ -357,8 +431,8 @@ pub fn recycle_blocker(path: &Path) -> Option<String> {
     exceeds(path, megabytes << 20, &mut 0).then(|| format!("it is larger than this drive's Recycle Bin ({megabytes} MB)"))
 }
 
-/// Only used for our reserved staging directory. Never clears source attributes
-/// and never descends through a link or junction during failure cleanup.
+/// For our reserved staging directory and for what the user confirmed deleting for good:
+/// clears the read-only attribute and never descends through a link or junction.
 pub fn remove_staged(path: &Path) -> io::Result<()> {
     let md = fs::symlink_metadata(path)?;
     if md.is_dir() && !crate::fsx::is_link_like(&md) {
