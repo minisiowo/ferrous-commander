@@ -1710,6 +1710,39 @@ fn painted_at(ctx: &egui::Context, app: &mut App, wanted: &str, pane: Rect) -> P
 }
 
 #[test]
+fn text_stays_put_when_it_becomes_editable() {
+    use crate::app::Tab;
+    let root = std::env::temp_dir().join(format!("fc_in_place_{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let file = root.join("notes.txt");
+    std::fs::write(&file, "x").unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(root.join("unused.png")));
+    app.panes[0].tabs = vec![Tab::new(root.clone())];
+    app.panes[0].active = 0;
+    wait_for_rows(&ctx, &mut app, 1);
+    let pane = app.pane_rects.iter().find(|(k, _)| *k == 0).unwrap().1;
+    let near = |a: Pos2, b: Pos2| (a - b).length() <= 1.0;
+
+    let name = painted_at(&ctx, &mut app, "notes.txt", pane);
+    app.panes[0].rename = Some((file, "notes.txt".into()));
+    app.panes[0].rename_focus = true;
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    let editing = painted_at(&ctx, &mut app, "notes.txt", pane);
+    assert!(near(name, editing), "the name moved from {name:?} to {editing:?}");
+    app.panes[0].rename = None;
+
+    // The tab above carries the same folder name.
+    let below_tabs = Rect::from_min_max(pane.min + vec2(0.0, 30.0), pane.max);
+    let crumb = painted_at(&ctx, &mut app, &root.file_name().unwrap().to_string_lossy(), below_tabs);
+    let typed = root.display().to_string();
+    open_path_edit(&ctx, &mut app, typed.clone());
+    let field = painted_at(&ctx, &mut app, &typed, pane);
+    assert!((crumb.y - field.y).abs() <= 1.0, "the path moved from {} to {}", crumb.y, field.y);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn tabs_and_path_pieces_become_shortcuts_without_moving_anything() {
     use crate::app::{DropTarget, Tab};
     use crate::settings::{FavGroup, SidebarSection};

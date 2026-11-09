@@ -155,6 +155,31 @@ fn cursor_at_end(cursor: Option<CCursorRange>, text: &str) -> bool {
     })
 }
 
+/// The frame of a field that replaces text in place: no outline, so it looks no bigger
+/// than what it replaces, and `margin` puts its text where that text was.
+fn in_place_frame(ui: &Ui, margin: i8) -> egui::Frame {
+    egui::Frame::new()
+        .fill(ui.visuals().text_edit_bg_color())
+        .corner_radius(CornerRadius::same(1))
+        .inner_margin(egui::Margin::symmetric(margin, 0))
+}
+
+fn paint_path_icon(p: &egui::Painter, title_r: Rect, color: Color32) {
+    p.text(
+        title_r.left_center() + vec2(2.0, 0.0),
+        Align2::LEFT_CENTER,
+        "☰",
+        FontId::proportional(13.0),
+        color,
+    );
+}
+
+/// Where the crumbs of a path row start, and the path field with them.
+const CRUMBS_LEFT: f32 = 20.0;
+/// How far a crumb's text sits inside it, for the first one.
+const CRUMB_TEXT_LEFT: i8 = 5;
+const CRUMB_HEIGHT: f32 = 20.0;
+
 impl App {
     pub fn header(&mut self, ui: &mut Ui, i: usize, r: Rect) {
         let pal = self.pal;
@@ -170,8 +195,13 @@ impl App {
         if let Some(mut text) = self.panes[i].path_edit.take() {
             let mut keep = true;
             let id = ui.make_persistent_id(("path_edit", i));
+            paint_path_icon(&ui.painter_at(title_r), title_r, pal.text_weak);
+            let field_r = Rect::from_min_max(
+                pos2(title_r.min.x + CRUMBS_LEFT, title_r.center().y - CRUMB_HEIGHT / 2.0),
+                pos2(title_r.max.x, title_r.center().y + CRUMB_HEIGHT / 2.0),
+            );
             let scope = UiBuilder::new()
-                .max_rect(title_r)
+                .max_rect(field_r)
                 .layout(egui::Layout::centered_and_justified(egui::Direction::TopDown));
             ui.scope_builder(scope, |ui| {
                 let again = ui.input_mut(|inp| inp.consume_key(Modifiers::COMMAND, Key::L));
@@ -188,8 +218,9 @@ impl App {
                 let output = egui::TextEdit::singleline(&mut text)
                     .id(id)
                     .font(font.clone())
-                    .margin(egui::Margin::symmetric(4, 2))
-                    .desired_width(title_r.width())
+                    .frame(in_place_frame(ui, CRUMB_TEXT_LEFT))
+                    .align(Align2::LEFT_CENTER)
+                    .desired_width(field_r.width())
                     .hint_text("Path")
                     .lock_focus(true)
                     .show(ui);
@@ -409,14 +440,8 @@ impl App {
     fn breadcrumb(&mut self, ui: &mut Ui, i: usize, title_r: Rect, path: &std::path::Path) {
         let pal = self.pal;
         let p = ui.painter_at(title_r);
-        p.text(
-            title_r.left_center() + vec2(2.0, 0.0),
-            Align2::LEFT_CENTER,
-            "☰",
-            FontId::proportional(13.0),
-            pal.text_weak,
-        );
-        let mut x = title_r.min.x + 20.0;
+        paint_path_icon(&p, title_r, pal.text_weak);
+        let mut x = title_r.min.x + CRUMBS_LEFT;
         let crumbs = self.column_chain(path);
         let cfont = FontId::proportional(12.0);
         let labels: Vec<String> = crumbs
@@ -449,8 +474,8 @@ impl App {
                 break;
             }
             let cr = Rect::from_min_size(
-                pos2(x, title_r.center().y - 10.0),
-                vec2(widths[k] - 6.0, 20.0),
+                pos2(x, title_r.center().y - CRUMB_HEIGHT / 2.0),
+                vec2(widths[k] - 6.0, CRUMB_HEIGHT),
             );
             let sense = if is_computer(&crumbs[k]) { Sense::click() } else { Sense::click_and_drag() };
             let resp = ui.interact(cr, ui.scope_id().with(("crumb", i, k)), sense);
@@ -949,14 +974,16 @@ impl App {
         if renaming {
             let focus = self.panes[i].rename_focus;
             let enter = ui.input(|inp| inp.key_pressed(Key::Enter));
+            let frame = in_place_frame(ui, 4);
             if let Some((_, text)) = self.panes[i].rename.as_mut() {
                 let er = Rect::from_min_size(
-                    pos2(rr.min.x + 26.0 + tree_indent, rr.min.y + 1.0),
-                    vec2((cols[0].2 - 30.0 - tree_indent).max(30.0), rh - 2.0),
+                    pos2(rr.min.x + 26.0 + tree_indent, rr.min.y),
+                    vec2((cols[0].2 - 30.0 - tree_indent).max(30.0), rh),
                 );
                 let te = egui::TextEdit::singleline(text)
                     .font(FontId::proportional(self.st.font_size))
-                    .margin(vec2(4.0, 1.0));
+                    .frame(frame)
+                    .align(Align2::LEFT_CENTER);
                 let r = ui.put(er, te);
                 if focus {
                     r.request_focus();
