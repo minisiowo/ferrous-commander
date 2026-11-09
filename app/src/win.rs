@@ -96,6 +96,9 @@ pub fn open(path: &std::path::Path) -> std::io::Result<()> {
     const COINIT_DISABLE_OLE1DDE: u32 = 0x4;
     const SW_SHOWNORMAL: i32 = 1;
     let shown = crate::windows_fs::shown(path);
+    if !crate::windows_fs::shell_can_address(&shown) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Windows cannot safely open an item with this name; rename it first"));
+    }
     let file: Vec<u16> = shown.as_os_str().encode_wide().chain(Some(0)).collect();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -173,6 +176,23 @@ pub fn subst_target(letter: char) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `run.cmd.` and `run.cmd` are one name to the Shell, so opening the first ran the second.
+    #[test]
+    fn open_never_runs_a_neighbour_of_a_name_the_shell_cannot_address() {
+        let dir = std::env::temp_dir().join(format!("fc_open_dot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("ran");
+        std::fs::write(dir.join("run.cmd"), format!("@echo done> \"{}\"\r\n", marker.display())).unwrap();
+        let dotted = crate::windows_fs::exact(&dir.join("run.cmd.")).unwrap();
+        std::fs::write(&dotted, "harmless").unwrap();
+        assert!(open(&crate::windows_fs::shown(&dotted)).is_err(), "the Shell cannot open this name");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert!(!marker.exists(), "opening run.cmd. ran run.cmd");
+        std::fs::remove_file(dotted).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn open_runs_a_file_and_reports_a_missing_one() {

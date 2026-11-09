@@ -78,10 +78,13 @@ impl Drop for Pidl { fn drop(&mut self) { unsafe { CoTaskMemFree(self.0) } } }
 struct Data(Obj);
 impl Drop for Data { fn drop(&mut self) { if !self.0.is_null() { unsafe { ((**self.0).release)(self.0); } } } }
 
+const SHELL_NAME: &str = "Windows cannot safely handle an item with this name. Nothing was selected; rename it first";
+
 fn data(paths: &[PathBuf]) -> Result<Data, String> {
     if paths.is_empty() { return Err("No files selected".into()); }
     let mut pidls = Vec::new();
     for path in paths {
+        if !crate::windows_fs::shell_can_address(path) { return Err(SHELL_NAME.into()); }
         let path = std::path::absolute(path).map_err(|e| e.to_string())?;
         let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let mut pidl = ptr::null_mut();
@@ -132,6 +135,11 @@ pub fn write(paths: &[PathBuf], cut: bool) -> Result<(), String> {
     checked(unsafe { OleSetClipboard(object.0) })?;
     // Render formats now so Explorer can still paste after this app closes.
     checked(unsafe { OleFlushClipboard() })
+}
+/// A cut is used up once pasted, as in Explorer. Left on the clipboard, a second paste would
+/// move whatever has since appeared at the same paths.
+pub fn forget_cut() {
+    if let Ok(_ole) = Ole::new() { unsafe { OleSetClipboard(ptr::null_mut()); } }
 }
 pub fn drag(paths: &[PathBuf]) -> Result<bool, String> {
     let _ole = Ole::new()?;
@@ -273,6 +281,41 @@ mod tests {
         std::fs::remove_file(file).unwrap();
         std::fs::remove_dir(folder).unwrap();
         std::fs::remove_dir(nested).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    /// `report.` means the neighbouring `report` to the Shell: cutting one must not move the other.
+    #[test]
+    fn a_name_the_shell_cannot_address_is_refused_not_swapped() {
+        let root = std::env::temp_dir().join(format!("fc_dot_{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let _ole = Ole::new().unwrap();
+        std::fs::write(root.join("report"), b"neighbour").unwrap();
+        let dotted = crate::windows_fs::exact(&root.join("report.")).unwrap();
+        std::fs::write(&dotted, b"listed").unwrap();
+        assert!(data(&[crate::windows_fs::shown(&dotted)]).is_err(), "the selection would have been the neighbour");
+        std::fs::remove_file(dotted).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Uses the Windows clipboard; run explicitly with --ignored --test-threads=1"]
+    fn a_finished_cut_leaves_nothing_to_paste_again() {
+        let _ole = Ole::new().unwrap();
+        let mut previous = ptr::null_mut();
+        checked(unsafe { OleGetClipboard(&mut previous) }).unwrap();
+        struct Restore(Data);
+        impl Drop for Restore { fn drop(&mut self) { unsafe { OleSetClipboard(self.0.0); OleFlushClipboard(); } } }
+        let _restore = Restore(Data(previous));
+        let root = crate::windows_fs::shown(&std::fs::canonicalize(std::env::temp_dir()).unwrap()).join(format!("fc_cut_{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("cut.txt");
+        std::fs::write(&file, b"x").unwrap();
+        write(std::slice::from_ref(&file), true).unwrap();
+        assert_eq!(read().unwrap(), Some((vec![file.clone()], true)));
+        forget_cut();
+        assert_eq!(read().unwrap(), None, "a second paste would move whatever is at this path now");
+        std::fs::remove_file(file).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
 

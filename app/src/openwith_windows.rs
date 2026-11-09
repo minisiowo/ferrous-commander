@@ -58,8 +58,11 @@ impl Com {
 }
 impl Drop for Com { fn drop(&mut self) { unsafe { CoUninitialize() } } }
 
+const SHELL_NAME: &str = "Windows cannot safely open an item with this name; rename it first";
+
 pub fn choose_app(path: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
+    if !crate::windows_fs::shell_can_address(path) { return Err(SHELL_NAME.into()); }
     let path = std::path::absolute(path).map_err(|e| e.to_string())?;
     if !path.is_file() { return Err("The selected file no longer exists".into()); }
     let _com = Com::new()?;
@@ -121,6 +124,7 @@ pub fn apps_for(path: &Path) -> Vec<AppEntry> {
     apps
 }
 pub fn launch(path: &Path, app: &AppEntry) -> Result<(), String> {
+    if !crate::windows_fs::shell_can_address(path) { return Err(SHELL_NAME.into()); }
     let path = std::path::absolute(path).map_err(|e| e.to_string())?;
     if !path.is_file() { return Err("The selected file no longer exists".into()); }
     let _com = Com::new()?;

@@ -1881,6 +1881,10 @@ impl App {
                         if !cut {
                             self.clip = Some((paths.clone(), false));
                         }
+                        #[cfg(windows)]
+                        if cut {
+                            crate::file_transfer::forget_cut();
+                        }
                         self.start_job(kind, paths.to_vec(), Some(dest), ctx);
                     }
                     None => self.toast(ToastKind::Info, "Clipboard doesn't contain files"),
