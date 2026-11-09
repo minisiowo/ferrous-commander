@@ -115,17 +115,18 @@ impl<'a> Panel<'a> {
     /// Without egui's own title bar the window moves by any empty spot, so the bar
     /// needs no drag handling of its own. True when the close button was clicked.
     pub fn show(self, ctx: &egui::Context, add: impl FnOnce(&mut Ui)) -> bool {
-        if ctx.embed_viewports() { self.show_inside(ctx, add) } else { self.show_native(ctx, add) }
+        // A window of one width is a small, passing question: it stays with the application.
+        if ctx.embed_viewports() || self.width.is_some() { self.show_inside(ctx, add) } else { self.show_native(ctx, add) }
     }
 
     /// As a real window, free to go anywhere on the monitor.
     fn show_native(self, ctx: &egui::Context, add: impl FnOnce(&mut Ui)) -> bool {
-        let Panel { pal, title, icon, info, width, size, .. } = self;
+        let Panel { pal, title, icon, info, size, .. } = self;
         let id = ViewportId::from_hash_of(("ferrous_panel", title));
         let key = egui::Id::unique("ferrous_panel").with(title);
         let frame = ctx.cumulative_frame_nr();
         let monitor = ctx.input(|i| i.viewport().monitor_size);
-        let (default, min) = size.unwrap_or((vec2(width.unwrap_or(440.0), 180.0), Vec2::ZERO));
+        let (default, min) = size.unwrap_or((vec2(440.0, 180.0), Vec2::ZERO));
         let mut state = ctx.data(|d| d.get_temp::<Native>(key))
             // A gap means the window was closed in between, so it opens afresh.
             .filter(|s| s.last_frame + 2 >= frame)
@@ -135,8 +136,8 @@ impl<'a> Panel<'a> {
                 Native { size, opened: Instant::now(), position, last_frame: frame }
             });
         state.last_frame = frame;
-        let locked = width.is_some() || state.opened.elapsed() < SIZE_LOCK;
-        if locked && width.is_none() { ctx.request_repaint_after(SIZE_LOCK); }
+        let locked = state.opened.elapsed() < SIZE_LOCK;
+        if locked { ctx.request_repaint_after(SIZE_LOCK); }
         let mut builder = ViewportBuilder::default()
             .with_title(title)
             .with_app_id("ferrous-commander-dialog")
@@ -147,7 +148,6 @@ impl<'a> Panel<'a> {
         if let Some(position) = state.position { builder = builder.with_position(position); }
         let mut add = Some(add);
         let mut closed = false;
-        let mut height = state.size.y;
         ctx.show_viewport_immediate(id, builder, |ui, _class| {
             let full = ui.max_rect();
             ui.painter().rect_filled(full, CornerRadius::ZERO, pal.content_fill());
@@ -160,15 +160,9 @@ impl<'a> Panel<'a> {
             if bar.drag_started() { ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag); }
             closed = title_bar(ui, pal, r, icon, title, info);
             if let Some(add) = add.take() { add(ui); }
-            height = ui.min_rect().height();
             closed |= ui.input(|i| i.viewport().close_requested());
-            if width.is_none() { resize_grip(ui, full, pal); }
+            resize_grip(ui, full, pal);
         });
-        // A window of one width follows its content, as it did inside the application.
-        if width.is_some() && (height - state.size.y).abs() > 1.0 {
-            state.size.y = height.ceil();
-            ctx.request_repaint();
-        }
         ctx.data_mut(|d| d.insert_temp(key, state));
         closed
     }

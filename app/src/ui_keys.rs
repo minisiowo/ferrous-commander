@@ -186,7 +186,9 @@ impl App {
             .show(ctx, |ui| {
                 // Inside: this window has its own keyboard input when it is a real window.
                 self.read_capture(ui.ctx(), &mut window);
-                chrome::scrolled_body(ui, false, |ui| self.shortcuts_body(ui, &mut window));
+                // Above the scrolling list, so the form is in view wherever it was opened from.
+                chrome::body(ui, |ui| self.shortcuts_header(ui, &mut window));
+                chrome::scrolled_body(ui, false, |ui| self.shortcuts_list(ui, &mut window));
             });
         if !closed {
             self.shortcuts = Some(window);
@@ -266,12 +268,10 @@ impl App {
         ui.separator();
     }
 
-    fn shortcuts_body(&mut self, ui: &mut egui::Ui, window: &mut ShortcutsWindow) {
+    fn shortcuts_header(&mut self, ui: &mut egui::Ui, window: &mut ShortcutsWindow) {
         ui.spacing_mut().item_spacing.y = 6.0;
         self.capture_strip(ui, window);
-        let mut change = None;
-        let idle = window.capture.is_none();
-        ui.add_enabled_ui(idle, |ui| {
+        ui.add_enabled_ui(window.capture.is_none(), |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut window.layer, Layer::Standard, "Standard");
                 ui.selectable_value(&mut window.layer, Layer::Neovim, "Neovim");
@@ -280,6 +280,13 @@ impl App {
             if window.layer == Layer::Neovim {
                 ui.label(RichText::new("These take priority over the standard shortcuts while Neovim-style keys are on.").color(self.pal.text_weak).size(11.0));
             }
+        });
+    }
+
+    fn shortcuts_list(&mut self, ui: &mut egui::Ui, window: &mut ShortcutsWindow) {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        let mut change = None;
+        ui.add_enabled_ui(window.capture.is_none(), |ui| {
             change = self.shortcut_rows(ui, window);
         });
         let layer = window.layer;
@@ -317,7 +324,7 @@ impl App {
         let layer = window.layer;
         let accent = self.pal.accent;
         let query = window.search.to_lowercase();
-        let mut change = None;
+        let mut change = self.command_rows(ui, window);
         for (group, title) in GROUPS {
             let rows: Vec<(&'static Info, Vec<String>)> = COMMANDS.iter()
                 .filter(|info| info.group == group && listed(info, layer))
@@ -356,26 +363,43 @@ impl App {
                 }
             });
         }
-        if let Some(c) = self.folder_rows(ui, window) { change = Some(c); }
+        ui.add_space(10.0);
+        let text = if window.confirm_reset { "Really reset this layer?" } else { "Reset all" };
+        if ui.add(Button::new(text).small()).clicked() {
+            if window.confirm_reset { change = Some(Change::ResetLayer); }
+            window.confirm_reset = !window.confirm_reset;
+        }
         change
     }
 
-    fn folder_rows(&self, ui: &mut egui::Ui, window: &mut ShortcutsWindow) -> Option<Change> {
-        let layer = window.layer;
+    /// The user's own commands, first in the list.
+    fn command_rows(&self, ui: &mut egui::Ui, window: &ShortcutsWindow) -> Option<Change> {
+        let weak = self.pal.text_weak;
+        let query = window.search.to_lowercase();
+        let keys_of = |folder: &FolderKey| keymap::parse_keys(&folder.keys).map_or(folder.keys.clone(), |k| keymap::keys_label(&k));
+        let all = &self.st.keymap.layer(window.layer).folders;
+        let shown: Vec<&FolderKey> = all.iter().filter(|f| query.is_empty()
+            || f.path.display().to_string().to_lowercase().contains(&query)
+            || keys_of(f).to_lowercase().contains(&query)).collect();
         let mut change = None;
-        ui.add_space(6.0);
-        ui.label(RichText::new("Your commands").strong().color(self.pal.accent));
-        let folders = &self.st.keymap.layer(layer).folders;
-        if !folders.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Your commands").strong().color(self.pal.accent));
+            if ui.add(Button::new("+ Command").small()).on_hover_text("Open a folder of your choice with your own keys").clicked() {
+                change = Some(Change::NewFolder);
+            }
+        });
+        if all.is_empty() {
+            ui.label(RichText::new("Open any folder with keys of your own, in this tab or a new one.").color(weak).size(11.0));
+        }
+        if !shown.is_empty() {
             egui::Grid::new("shortcut_folders").num_columns(2).min_col_width(230.0).spacing(vec2(16.0, 4.0)).show(ui, |ui| {
-                for folder in folders {
+                for folder in shown {
                     ui.label(folder.path.display().to_string());
                     ui.horizontal(|ui| {
-                        let label = keymap::parse_keys(&folder.keys).map_or(folder.keys.clone(), |k| keymap::keys_label(&k));
-                        if ui.add(Button::new(label).small()).on_hover_text("Change this command").clicked() {
+                        if ui.add(Button::new(keys_of(folder)).small()).on_hover_text("Change this command").clicked() {
                             change = Some(Change::EditFolder(folder.clone()));
                         }
-                        ui.label(RichText::new(if folder.new_tab { "new tab" } else { "this tab" }).color(self.pal.text_weak).size(11.0));
+                        ui.label(RichText::new(if folder.new_tab { "new tab" } else { "this tab" }).color(weak).size(11.0));
                         if ui.add(Button::new("×").small()).on_hover_text("Remove this command").clicked() {
                             change = Some(Change::RemoveFolder(folder.target()));
                         }
@@ -384,17 +408,6 @@ impl App {
                 }
             });
         }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if ui.add(Button::new("+ Command").small()).on_hover_text("Open a folder of your choice with your own keys").clicked() {
-                change = Some(Change::NewFolder);
-            }
-            let text = if window.confirm_reset { "Really reset this layer?" } else { "Reset all" };
-            if ui.add(Button::new(text).small()).clicked() {
-                if window.confirm_reset { change = Some(Change::ResetLayer); }
-                window.confirm_reset = !window.confirm_reset;
-            }
-        });
         change
     }
 }

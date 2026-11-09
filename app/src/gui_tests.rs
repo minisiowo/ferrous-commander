@@ -2209,9 +2209,7 @@ fn a_command_can_be_changed_without_clashing_with_itself() {
     let (ctx, mut app, root) = neovim_app("change");
     let (first, second) = (root.join("dir01"), root.join("dir02"));
     app.st.keymap.neovim.folders.push(FolderKey { keys: "g o".into(), path: first.clone(), new_tab: false });
-    let mut window = crate::ui_keys::ShortcutsWindow::new(Layer::Neovim);
-    window.search = "no such command".into(); // Keeps the list short enough to show the row.
-    app.shortcuts = Some(window);
+    app.shortcuts = Some(crate::ui_keys::ShortcutsWindow::new(Layer::Neovim));
     for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
     let chip = painted_at(&ctx, &mut app, "g o", screen());
     click(&ctx, &mut app, chip, Modifiers::NONE);
@@ -2229,5 +2227,45 @@ fn a_command_can_be_changed_without_clashing_with_itself() {
     word(&ctx, &mut app, "go");
     for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
     assert_eq!(app.panes[0].path(), second.as_path());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn your_commands_come_first_and_the_form_stays_in_view() {
+    use crate::keymap::{Command, FolderKey, Layer};
+    use crate::ui_keys::{Capture, ShortcutsWindow};
+    let (ctx, mut app, root) = neovim_app("layout");
+    app.st.keymap.neovim.folders.push(FolderKey { keys: "g o".into(), path: root.join("dir01"), new_tab: false });
+    app.shortcuts = Some(ShortcutsWindow::new(Layer::Neovim));
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    let top = painted_at(&ctx, &mut app, "Your commands", screen());
+    assert!(top.y < painted_at(&ctx, &mut app, "Moving", screen()).y);
+
+    // Scroll to the bottom of the list, as if adding a shortcut to its last row.
+    let over_list = painted_at(&ctx, &mut app, "Move down", screen());
+    frame(&ctx, &mut app, vec![Event::PointerMoved(over_list)], Modifiers::NONE);
+    let wheel = Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -4000.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE, source: egui::MouseWheelSource::Wheel };
+    frame(&ctx, &mut app, vec![wheel], Modifiers::NONE);
+    for _ in 0..60 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(!paints_text(&ctx, &mut app, "Move down"), "the list has scrolled away");
+    app.shortcuts.as_mut().unwrap().capture = Some(Capture::command(Command::Refresh));
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(paints_text(&ctx, &mut app, "Cancel"), "the form is visible without scrolling back");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn searching_also_narrows_your_commands() {
+    use crate::keymap::{FolderKey, Layer};
+    let (ctx, mut app, root) = neovim_app("search");
+    app.st.keymap.neovim.folders.push(FolderKey { keys: "g o".into(), path: root.join("dir01"), new_tab: false });
+    let mut window = crate::ui_keys::ShortcutsWindow::new(Layer::Neovim);
+    window.search = "dir01".into();
+    app.shortcuts = Some(window);
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(paints_text(&ctx, &mut app, "g o"), "found by its folder");
+    app.shortcuts.as_mut().unwrap().search = "nothing like it".into();
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(!paints_text(&ctx, &mut app, "g o"));
     std::fs::remove_dir_all(root).unwrap();
 }
