@@ -45,6 +45,12 @@ fn is_letter(key: Key) -> bool {
     name.len() == 1 && name.as_bytes()[0].is_ascii_alphabetic()
 }
 
+/// egui reports these as keys of their own, but they only ever accompany a shortcut.
+fn is_modifier(key: Key) -> bool {
+    matches!(key, Key::ShiftLeft | Key::ShiftRight | Key::ControlLeft | Key::ControlRight
+        | Key::AltLeft | Key::AltRight | Key::SuperLeft | Key::SuperRight)
+}
+
 /// Keys that produce a character whose key combination depends on the keyboard layout.
 fn is_punctuation(key: Key) -> bool {
     matches!(key, Key::Space | Key::Colon | Key::Comma | Key::Minus | Key::Period | Key::Plus
@@ -114,9 +120,11 @@ impl Chord {
 }
 
 fn parse_with(text: &str, leader: Option<Chord>) -> Option<Vec<Chord>> {
-    let keys: Vec<Chord> = text.split_whitespace()
+    let mut keys: Vec<Chord> = text.split_whitespace()
         .map(|part| if part.eq_ignore_ascii_case(LEADER) { leader } else { Chord::parse(part) })
         .collect::<Option<_>>()?;
+    // Earlier versions recorded a modifier as a step of its own.
+    keys.retain(|c| !is_modifier(c.key));
     (!keys.is_empty() && keys.len() <= MAX_KEYS).then_some(keys)
 }
 
@@ -759,6 +767,7 @@ pub fn presses(events: &[Event]) -> Vec<Input> {
             Event::Copy => out.push(command(Key::C)),
             Event::Cut => out.push(command(Key::X)),
             Event::Paste(_) => out.push(command(Key::V)),
+            Event::Key { key, pressed: true, .. } if is_modifier(*key) => {}
             Event::Key { key, pressed: true, repeat, modifiers, .. } => {
                 let chord = Chord::new(*key, *modifiers);
                 repeating = *repeat;
@@ -1165,6 +1174,25 @@ mod tests {
         assert_eq!(got, [Input::Press { chord: keys("/")[0], repeat: false, text: Some("/".into()) }]);
         let with_ctrl = presses(&[key_event(Key::Slash, Modifiers::COMMAND)]);
         assert_eq!(with_ctrl, [Input::Press { chord: keys("ctrl+/")[0], repeat: false, text: None }]);
+    }
+
+    #[test]
+    fn modifiers_alone_are_not_presses_and_old_recordings_recover() {
+        let got = presses(&[key_event(Key::AltLeft, Modifiers::ALT), key_event(Key::L, Modifiers::ALT)]);
+        assert_eq!(got, [Input::Press { chord: keys("alt+l")[0], repeat: false, text: None }]);
+        assert_eq!(keys("altleft alt+l"), keys("alt+l"));
+        assert!(parse_keys("controlleft").is_none());
+    }
+
+    #[test]
+    fn pressing_ctrl_again_inside_a_sequence_does_not_abandon_it() {
+        let map = Keymap::default_for_tests();
+        let mut m = Matcher::default();
+        assert_eq!(feed_all(&mut m, &map, Mode::Normal, "ctrl+w"), [Outcome::Waiting]);
+        for input in presses(&[key_event(Key::ControlLeft, Modifiers::COMMAND), key_event(Key::H, Modifiers::COMMAND)]) {
+            let Input::Press { chord, repeat, .. } = input else { panic!("a press") };
+            assert_eq!(m.feed(&map, Mode::Normal, chord, repeat), run(Command::FocusLeft));
+        }
     }
 
     #[test]
