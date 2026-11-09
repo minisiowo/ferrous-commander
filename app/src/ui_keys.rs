@@ -180,11 +180,12 @@ impl App {
 
     pub fn shortcuts_window(&mut self, ctx: &egui::Context) {
         let Some(mut window) = self.shortcuts.take() else { return };
-        self.read_capture(ctx, &mut window);
         let closed = Panel::new("Keyboard shortcuts", self.pal, Icon::Glyph("⚙", None))
             .window(|w| w.id(egui::Id::unique("keyboard_shortcuts")))
             .fit_screen(ctx, vec2(620.0, 640.0), vec2(420.0, 300.0))
             .show(ctx, |ui| {
+                // Inside: this window has its own keyboard input when it is a real window.
+                self.read_capture(ui.ctx(), &mut window);
                 chrome::scrolled_body(ui, false, |ui| self.shortcuts_body(ui, &mut window));
             });
         if !closed {

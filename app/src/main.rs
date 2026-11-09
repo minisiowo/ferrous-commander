@@ -60,16 +60,27 @@ impl egui::Plugin for TextureLimit {
 
 struct Shell {
     app: app::App,
-    #[cfg(windows)]
-    held_keys: std::collections::HashSet<egui::Key>,
+}
+
+/// A plugin so that text fields in every window get their clipboard shortcuts.
+#[cfg(windows)]
+#[derive(Default)]
+struct ClipboardKeys {
+    held: std::collections::HashSet<egui::Key>,
+}
+
+#[cfg(windows)]
+impl egui::Plugin for ClipboardKeys {
+    fn debug_name(&self) -> &'static str {
+        "ClipboardKeys"
+    }
+
+    fn input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        file_transfer::shortcuts(input, &mut self.held, ctx.text_edit_focused());
+    }
 }
 
 impl eframe::App for Shell {
-    #[cfg_attr(not(windows), allow(unused_variables))]
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
-        #[cfg(windows)]
-        file_transfer::shortcuts(input, &mut self.held_keys, _ctx.text_edit_focused());
-    }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.app.draw(ui);
         #[cfg(target_os = "linux")]
@@ -120,11 +131,11 @@ fn run(renderer: eframe::Renderer, shot: Option<PathBuf>) -> eframe::Result {
         options(renderer),
         Box::new(move |cc| {
             cc.egui_ctx.add_plugin(TextureLimit);
+            #[cfg(windows)]
+            cc.egui_ctx.add_plugin(ClipboardKeys::default());
             fonts(&cc.egui_ctx);
             Ok(Box::new(Shell {
                 app: app::App::new(shot),
-                #[cfg(windows)]
-                held_keys: Default::default(),
             }))
         }),
     )

@@ -3,7 +3,9 @@
 //! Inside `Panel::show`, call `body` or `scrolled_body`, then `footer` if the window has
 //! buttons. Each takes its own closure, one after the other, so they can all use `self`.
 
-use egui::{Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
+use std::time::{Duration, Instant};
+
+use egui::{Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, ViewportBuilder, ViewportCommand, ViewportId, pos2, vec2};
 
 use crate::fsx::Kind;
 use crate::icons;
@@ -13,6 +15,17 @@ use crate::ui::fit_text;
 pub const BAR_H: f32 = 38.0;
 const FOOTER_H: f32 = 44.0;
 const MARGIN: i8 = 14;
+/// How long a new window keeps one fixed size: that is what makes a tiling compositor float it.
+const SIZE_LOCK: Duration = Duration::from_millis(520);
+
+/// A window of its own on the desktop, remembered between frames.
+#[derive(Clone, Copy)]
+struct Native {
+    size: Vec2,
+    opened: Instant,
+    position: Option<Pos2>,
+    last_frame: u64,
+}
 
 #[derive(Clone, Copy)]
 pub enum Icon<'a> {
@@ -62,11 +75,13 @@ pub struct Panel<'a> {
     icon: Icon<'a>,
     info: &'a str,
     width: Option<f32>,
+    /// The size to open at and the smallest allowed, when resizable.
+    size: Option<(Vec2, Vec2)>,
 }
 
 impl<'a> Panel<'a> {
     pub fn new(title: &'a str, pal: Palette, icon: Icon<'a>) -> Self {
-        Panel { window: egui::Window::new(title), pal, title, icon, info: "", width: None }
+        Panel { window: egui::Window::new(title), pal, title, icon, info: "", width: None, size: None }
     }
 
     pub fn info(mut self, info: &'a str) -> Self {
@@ -87,6 +102,7 @@ impl<'a> Panel<'a> {
         let size = default.min(available);
         self.window = self.window.resizable(true).default_size(size).min_size(min.min(available)).max_size(available)
             .default_pos(ctx.content_rect().center() - size * 0.5);
+        self.size = Some((default, min));
         self
     }
 
@@ -99,7 +115,66 @@ impl<'a> Panel<'a> {
     /// Without egui's own title bar the window moves by any empty spot, so the bar
     /// needs no drag handling of its own. True when the close button was clicked.
     pub fn show(self, ctx: &egui::Context, add: impl FnOnce(&mut Ui)) -> bool {
-        let Panel { window, pal, title, icon, info, width } = self;
+        if ctx.embed_viewports() { self.show_inside(ctx, add) } else { self.show_native(ctx, add) }
+    }
+
+    /// As a real window, free to go anywhere on the monitor.
+    fn show_native(self, ctx: &egui::Context, add: impl FnOnce(&mut Ui)) -> bool {
+        let Panel { pal, title, icon, info, width, size, .. } = self;
+        let id = ViewportId::from_hash_of(("ferrous_panel", title));
+        let key = egui::Id::unique("ferrous_panel").with(title);
+        let frame = ctx.cumulative_frame_nr();
+        let monitor = ctx.input(|i| i.viewport().monitor_size);
+        let (default, min) = size.unwrap_or((vec2(width.unwrap_or(440.0), 180.0), Vec2::ZERO));
+        let mut state = ctx.data(|d| d.get_temp::<Native>(key))
+            // A gap means the window was closed in between, so it opens afresh.
+            .filter(|s| s.last_frame + 2 >= frame)
+            .unwrap_or_else(|| {
+                let size = monitor.map_or(default, |m| default.min(m - vec2(48.0, 64.0)));
+                let position = ctx.input(|i| i.viewport().outer_rect).map(|r| r.center() - size * 0.5);
+                Native { size, opened: Instant::now(), position, last_frame: frame }
+            });
+        state.last_frame = frame;
+        let locked = width.is_some() || state.opened.elapsed() < SIZE_LOCK;
+        if locked && width.is_none() { ctx.request_repaint_after(SIZE_LOCK); }
+        let mut builder = ViewportBuilder::default()
+            .with_title(title)
+            .with_app_id("ferrous-commander-dialog")
+            .with_decorations(false)
+            .with_inner_size(state.size)
+            .with_min_inner_size(if locked { state.size } else { min })
+            .with_max_inner_size(if locked { state.size } else { monitor.unwrap_or(Vec2::splat(16_000.0)) });
+        if let Some(position) = state.position { builder = builder.with_position(position); }
+        let mut add = Some(add);
+        let mut closed = false;
+        let mut height = state.size.y;
+        ctx.show_viewport_immediate(id, builder, |ui, _class| {
+            let full = ui.max_rect();
+            ui.painter().rect_filled(full, CornerRadius::ZERO, pal.content_fill());
+            if cfg!(windows) { ui.painter().rect_stroke(full, CornerRadius::ZERO, Stroke::new(1.0, pal.border), egui::StrokeKind::Inside); }
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            ui.visuals_mut().text_edit_bg_color = Some(pal.raised);
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), BAR_H), Sense::hover());
+            ui.painter().rect_filled(r, CornerRadius::ZERO, pal.panel);
+            let bar = ui.interact(r, ui.scope_id().with("panel_bar"), Sense::click_and_drag());
+            if bar.drag_started() { ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag); }
+            closed = title_bar(ui, pal, r, icon, title, info);
+            if let Some(add) = add.take() { add(ui); }
+            height = ui.min_rect().height();
+            closed |= ui.input(|i| i.viewport().close_requested());
+            if width.is_none() { resize_grip(ui, full, pal); }
+        });
+        // A window of one width follows its content, as it did inside the application.
+        if width.is_some() && (height - state.size.y).abs() > 1.0 {
+            state.size.y = height.ceil();
+            ctx.request_repaint();
+        }
+        ctx.data_mut(|d| d.insert_temp(key, state));
+        closed
+    }
+
+    fn show_inside(self, ctx: &egui::Context, add: impl FnOnce(&mut Ui)) -> bool {
+        let Panel { window, pal, title, icon, info, width, .. } = self;
         let frame = Frame::window(&ctx.global_style()).inner_margin(0.0).fill(pal.content_fill());
         let mut closed = false;
         window.collapsible(false).title_bar(false).frame(frame).show(ctx, |ui| {
@@ -114,6 +189,18 @@ impl<'a> Panel<'a> {
             add(ui);
         });
         closed
+    }
+}
+
+/// A window without a frame has no edges to grab, so its corner resizes it.
+fn resize_grip(ui: &mut Ui, full: Rect, pal: Palette) {
+    let r = Rect::from_min_max(full.max - vec2(16.0, 16.0), full.max);
+    let response = ui.interact(r, ui.scope_id().with("panel_grip"), Sense::drag()).on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+    if response.drag_started() {
+        ui.ctx().send_viewport_cmd(ViewportCommand::BeginResize(egui::ResizeDirection::SouthEast));
+    }
+    for inset in [4.0, 8.0] {
+        ui.painter().line_segment([pos2(r.max.x - inset, r.max.y - 3.0), pos2(r.max.x - 3.0, r.max.y - inset)], Stroke::new(1.0, pal.text_weak));
     }
 }
 

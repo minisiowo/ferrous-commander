@@ -192,7 +192,8 @@ impl App {
             Notice::ConfirmRun { .. } => "Run this program?".to_string(),
             Notice::Problems { title, .. } => title.clone(),
         };
-        let mut dismiss = ctx.input(|inp| inp.key_pressed(Key::Escape));
+        let mut dismiss = false;
+        let mut escape = false;
         let mut confirm = false;
         let icon = match notice {
             Notice::ConfirmDestroy { .. } | Notice::ConfirmRun { .. } => Icon::Glyph("⚠", Some(hex("#ef7063"))),
@@ -202,6 +203,7 @@ impl App {
             .fixed_width(440.0)
             .window(|w| w.id(egui::Id::unique("notice")).anchor(Align2::CENTER_CENTER, vec2(0.0, -60.0)).order(egui::Order::Foreground))
             .show(ctx, |ui| {
+                escape = ui.input(|inp| inp.key_pressed(Key::Escape));
                 let list = |ui: &mut egui::Ui, lines: &[String]| {
                     egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                         for line in lines { ui.add(egui::Label::new(RichText::new(line).color(pal.text)).selectable(true)); }
@@ -256,6 +258,7 @@ impl App {
                     }
                 }
             });
+        dismiss |= escape;
         if !confirm && !dismiss { return; }
         let notice = self.notices.remove(0);
         if !confirm { return; }
