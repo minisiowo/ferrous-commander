@@ -217,6 +217,102 @@ mod tests {
         }
     }
 
+    fn zip_with(path: &std::path::Path, entries: &[(&str, &str)]) {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, text) in entries { zip.start_file(*name, options).unwrap(); zip.write_all(text.as_bytes()).unwrap(); }
+        zip.finish().unwrap();
+    }
+
+    /// Damaged files of every previewed kind. Every round must finish in time and without a
+    /// panic. `FERROUS_CAMPAIGN_FUZZ` sets the rounds per file.
+    #[test]
+    #[ignore = "long run; writes damaged files under the temporary folder"]
+    fn damaged_files_never_crash_or_hang_the_preview() {
+        let rounds: u64 = std::env::var("FERROUS_CAMPAIGN_FUZZ").ok().and_then(|n| n.parse().ok()).unwrap_or(400);
+        let root = scratch("fuzz");
+        let seeds = root.join("seeds");
+        std::fs::create_dir(&seeds).unwrap();
+        let mut picture = image::RgbaImage::new(48, 48);
+        for (x, y, pixel) in picture.enumerate_pixels_mut() { *pixel = image::Rgba([x as u8 * 5, y as u8 * 5, (x ^ y) as u8, 255]); }
+        for (name, format) in [("a.png", image::ImageFormat::Png), ("a.bmp", image::ImageFormat::Bmp), ("a.gif", image::ImageFormat::Gif), ("a.tiff", image::ImageFormat::Tiff), ("a.webp", image::ImageFormat::WebP), ("a.ico", image::ImageFormat::Ico)] {
+            picture.save_with_format(seeds.join(name), format).unwrap();
+        }
+        image::DynamicImage::ImageRgba8(picture).to_rgb8().save_with_format(seeds.join("a.jpg"), image::ImageFormat::Jpeg).unwrap();
+        std::fs::write(seeds.join("a.svg"), r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><defs><linearGradient id="g"><stop offset="0" stop-color="#f00"/></linearGradient></defs><rect width="40" height="40" fill="url(#g)"/><text x="2" y="20">x</text></svg>"##).unwrap();
+        std::fs::write(seeds.join("a.pdf"), "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R>>endobj\n4 0 obj<</Length 21>>stream\n0 0 m 100 100 l S\nendstream endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n").unwrap();
+        std::fs::write(seeds.join("a.stl"), "solid a\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid a\n").unwrap();
+        std::fs::write(seeds.join("a.md"), "# T\n\n*a* `b` [c](d)\n\n| x | y |\n|---|---|\n| 1 | 2 |\n\n```rust\nfn x() {}\n```\n").unwrap();
+        std::fs::write(seeds.join("a.csv"), "a,b,\"c\"\n1,2,3\n").unwrap();
+        std::fs::write(seeds.join("a.rs"), "fn main() { println!(\"x\"); }\n").unwrap();
+        zip_with(&seeds.join("a.zip"), &[("x.txt", "hello"), ("y/z.txt", "world")]);
+        zip_with(&seeds.join("a.3mf"), &[("3D/3dmodel.model", r#"<model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources><object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices><triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object></resources><build><item objectid="1"/></build></model>"#)]);
+        zip_with(&seeds.join("a.docx"), &[("word/document.xml", r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>x</w:t></w:r></w:p></w:body></w:document>"#)]);
+        zip_with(&seeds.join("a.odt"), &[("content.xml", r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:text><text:p>x</text:p></office:text></office:body></office:document-content>"#)]);
+        zip_with(&seeds.join("a.pptx"), &[("ppt/slides/slide1.xml", r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:t>x</a:t></p:sld>"#)]);
+        zip_with(&seeds.join("a.xlsx"), &[("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#), ("xl/workbook.xml", r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="S" sheetId="1"/></sheets></workbook>"#)]);
+        zip_with(&seeds.join("a.epub"), &[("mimetype", "application/epub+zip"), ("OEBPS/a.xhtml", "<html><body><p>x</p></body></html>")]);
+
+        let mut files: Vec<_> = std::fs::read_dir(&seeds).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        // Each kind runs in a copy of this test program. In the app such a parser dies in the
+        // helper process; here a death is written down and the next round goes on.
+        let (exe, mut failures) = (std::env::current_exe().unwrap(), Vec::new());
+        let progress = root.join("progress");
+        for seed in &files {
+            let name = seed.file_name().unwrap().to_string_lossy().into_owned();
+            let mut start = 0;
+            while start < rounds {
+                let output = std::process::Command::new(&exe)
+                    .args(["--exact", "preview::load::tests::damaged_files_worker", "--ignored", "--nocapture"])
+                    .env("FERROUS_FUZZ_SEED", seed).env("FERROUS_FUZZ_START", start.to_string()).env("FERROUS_FUZZ_ROUNDS", rounds.to_string())
+                    .env("FERROUS_FUZZ_PROGRESS", &progress).output().unwrap();
+                if output.status.success() { break; }
+                let round: u64 = std::fs::read_to_string(&progress).ok().and_then(|t| t.parse().ok()).unwrap_or(start);
+                let text = String::from_utf8_lossy(&output.stderr).into_owned();
+                let line = text.lines().find(|l| !l.trim().is_empty() && !l.starts_with("note")).unwrap_or("").to_owned();
+                eprintln!("[fuzz preview] {name} round {round}: {:?}: {line}", output.status.code());
+                failures.push(format!("{name} round {round}: {line}"));
+                start = round + 1;
+            }
+            eprintln!("[fuzz preview] {name} done");
+        }
+        eprintln!("[fuzz preview] {} kinds x {rounds} rounds, {} failures", files.len(), failures.len());
+        assert!(failures.is_empty(), "{failures:#?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "worker of damaged_files_never_crash_or_hang_the_preview"]
+    fn damaged_files_worker() {
+        let Some(seed) = std::env::var_os("FERROUS_FUZZ_SEED").map(std::path::PathBuf::from) else { return };
+        let number = |key: &str| std::env::var(key).unwrap().parse::<u64>().unwrap();
+        let (start, rounds, progress) = (number("FERROUS_FUZZ_START"), number("FERROUS_FUZZ_ROUNDS"), std::env::var_os("FERROUS_FUZZ_PROGRESS").unwrap());
+        let original = std::fs::read(&seed).unwrap();
+        let name = seed.file_name().unwrap().to_string_lossy().into_owned();
+        let root = seed.parent().unwrap().parent().unwrap();
+        for round in start..rounds {
+            std::fs::write(&progress, round.to_string()).unwrap();
+            let mut state = (round + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ original.len() as u64 ^ name.bytes().fold(7u64, |h, b| h.wrapping_mul(31) + b as u64) | 1;
+            let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+            let mut bytes = original.clone();
+            if next() % 3 == 0 { bytes.truncate((next() % bytes.len() as u64) as usize); }
+            else { for _ in 0..1 + next() % 32 { let at = (next() % bytes.len() as u64) as usize; bytes[at] = next() as u8; } }
+            let target = root.join(format!("{round}-{name}"));
+            std::fs::write(&target, &bytes).unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let path = target.clone();
+            let worker = std::thread::spawn(move || { let _ = load(&path, whole(256)); let _ = tx.send(()); });
+            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(()) => { let _ = worker.join(); }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("hung for 30 s"),
+                Err(_) => panic!("the parser panicked"),
+            }
+            let _ = std::fs::remove_file(&target);
+        }
+    }
+
     #[test]
     fn folders_missing_files_and_contents_over_names() {
         let root = scratch("load");

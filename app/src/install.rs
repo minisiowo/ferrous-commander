@@ -67,8 +67,14 @@ fn copy_self(to: &std::path::Path) -> Result<(), String> {
     if let Some(dir) = to.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
+    // Beside the target first: a copy that stops halfway must not damage a working install.
     #[cfg(windows)]
-    std::fs::copy(&me, to).map_err(|e| format!("copy failed: {e}"))?;
+    {
+        let staged = to.with_extension(format!("install-{}", std::process::id()));
+        let result = std::fs::copy(&me, &staged).and_then(|_| std::fs::rename(&staged, to));
+        if result.is_err() { let _ = std::fs::remove_file(&staged); }
+        result.map_err(|e| format!("copy failed: {e}"))?;
+    }
     #[cfg(not(windows))]
     {
         // Replace the inode; Linux cannot overwrite a running executable.
@@ -197,7 +203,7 @@ pub fn uninstall() -> Result<String, String> {
         if reg(&["query", UNINSTALL_KEY]).is_ok() {
             reg(&["delete", UNINSTALL_KEY, "/f"])?;
         }
-        remove_folder_when_free(&dir).map_err(|e| format!("Could not remove {}: {e}", dir.display()))?;
+        remove_when_free(&exe, &dir).map_err(|e| format!("Could not remove {}: {e}", dir.display()))?;
         Ok("Uninstalled. Settings are kept in your profile.".into())
     }
     #[cfg(not(windows))]
@@ -264,15 +270,17 @@ fn other_instance_running(exe: &std::path::Path) -> bool {
 
 /// Remove `dir` in a background process, retrying for about a minute until files are released.
 #[cfg(windows)]
-fn remove_folder_when_free(dir: &std::path::Path) -> std::io::Result<std::process::Child> {
+fn remove_when_free(exe: &std::path::Path, dir: &std::path::Path) -> std::io::Result<std::process::Child> {
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
-    // cmd does not understand the \" escaping of Command::arg, so the line must be passed raw. The
-    // path travels in a variable, which keeps characters such as & and % out of the script.
-    const SCRIPT: &str = "for /L %i in (1,1,60) do @if exist \"%FERROUS_REMOVE_DIR%\" (rmdir /s /q \"%FERROUS_REMOVE_DIR%\" 2>nul & if exist \"%FERROUS_REMOVE_DIR%\" ping -n 2 127.0.0.1 >nul)";
+    // Only our program goes, and then the folder if that left it empty: anything the user put
+    // there stays. cmd does not understand the \" escaping of Command::arg, so the line must be
+    // passed raw. The paths travel in variables, which keeps & and % out of the script.
+    const SCRIPT: &str = "(for /L %i in (1,1,60) do @if exist \"%FERROUS_REMOVE_EXE%\" (del /f /q \"%FERROUS_REMOVE_EXE%\" 2>nul & if exist \"%FERROUS_REMOVE_EXE%\" ping -n 2 127.0.0.1 >nul)) & rmdir \"%FERROUS_REMOVE_DIR%\" 2>nul";
     std::process::Command::new(crate::win::system_program("cmd.exe"))
         .arg("/C")
         .raw_arg(SCRIPT)
+        .env("FERROUS_REMOVE_EXE", exe)
         .env("FERROUS_REMOVE_DIR", dir)
         // A working directory inside `dir` would keep the folder itself from being deleted.
         .current_dir(std::env::temp_dir())
@@ -309,8 +317,22 @@ pub fn export_icon(to: &std::path::Path) -> Result<(), String> {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use super::remove_folder_when_free;
+    use super::remove_when_free;
     use std::os::windows::fs::OpenOptionsExt;
+
+    #[test]
+    fn uninstalling_never_removes_what_the_user_put_in_the_folder() {
+        let root = std::env::temp_dir().join(format!("ferrous-uninstall-test-{}", std::process::id()));
+        let dir = root.join("Ferrous Commander");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (exe, mine) = (dir.join("ferrous-commander.exe"), dir.join("my notes.txt"));
+        std::fs::write(&exe, b"program").unwrap();
+        std::fs::write(&mine, b"precious").unwrap();
+        remove_when_free(&exe, &dir).unwrap().wait().unwrap();
+        assert!(!exe.exists(), "the program should be gone");
+        assert_eq!(std::fs::read(&mine).unwrap(), b"precious");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn folder_removal_handles_special_characters_and_waits_for_locked_files() {
@@ -321,7 +343,7 @@ mod tests {
         std::fs::write(&file, b"test").unwrap();
         let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&file).unwrap();
 
-        let mut removal = remove_folder_when_free(&dir).unwrap();
+        let mut removal = remove_when_free(&file, &dir).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1500));
         assert!(file.exists(), "a locked file must survive until it is released");
         drop(lock);

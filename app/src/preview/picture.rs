@@ -9,6 +9,7 @@ use super::load::{Loaded, Options, Picture, Reply, failed};
 use crate::fsx;
 
 const MAX_FILE: u64 = 200_000_000;
+const MAX_DECODED_BYTES: u64 = 1 << 31;
 const MAX_FRAMES: usize = 240;
 const MAX_ANIMATION_BYTES: usize = 96 * 1024 * 1024;
 const MAX_FRAME_SIDE: u32 = 720;
@@ -29,6 +30,8 @@ fn decode(p: &Path) -> Result<DynamicImage, String> {
     let mut decoder = ImageReader::open(p).map_err(|e| e.to_string())?
         .with_guessed_format().map_err(|e| e.to_string())?
         .into_decoder().map_err(|e| e.to_string())?;
+    // A damaged header can promise hundreds of gigabytes, and asking for them ends the process.
+    if decoder.total_bytes() > MAX_DECODED_BYTES { return Err("This picture is too large to preview".into()); }
     let orientation = decoder.orientation().ok();
     let mut img = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
     if let Some(orientation) = orientation { img.apply_orientation(orientation); }

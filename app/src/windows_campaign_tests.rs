@@ -477,6 +477,8 @@ fn campaign_cancel_in_the_middle_of_a_large_file() {
     for (tag, place, _) in targets() {
         let dst = Work::new(&place, "cancel-dst");
         for (moving, delay) in [(false, 40u64), (false, 200), (true, 40), (true, 200)] {
+            // On one volume a move is a rename: done before any cancel can arrive.
+            if moving && tag == "same-volume" { continue; }
             let cancel = Arc::new(no(false));
             let flag = cancel.clone();
             let stopper = std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_millis(delay)); flag.store(true, Ordering::Relaxed); });
@@ -484,7 +486,6 @@ fn campaign_cancel_in_the_middle_of_a_large_file() {
             stopper.join().unwrap();
             eprintln!("[cancel {tag} moving={moving} {delay} ms] {result:?}");
             no_stage(&dst.0);
-            if tag == "same-volume" && moving && result.is_ok() { break; }
             match &result {
                 Err(_) => { assert!(file.exists(), "{tag}: a cancelled move lost the source"); assert_eq!(std::fs::metadata(&file).unwrap().len(), want.1); }
                 Ok(done) => { assert_eq!(hash(done), want, "{tag}"); std::fs::remove_file(done).unwrap(); if moving { break; } }
@@ -629,6 +630,167 @@ fn campaign_paths_beyond_the_old_limit() {
         }
         no_stage(&moved_to);
     }
+}
+
+// ---------- archives ----------
+
+fn zip_of(path: &Path, entries: &[(&str, &[u8])]) {
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, data) in entries {
+        zip.start_file(*name, options).unwrap();
+        zip.write_all(data).unwrap();
+    }
+    zip.finish().unwrap();
+}
+
+fn unpack(archive: &Path, dest: &Path) -> Result<crate::archive::Extracted, String> {
+    crate::archive::extract(archive, dest, None, &no(false), &mut |_| {})
+}
+
+#[test]
+#[ignore = "Campaign: writes to C:\\FerrousTest and the test disks"]
+fn campaign_archive_names_windows_cannot_hold_are_left_out() {
+    let work = Work::new(LOCAL, "zip-names");
+    let (dest, archive) = (work.sub("dest"), work.0.join("names.zip"));
+    let skipped = ["nul", "report.", "trail ", "ab:stream.txt", "com1.txt", "sub/con/x.txt", "ok.TXT"];
+    let mut entries: Vec<(&str, &[u8])> = vec![("ok.txt", b"first"), ("sub/fine.txt", b"fine")];
+    entries.extend(skipped.iter().map(|name| (*name, &b"bad"[..])));
+    zip_of(&archive, &entries);
+    let done = unpack(&archive, &dest).unwrap();
+    eprintln!("[zip names] skipped {}", done.skipped);
+    assert_eq!(done.skipped, skipped.len());
+    let got = manifest(&done.path);
+    assert_eq!(got.len(), 4, "{got:?}");
+    assert_eq!(std::fs::read(done.path.join("ok.txt")).unwrap(), b"first", "the case twin replaced the first file");
+    assert!(std::fs::symlink_metadata(done.path.join("ab")).is_err(), "an entry wrote a named stream");
+    no_stage(&dest);
+}
+
+#[test]
+#[ignore = "Campaign: writes to C:\\FerrousTest and the test disks"]
+fn campaign_archive_entries_never_leave_the_destination() {
+    let work = Work::new(LOCAL, "zip-escape");
+    let outer = work.sub("outer");
+    let dest = outer.join("dest");
+    std::fs::create_dir(&dest).unwrap();
+    let archive = work.0.join("escape.zip");
+    let cwd_probe = std::env::current_dir().unwrap().join("evil.txt");
+    let absolute = crate::windows_fs::shown(&outer).join("evil.txt");
+    let absolute = absolute.to_str().unwrap().to_owned();
+    let unc = format!(r"\\localhost\C$\FerrousTest\evil.txt");
+    for name in ["../evil.txt", r"..\evil.txt", "a/../../evil.txt", r"a\..\..\evil.txt", "/evil.txt", r"\evil.txt", "C:evil.txt", "a:evil.txt", absolute.as_str(), unc.as_str()] {
+        zip_of(&archive, &[(name, b"evil"), ("ok.txt", b"fine")]);
+        let result = unpack(&archive, &dest);
+        eprintln!("[zip escape {name}] {:?}", result.as_ref().map(|d| d.skipped));
+        no_stage(&dest);
+        for place in [outer.join("evil.txt"), work.0.join("evil.txt"), PathBuf::from(r"C:\FerrousTest\evil.txt"), PathBuf::from(r"C:\evil.txt"), cwd_probe.clone()] {
+            assert!(std::fs::symlink_metadata(&place).is_err(), "{name} escaped to {place:?}");
+        }
+        if result.is_err() { assert!(std::fs::read_dir(&dest).unwrap().next().is_none(), "{name}: a refused archive left something"); }
+        else { for entry in std::fs::read_dir(&dest).unwrap() { wipe(&entry.unwrap().path()); } }
+    }
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetCurrentProcess() -> *mut std::ffi::c_void;
+    fn K32GetProcessMemoryInfo(process: *mut std::ffi::c_void, counters: *mut Counters, size: u32) -> i32;
+}
+#[repr(C)]
+#[derive(Default)]
+struct Counters { size: u32, faults: u32, peak_set: usize, set: usize, a: usize, b: usize, c: usize, d: usize, private: usize, peak_private: usize }
+fn private_bytes() -> usize {
+    let mut counters = Counters { size: size_of::<Counters>() as u32, ..Default::default() };
+    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size_of::<Counters>() as u32); }
+    counters.private
+}
+/// How much private memory `work` needed at its worst, above what was in use before it.
+fn memory_used_by<T>(work: impl FnOnce() -> T) -> (T, usize) {
+    let (start, stop) = (private_bytes(), Arc::new(no(false)));
+    let flag = stop.clone();
+    let sampler = std::thread::spawn(move || {
+        let mut most = 0;
+        while !flag.load(Ordering::Relaxed) { most = most.max(private_bytes()); std::thread::sleep(std::time::Duration::from_millis(10)); }
+        most
+    });
+    let out = work();
+    stop.store(true, Ordering::Relaxed);
+    (out, sampler.join().unwrap().saturating_sub(start))
+}
+
+#[test]
+#[ignore = "Campaign: writes to C:\\FerrousTest and the test disks"]
+fn campaign_decompression_bomb_fills_the_disk_and_nothing_else() {
+    let src = Work::new(LOCAL, "bomb");
+    let archive = src.0.join("bomb.zip");
+    {
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file("zeros.bin", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).large_file(true)).unwrap();
+        let block = vec![0u8; 1 << 20];
+        for _ in 0..3072 { zip.write_all(&block).unwrap(); }
+        zip.finish().unwrap();
+    }
+    eprintln!("[bomb] archive is {} KiB", std::fs::metadata(&archive).unwrap().len() >> 10);
+    let dest = Work::new(disk("FCNTFS1G"), "bomb-dst");
+    let (result, memory) = memory_used_by(|| unpack(&archive, &dest.0));
+    eprintln!("[bomb] {:?}, memory {} MB", result.as_ref().map(|d| d.skipped), memory >> 20);
+    assert!(result.is_err(), "3 GiB cannot fit on a 1 GiB disk");
+    no_stage(&dest.0);
+    assert!(std::fs::read_dir(&dest.0).unwrap().next().is_none(), "the bomb left something");
+    assert!(memory < 256 << 20, "unpacking used {} MB", memory >> 20);
+}
+
+#[test]
+#[ignore = "Campaign: writes to C:\\FerrousTest and the test disks"]
+fn campaign_download_mark_survives_unpacking_and_copying() {
+    let work = Work::new(LOCAL, "mark");
+    let dest = work.sub("dest");
+    let archive = work.0.join("downloaded.zip");
+    zip_of(&archive, &[("setup.exe", b"MZ"), ("notes.txt", b"n")]);
+    let mark = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+    let zone = |path: &Path| { let mut p = path.as_os_str().to_owned(); p.push(":Zone.Identifier"); PathBuf::from(p) };
+    std::fs::write(zone(&archive), mark).unwrap();
+    let done = unpack(&archive, &dest).unwrap();
+    assert_eq!(std::fs::read(zone(&done.path.join("setup.exe"))).unwrap(), mark, "an unpacked program lost the download warning");
+    let copied = copy_item(&done.path.join("setup.exe"), &dest, &no(false)).unwrap();
+    assert_eq!(std::fs::read(zone(&copied)).unwrap(), mark, "a copy lost the download warning");
+}
+
+#[test]
+#[ignore = "Campaign: writes to C:\\FerrousTest and the test disks"]
+fn campaign_damaged_archives_never_crash() {
+    use crate::compress::Kind;
+    let rounds: u64 = std::env::var("FERROUS_CAMPAIGN_FUZZ").ok().and_then(|n| n.parse().ok()).unwrap_or(400);
+    let work = Work::new(LOCAL, "fuzz");
+    let tree = work.sub("tree");
+    for k in 0..6 { std::fs::write(tree.join(format!("file {k}.txt")), fill(&mut Rng(k + 1), 3000)).unwrap(); }
+    let out = work.sub("packed");
+    let mut seeds = Vec::new();
+    for (kind, name) in [(Kind::Zip, "s.zip"), (Kind::SevenZ, "s.7z"), (Kind::Tar, "s.tar"), (Kind::TarGz, "s.tar.gz"), (Kind::TarBz2, "s.tar.bz2"), (Kind::TarXz, "s.tar.xz")] {
+        let packed = crate::compress::pack(std::slice::from_ref(&tree), &out, name, kind, &no(false), &mut |_| {}).unwrap();
+        seeds.push((name, std::fs::read(out.join(packed.name)).unwrap()));
+    }
+    let (dest, mut panics, mut opened) = (work.sub("dest"), Vec::new(), 0u64);
+    for (name, original) in &seeds {
+        let mut rng = Rng(0xABCDEF + original.len() as u64);
+        let target = work.0.join(name);
+        for round in 0..rounds {
+            let mut bytes = original.clone();
+            match rng.below(3) {
+                0 => bytes.truncate(rng.below(bytes.len() as u64) as usize),
+                _ => for _ in 0..1 + rng.below(24) { let at = rng.below(bytes.len() as u64) as usize; bytes[at] = rng.next() as u8; },
+            }
+            std::fs::write(&target, &bytes).unwrap();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unpack(&target, &dest))) {
+                Err(_) => panics.push(format!("{name} round {round}")),
+                Ok(Ok(_)) => { opened += 1; for entry in std::fs::read_dir(&dest).unwrap() { wipe(&entry.unwrap().path()); } }
+                Ok(Err(_)) => assert!(std::fs::read_dir(&dest).unwrap().next().is_none(), "{name} round {round}: a damaged archive left something"),
+            }
+        }
+    }
+    eprintln!("[fuzz archives] {} rounds, {opened} still opened, {} panics", rounds * seeds.len() as u64, panics.len());
+    assert!(panics.is_empty(), "panics take the whole program down in release builds: {panics:?}");
 }
 
 #[test]

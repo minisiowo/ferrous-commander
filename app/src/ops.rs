@@ -293,7 +293,7 @@ pub fn rename_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     #[cfg(windows)]
-    { crate::windows_fs::rename(src, dst) }
+    { crate::windows_fs::rename_as_asked(src, dst) }
     #[cfg(not(any(target_os = "linux", windows)))]
     {
         if std::fs::symlink_metadata(dst).is_ok() {

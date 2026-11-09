@@ -112,6 +112,32 @@ pub fn rename(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// A name exactly as the filesystem stores it.
+fn stored_name(path: &Path) -> io::Result<Vec<u16>> {
+    let path = wide_path(path)?;
+    // SAFETY: zeroed plain data, filled by the call; the handle is closed at once.
+    unsafe {
+        let mut data: FindData = std::mem::zeroed();
+        let find = FindFirstFileW(path.as_ptr(), &mut data);
+        if find as isize == -1 { return Err(io::Error::last_os_error()); }
+        FindClose(find);
+        let end = data.name.iter().position(|c| *c == 0).unwrap_or(data.name.len());
+        Ok(data.name[..end].to_vec())
+    }
+}
+
+/// Rename a file or folder as the user asked. FAT32 accepts a change of letter case alone and
+/// keeps the old spelling, so there the name goes through a temporary one.
+pub fn rename_as_asked(src: &Path, dst: &Path) -> io::Result<()> {
+    rename(src, dst)?;
+    let wanted: Vec<u16> = dst.file_name().unwrap_or_default().encode_wide().collect();
+    // The rename has happened: being unable to read the name back must not report a failure.
+    if stored_name(dst).map_or(true, |stored| stored == wanted) { return Ok(()); }
+    let between = dst.with_file_name(format!(".ferrous-rename-{}", std::process::id()));
+    rename(dst, &between)?;
+    rename(&between, dst).inspect_err(|_| { let _ = rename(&between, src); })
+}
+
 unsafe extern "system" fn progress(_: i64, _: i64, _: i64, _: i64, _: u32, _: u32, _: *mut c_void, _: *mut c_void, data: *mut c_void) -> u32 {
     // SAFETY: CopyFileEx is synchronous; data points to its caller's AtomicBool.
     if unsafe { &*data.cast::<AtomicBool>() }.load(Ordering::Relaxed) { 1 } else { 0 }
