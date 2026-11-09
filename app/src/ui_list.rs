@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use egui::text::{CCursor, CCursorRange, CharIndex};
 use egui::{
     Align2, Color32, CornerRadius, FontId, Key, Modifiers, Rect, RichText, Sense, Stroke,
     StrokeKind, Ui, UiBuilder, pos2, vec2,
@@ -109,6 +110,50 @@ fn visible_cols(width: f32) -> Vec<(Col, &'static str, f32, bool)> {
     out
 }
 
+/// What a typed path means. Without a trailing separator, because folder settings are
+/// stored under the path's text.
+fn typed_path(text: &str) -> PathBuf {
+    let raw = text.trim().trim_matches('"');
+    let path = match raw.strip_prefix('~') {
+        Some(rest) => dirs::home_dir()
+            .map(|h| h.join(rest.trim_start_matches(['/', '\\'])))
+            .unwrap_or_else(|| PathBuf::from(raw)),
+        None => PathBuf::from(raw),
+    };
+    path.components().collect()
+}
+
+/// The typed text split into its folder, separator included, and the name being typed.
+/// On Linux a backslash can be part of a name.
+fn split_typed(text: &str) -> Option<(&str, &str)> {
+    let at = text.rfind(|c| c == '/' || (cfg!(windows) && c == '\\'))?;
+    Some(text.split_at(at + 1))
+}
+
+/// The typed text finished with the first folder in `entries` that fits, spelled as on disk.
+fn folder_completion(text: &str, entries: &[Entry], show_hidden: bool) -> Option<String> {
+    let (folder, word) = split_typed(text)?;
+    // A file with exactly this name is what the user means, not a longer folder.
+    if entries.iter().any(|e| !e.is_dir && e.name() == word) {
+        return None;
+    }
+    let lower = word.to_lowercase();
+    let best = entries
+        .iter()
+        .filter(|e| e.is_dir && (show_hidden || !e.hidden || word.starts_with('.')))
+        .filter(|e| e.lname().starts_with(&lower))
+        .min_by_key(|e| (!e.name().starts_with(word), e.lname()))?;
+    Some(format!("{folder}{}{}", best.name(), std::path::MAIN_SEPARATOR))
+}
+
+/// Whether the cursor sits after the last character with nothing selected.
+/// A field that has not been focused yet will place it there.
+fn cursor_at_end(cursor: Option<CCursorRange>, text: &str) -> bool {
+    cursor.is_none_or(|c| {
+        c.primary.index == c.secondary.index && c.primary.index.0 == text.chars().count()
+    })
+}
+
 impl App {
     pub fn header(&mut self, ui: &mut Ui, i: usize, r: Rect) {
         let pal = self.pal;
@@ -123,20 +168,48 @@ impl App {
 
         if let Some(mut text) = self.panes[i].path_edit.take() {
             let mut keep = true;
-            ui.scope_builder(UiBuilder::new().max_rect(title_r), |ui| {
-                let te = egui::TextEdit::singleline(&mut text)
-                    .font(FontId::proportional(12.0))
+            let id = ui.make_persistent_id(("path_edit", i));
+            let scope = UiBuilder::new()
+                .max_rect(title_r)
+                .layout(egui::Layout::centered_and_justified(egui::Direction::TopDown));
+            ui.scope_builder(scope, |ui| {
+                self.accept_path_completion(ui, id, &mut text);
+                let font = FontId::proportional(12.0);
+                let output = egui::TextEdit::singleline(&mut text)
+                    .id(id)
+                    .font(font.clone())
                     .margin(egui::Margin::symmetric(4, 2))
                     .desired_width(title_r.width())
-                    .hint_text("Path");
-                let resp = ui.put(title_r, te);
+                    .hint_text("Path")
+                    .lock_focus(true)
+                    .show(ui);
+                let completion = if cursor_at_end(output.cursor_range, &text) {
+                    self.path_completion(&text)
+                } else {
+                    None
+                };
+                if let Some(completion) = &completion {
+                    let rest: String = completion.chars().skip(text.chars().count()).collect();
+                    // `text_clip_rect` ends where the typed text does.
+                    let field = output.response.response.rect.shrink2(vec2(4.0, 0.0));
+                    ui.painter_at(field).text(
+                        output.galley_pos + vec2(output.galley.rect.right(), 0.0),
+                        Align2::LEFT_TOP,
+                        rest,
+                        font,
+                        pal.text_weak,
+                    );
+                }
+                let resp = &output.response.response;
                 if !resp.has_focus() && !resp.lost_focus() {
                     resp.request_focus();
                 }
                 if resp.lost_focus() {
                     keep = false;
+                    // The next edit shows another path, so the old cursor must not carry over.
+                    egui::TextEdit::store_state(ui.ctx(), id, Default::default());
                     if ui.input(|inp| inp.key_pressed(Key::Enter)) {
-                        self.go_to_typed(i, &text);
+                        self.go_to_typed(i, completion.as_deref().unwrap_or(&text));
                     }
                 }
             });
@@ -271,14 +344,42 @@ impl App {
         });
     }
 
+    /// Tab or Right takes the suggested folder, before the text field can react to the key.
+    fn accept_path_completion(&mut self, ui: &mut Ui, id: egui::Id, text: &mut String) {
+        let state = egui::TextEdit::load_state(ui.ctx(), id);
+        let cursor = state.as_ref().and_then(|s| s.cursor.char_range());
+        if !ui.ctx().memory(|m| m.has_focus(id)) || !cursor_at_end(cursor, text) {
+            return;
+        }
+        let Some(completion) = self.path_completion(text) else { return };
+        let accepted = ui.input_mut(|inp| {
+            let tab = inp.consume_key(Modifiers::NONE, Key::Tab);
+            inp.consume_key(Modifiers::NONE, Key::ArrowRight) || tab
+        });
+        if accepted {
+            *text = completion;
+            let end = CCursor::new(CharIndex(text.chars().count()));
+            let mut state = state.unwrap_or_default();
+            state.cursor.set_char_range(Some(CCursorRange::one(end)));
+            egui::TextEdit::store_state(ui.ctx(), id, state);
+        }
+    }
+
+    /// The typed text finished with the first folder that fits, once that folder is listed.
+    fn path_completion(&mut self, text: &str) -> Option<String> {
+        let (folder, _) = split_typed(text)?;
+        let dir = typed_path(folder);
+        if !dir.is_absolute() {
+            return None;
+        }
+        self.ensure(&dir);
+        let listing = self.cache.get(&dir)?;
+        folder_completion(text, &listing.entries, self.st.show_hidden)
+    }
+
     fn go_to_typed(&mut self, i: usize, text: &str) {
         let raw = text.trim().trim_matches('"');
-        let p = match raw.strip_prefix('~') {
-            Some(rest) => dirs::home_dir()
-                .map(|h| h.join(rest.trim_start_matches(['/', '\\'])))
-                .unwrap_or_else(|| PathBuf::from(raw)),
-            None => PathBuf::from(raw),
-        };
+        let p = typed_path(text);
         match fsx::probe_paths(std::slice::from_ref(&p), crate::app::PATH_PROBE_LIMIT)[0] {
             // No answer yet: the folder loader reports a share that stays silent.
             Some(fsx::PathKind::Folder) | None => self.acts.push(Act::Navigate(i, p)),
@@ -1377,5 +1478,60 @@ impl App {
                 pal.text_weak,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod path_completion_tests {
+    use super::*;
+
+    fn entry(name: &str, is_dir: bool, hidden: bool) -> Entry {
+        let kind = if is_dir { fsx::Kind::Folder } else { fsx::Kind::from_ext("txt") };
+        let mut e = Entry::named(PathBuf::from("/root").join(name), name.into(), is_dir, kind);
+        e.hidden = hidden;
+        e
+    }
+
+    fn done(name: &str) -> String {
+        format!("/root/{name}{}", std::path::MAIN_SEPARATOR)
+    }
+
+    #[test]
+    fn only_folders_are_suggested() {
+        let entries = [entry("notes.txt", false, false), entry("nodes", true, false)];
+        assert_eq!(folder_completion("/root/no", &entries, false), Some(done("nodes")));
+        assert_eq!(folder_completion("/root/notes", &entries, false), None);
+    }
+
+    #[test]
+    fn a_file_with_the_typed_name_wins_over_a_longer_folder() {
+        let entries = [entry("report", false, false), entry("reports", true, false)];
+        assert_eq!(folder_completion("/root/report", &entries, false), None);
+    }
+
+    #[test]
+    fn hidden_folders_need_the_setting_or_a_typed_dot() {
+        let entries = [entry(".config", true, true)];
+        assert_eq!(folder_completion("/root/", &entries, false), None);
+        assert_eq!(folder_completion("/root/", &entries, true), Some(done(".config")));
+        assert_eq!(folder_completion("/root/.c", &entries, false), Some(done(".config")));
+    }
+
+    #[test]
+    fn the_first_name_wins_and_matching_case_comes_before_it() {
+        let entries = [entry("Docker", true, false), entry("Bin", true, false), entry("docs", true, false)];
+        assert_eq!(folder_completion("/root/", &entries, false), Some(done("Bin")));
+        assert_eq!(folder_completion("/root/do", &entries, false), Some(done("docs")));
+        assert_eq!(folder_completion("/root/DO", &entries, false), Some(done("Docker")));
+    }
+
+    #[test]
+    fn text_without_a_folder_has_no_suggestion() {
+        assert_eq!(folder_completion("root", &[entry("root", true, false)], false), None);
+    }
+
+    #[test]
+    fn a_typed_path_drops_its_trailing_separator() {
+        assert_eq!(typed_path("/root/docs/").as_os_str(), PathBuf::from("/root/docs").as_os_str());
     }
 }

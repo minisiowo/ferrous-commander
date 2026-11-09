@@ -1617,3 +1617,77 @@ fn window_title_bar_closes_it_and_stays_while_the_content_scrolls() {
     assert!(!app.settings_open, "the X closes the window");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Whether this exact text is painted, and not clipped away, in the next frame.
+fn paints_text(ctx: &egui::Context, app: &mut App, wanted: &str) -> bool {
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+    output.textures_delta.clear();
+    output.shapes.iter().any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.job.text == wanted
+        && s.clip_rect.contains(Rect::from_min_size(t.pos, t.galley.size()).center())))
+}
+
+fn wait_for_text(ctx: &egui::Context, app: &mut App, wanted: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !paints_text(ctx, app, wanted) {
+        assert!(std::time::Instant::now() < deadline, "{wanted} was never painted");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// egui lets a field keep Tab only once it has held the focus for a frame.
+fn open_path_edit(ctx: &egui::Context, app: &mut App, text: String) {
+    app.panes[0].path_edit = Some(text);
+    for _ in 0..3 { frame(ctx, app, vec![], Modifiers::NONE); }
+}
+
+#[test]
+fn the_path_field_completes_folders_in_its_own_line() {
+    let root = std::env::temp_dir().join(format!("fc_path_completion_{}", std::process::id()));
+    std::fs::create_dir_all(root.join("Documents/notes")).unwrap();
+    let sep = std::path::MAIN_SEPARATOR;
+    let typed = |rest: &str| format!("{}{sep}{rest}", root.display());
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(root.join("unused.png")));
+    app.st.show_hidden = false;
+    app.panes[0].tab().path = root.clone();
+    app.active = 0;
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+
+    // Tab and Right take the suggestion and the next level is offered.
+    open_path_edit(&ctx, &mut app, typed("doc"));
+    wait_for_text(&ctx, &mut app, &format!("uments{sep}"));
+    key(&ctx, &mut app, Key::Tab, Modifiers::NONE);
+    assert_eq!(app.panes[0].path_edit, Some(typed(&format!("Documents{sep}"))));
+    wait_for_text(&ctx, &mut app, &format!("notes{sep}"));
+    key(&ctx, &mut app, Key::ArrowRight, Modifiers::NONE);
+    let deepest = typed(&format!("Documents{sep}notes{sep}"));
+    assert_eq!(app.panes[0].path_edit, Some(deepest.clone()));
+
+    // With nothing left to suggest, Tab leaves the edit alone.
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    key(&ctx, &mut app, Key::Tab, Modifiers::NONE);
+    assert_eq!(app.panes[0].path_edit, Some(deepest));
+    key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    assert_eq!(app.panes[0].path_edit, None);
+
+    // Away from the end of the text there is no suggestion, and Right only moves.
+    open_path_edit(&ctx, &mut app, typed("Doc"));
+    wait_for_text(&ctx, &mut app, &format!("uments{sep}"));
+    key(&ctx, &mut app, Key::Home, Modifiers::NONE);
+    assert!(!paints_text(&ctx, &mut app, &format!("uments{sep}")));
+    key(&ctx, &mut app, Key::ArrowRight, Modifiers::NONE);
+    assert_eq!(app.panes[0].path_edit, Some(typed("Doc")));
+    key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+
+    // Enter goes where the line says, and the path keeps no trailing separator.
+    open_path_edit(&ctx, &mut app, typed("Doc"));
+    wait_for_text(&ctx, &mut app, &format!("uments{sep}"));
+    key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.panes[0].path().as_os_str(), root.join("Documents").as_os_str());
+    std::fs::remove_dir_all(root).unwrap();
+}
