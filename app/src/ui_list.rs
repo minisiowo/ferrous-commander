@@ -357,7 +357,7 @@ impl App {
                             if icon_button(ui, "🗑", &self.tip("Delete selected items", Command::Delete), false, &pal)
                                 .clicked()
                             {
-                                self.acts.push(Act::Delete(i));
+                                self.acts.push(Act::AskTrash(i));
                             }
                             if icon_button(ui, "✏", &self.tip("Rename", Command::Rename), false, &pal).clicked() {
                                 self.acts.push(Act::Rename(i));
@@ -1188,7 +1188,7 @@ impl App {
         act(ui, "Compress...", Act::Compress(i, paths), &mut acts);
         ui.separator();
         if menu_entry(ui, RichText::new("Delete").color(hex("#ef7063")), self.key_hint(Command::Delete)).clicked() {
-            acts.push(Act::Delete(i));
+            acts.push(Act::AskTrash(i));
             ui.close();
         }
         self.acts.extend(acts);

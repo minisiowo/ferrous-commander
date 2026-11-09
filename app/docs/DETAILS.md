@@ -221,6 +221,7 @@ On Linux, going up from `/` opens the device overview; the column strip includes
 F10 supports Ghostty and Foot as well as the common GNOME, KDE and X11 terminals.
 Copying on Linux preserves symbolic links (including broken links) and directory permissions.
 
+The trash icon and **Delete** in the right-click menu ask first and list the names. Del moves to the trash at once.
 Drag on empty list space or an unselected row to select several files with a rectangle.
 Ctrl+drag adds to the selection; drag an already selected row to move files.
 File operations have their own toolbar row; narrow toolbars scroll horizontally.

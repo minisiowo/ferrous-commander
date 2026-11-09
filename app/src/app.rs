@@ -228,6 +228,8 @@ pub enum Dialog {
 pub enum Notice {
     /// Each item with why it cannot go to the trash; empty when the user asked to skip it.
     ConfirmDestroy { items: Vec<(PathBuf, String)> },
+    /// A delete asked for with the mouse, where one stray click would be enough.
+    ConfirmTrash { items: Vec<PathBuf> },
     ConfirmClose,
     /// A program from a place the user does not control. See `App::open`.
     ConfirmRun { path: PathBuf, place: &'static str, link: Option<String> },
@@ -288,6 +290,7 @@ pub enum Act {
     #[cfg(target_os = "linux")]
     LinkToOther(usize, bool),
     Delete(usize),
+    AskTrash(usize),
     DeleteForever(usize),
     Rename(usize),
     CommitRename(usize),
@@ -701,6 +704,14 @@ impl App {
         self.set_active(new);
         self.mark_dirty();
         new
+    }
+
+    /// Lets the cursor fall on the neighbour of what is deleted, so the list stays put.
+    fn cursor_stays_on_row(&mut self, i: usize) {
+        let pane = &mut self.panes[i];
+        if pane.cursor.is_some() {
+            pane.cursor_path = None;
+        }
     }
 
     /// Whether a section of the sidebar is on screen.
@@ -1900,13 +1911,17 @@ impl App {
             }
             Act::Delete(i) => {
                 let sel = self.selection(i);
-                // Move the cursor to the neighbour so the list stays put.
-                let pane = &mut self.panes[i];
-                if let Some(c) = pane.cursor {
-                    pane.cursor_path = None;
-                    pane.cursor = Some(c);
-                }
+                self.cursor_stays_on_row(i);
                 self.start_job(OpKind::Trash, sel, None, ctx);
+            }
+            Act::AskTrash(i) => {
+                let items: Vec<PathBuf> = self.selection(i).into_iter()
+                    .filter(|p| !is_computer(p) && p.parent().is_some())
+                    .collect();
+                if !items.is_empty() {
+                    self.cursor_stays_on_row(i);
+                    self.notices.push(Notice::ConfirmTrash { items });
+                }
             }
             Act::DeleteForever(i) => {
                 let items: Vec<(PathBuf, String)> = self

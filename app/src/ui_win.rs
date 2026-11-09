@@ -21,6 +21,8 @@ fn settings_section(ui: &mut egui::Ui, title: &str, accent: egui::Color32) {
     ui.add_space(4.0);
 }
 
+const TRASH_NAME: &str = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
+
 impl App {
     pub fn dialogs(&mut self, ctx: &egui::Context) {
         #[cfg(not(windows))]
@@ -188,6 +190,7 @@ impl App {
         let pal = self.pal;
         let title = match notice {
             Notice::ConfirmDestroy { .. } => "Delete permanently?".to_string(),
+            Notice::ConfirmTrash { .. } => format!("Move to the {}?", TRASH_NAME),
             Notice::ConfirmClose => "File operations are still running".to_string(),
             Notice::ConfirmRun { .. } => "Run this program?".to_string(),
             Notice::Problems { title, .. } => title.clone(),
@@ -197,7 +200,7 @@ impl App {
         let mut confirm = false;
         let icon = match notice {
             Notice::ConfirmDestroy { .. } | Notice::ConfirmRun { .. } => Icon::Glyph("⚠", Some(hex("#ef7063"))),
-            Notice::ConfirmClose | Notice::Problems { .. } => Icon::Glyph("⚠", None),
+            Notice::ConfirmClose | Notice::Problems { .. } | Notice::ConfirmTrash { .. } => Icon::Glyph("⚠", None),
         };
         dismiss |= Panel::new(&title, pal, icon)
             .fixed_width(440.0)
@@ -214,11 +217,10 @@ impl App {
                         chrome::body(ui, |ui| {
                         let mut reasons: Vec<&str> = items.iter().map(|(_, reason)| reason.as_str()).filter(|reason| !reason.is_empty()).collect();
                         reasons.dedup();
-                        let bin = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
                         let intro = if reasons.is_empty() {
-                            format!("{} item(s) will be deleted without going to the {bin}.", items.len())
+                            format!("{} item(s) will be deleted without going to the {TRASH_NAME}.", items.len())
                         } else {
-                            format!("{} item(s) cannot go to the {bin}: {}.", items.len(), reasons.join("; "))
+                            format!("{} item(s) cannot go to the {TRASH_NAME}: {}.", items.len(), reasons.join("; "))
                         };
                         ui.label(RichText::new(intro).color(pal.text));
                         ui.label(RichText::new("Nothing has been deleted yet. If you continue, these items cannot be recovered.").color(hex("#ef7063")).strong());
@@ -229,6 +231,18 @@ impl App {
                         chrome::footer(ui, pal, |ui| {
                             dismiss |= ui.button("Keep the files").clicked();
                             confirm = ui.button(RichText::new("Delete permanently").color(hex("#ef7063"))).clicked();
+                        });
+                    }
+                    Notice::ConfirmTrash { items } => {
+                        chrome::body(ui, |ui| {
+                            ui.label(RichText::new(format!("{} item(s) will be moved to the {TRASH_NAME}, where they can be restored.", items.len())).color(pal.text));
+                            ui.add_space(6.0);
+                            let names: Vec<String> = items.iter().map(|path| fsx::display_name(path)).collect();
+                            list(ui, &names);
+                        });
+                        chrome::footer(ui, pal, |ui| {
+                            dismiss |= ui.button("Keep the files").clicked();
+                            confirm = ui.button(RichText::new(format!("Move to the {TRASH_NAME}")).color(hex("#ef7063"))).clicked();
                         });
                     }
                     Notice::ConfirmClose => {
@@ -266,6 +280,7 @@ impl App {
             Notice::ConfirmDestroy { items } => {
                 self.start_job(crate::ops::OpKind::Destroy, items.into_iter().map(|(path, _)| path).collect(), None, ctx);
             }
+            Notice::ConfirmTrash { items } => self.start_job(crate::ops::OpKind::Trash, items, None, ctx),
             Notice::ConfirmClose => {
                 for job in &self.jobs { job.cancel.store(true, Ordering::Relaxed); }
                 self.closing = true;

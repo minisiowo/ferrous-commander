@@ -1795,6 +1795,24 @@ fn moving_a_group_skips_sections_that_are_hidden() {
 }
 
 #[test]
+fn deleting_with_the_mouse_asks_first_and_can_be_declined() {
+    let (ctx, mut app, root) = neovim_app("ask_trash");
+    let row = app.entry_at(0, 0).unwrap().path.clone();
+    app.panes[0].cursor = Some(0);
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    app.acts.push(crate::app::Act::AskTrash(0));
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    assert!(matches!(&app.notices[0], crate::app::Notice::ConfirmTrash { items } if items == std::slice::from_ref(&row)));
+    assert!(app.jobs.is_empty(), "nothing moves before the answer");
+    key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
+    assert_eq!(app.notices.len(), 1, "Enter never confirms");
+    click_button(&ctx, &mut app, "Keep the files");
+    assert!(app.notices.is_empty() && app.jobs.is_empty());
+    assert!(row.is_dir());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn text_stays_put_when_it_becomes_editable() {
     use crate::app::Tab;
     let root = std::env::temp_dir().join(format!("fc_in_place_{}", std::process::id()));
