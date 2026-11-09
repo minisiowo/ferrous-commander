@@ -119,6 +119,8 @@ sh packaging/build-linux.sh
 
 On Windows, use `powershell -File packaging\build-windows.ps1`.
 
+To build and install for the current user in one step, run `sh packaging/build-and-install-linux.sh` on Linux or `powershell -ExecutionPolicy Bypass -File packaging\build-and-install-windows.ps1` on Windows.
+
 ## More
 
 - [Full reference](docs/DETAILS.md): every feature, limit and option in detail
