@@ -64,6 +64,7 @@ No administrator rights are needed for the per-user install, which is also avail
 | <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> | Back, forward |
 | <kbd>Backspace</kbd> | Parent folder |
 | <kbd>\</kbd> or <kbd>Alt</kbd>+<kbd>D</kbd> | Edit path. <kbd>Tab</kbd> or <kbd>→</kbd> takes the suggested folder |
+| <kbd>Ctrl</kbd>+<kbd>L</kbd> | Edit path with all of it selected |
 | <kbd>Ctrl</kbd>+<kbd>F</kbd> | Search |
 | <kbd>Ctrl</kbd>+<kbd>H</kbd> | Hidden files |
 | <kbd>Space</kbd> | Preview |

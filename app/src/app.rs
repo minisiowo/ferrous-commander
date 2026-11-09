@@ -114,6 +114,8 @@ pub struct Pane {
     pub anchor: Option<usize>,
     pub filter: String,
     pub path_edit: Option<String>,
+    /// The path field selects its whole text the next time it is drawn.
+    pub path_select_all: bool,
     pub rename: Option<(PathBuf, String)>,
     pub rename_focus: bool,
     pub expanded: HashSet<PathBuf>,
@@ -156,6 +158,7 @@ impl Pane {
         self.filter.clear();
         self.rename = None;
         self.path_edit = None;
+        self.path_select_all = false;
         self.view_key = None;
         self.list_offset = 0.0;
         self.scroll_to = None;

@@ -503,6 +503,10 @@ impl App {
             Key::D if m.alt => {
                 self.panes[i].path_edit = Some(self.panes[i].path().display().to_string())
             }
+            Key::L if ctrl => {
+                self.panes[i].path_edit = Some(self.panes[i].path().display().to_string());
+                self.panes[i].path_select_all = true;
+            }
             Key::C if ctrl && m.shift => self.acts.push(Act::CopyPath(i)),
             _ => {}
         }

@@ -173,6 +173,15 @@ impl App {
                 .max_rect(title_r)
                 .layout(egui::Layout::centered_and_justified(egui::Direction::TopDown));
             ui.scope_builder(scope, |ui| {
+                let again = ui.input_mut(|inp| inp.consume_key(Modifiers::COMMAND, Key::L));
+                if std::mem::take(&mut self.panes[i].path_select_all) || again {
+                    // egui drops the selection of a field that has no focus yet.
+                    ui.memory_mut(|m| m.request_focus(id));
+                    let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+                    let (start, end) = (CharIndex(0), CharIndex(text.chars().count()));
+                    state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(start), CCursor::new(end))));
+                    egui::TextEdit::store_state(ui.ctx(), id, state);
+                }
                 self.accept_path_completion(ui, id, &mut text);
                 let font = FontId::proportional(12.0);
                 let output = egui::TextEdit::singleline(&mut text)
@@ -494,7 +503,7 @@ impl App {
                     pal.text_weak,
                 );
             }
-            if resp.on_hover_text("Edit path (\\ or Alt+D)").clicked() {
+            if resp.on_hover_text("Edit path (\\, Alt+D or Ctrl+L)").clicked() {
                 self.panes[i].path_edit = Some(path.display().to_string());
             }
         }

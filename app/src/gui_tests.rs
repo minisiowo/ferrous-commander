@@ -1768,3 +1768,32 @@ fn tabs_and_path_pieces_become_shortcuts_without_moving_anything() {
     assert_eq!(app.st.favorites[0].paths, favorites);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn ctrl_l_selects_the_whole_path_like_a_browser() {
+    let root = std::env::temp_dir().join(format!("fc_ctrl_l_{}", std::process::id()));
+    std::fs::create_dir_all(root.join("inner")).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(root.join("unused.png")));
+    app.panes[0].tab().path = root.clone();
+    app.active = 0;
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    let press = |ctx: &egui::Context, app: &mut App| key(ctx, app, Key::L, Modifiers::COMMAND);
+    let typing = |ctx: &egui::Context, app: &mut App, t: &str| frame(ctx, app, vec![Event::Text(t.into())], Modifiers::NONE);
+
+    press(&ctx, &mut app);
+    assert_eq!(app.panes[0].path_edit, Some(root.display().to_string()));
+    typing(&ctx, &mut app, "a");
+    assert_eq!(app.panes[0].path_edit.as_deref(), Some("a"), "typing replaces the selected path");
+
+    // Inside the field the shortcut selects everything again.
+    typing(&ctx, &mut app, "b");
+    assert_eq!(app.panes[0].path_edit.as_deref(), Some("ab"));
+    press(&ctx, &mut app);
+    typing(&ctx, &mut app, "c");
+    assert_eq!(app.panes[0].path_edit.as_deref(), Some("c"));
+
+    key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    assert_eq!(app.panes[0].path_edit, None);
+    std::fs::remove_dir_all(root).unwrap();
+}
