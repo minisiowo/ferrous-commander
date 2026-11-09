@@ -38,8 +38,6 @@ unsafe extern "system" {
     fn OleUninitialize();
     fn CoTaskMemFree(memory: *mut c_void);
     fn OleSetClipboard(data: Obj) -> i32;
-    #[cfg(test)]
-    fn OleGetClipboard(data: *mut Obj) -> i32;
     fn OleFlushClipboard() -> i32;
     #[cfg(test)]
     fn ReleaseStgMedium(medium: *mut Medium);
@@ -298,23 +296,35 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// The clipboard's files as a separate program reads them. Through a file, because a test
+    /// run may have no console and then Windows PowerShell cannot set its output encoding.
+    fn listed_by_another_program() -> Vec<PathBuf> {
+        let report = std::env::temp_dir().join(format!("fc_clipboard_seen_{}.txt", std::process::id()));
+        let script = format!("Add-Type -AssemblyName System.Windows.Forms; [string[]]$names = [System.Windows.Forms.Clipboard]::GetFileDropList() | ForEach-Object {{ $_ }}; [IO.File]::WriteAllLines('{}', $names, [Text.Encoding]::UTF8)", report.display());
+        let output = std::process::Command::new("powershell.exe").args(["-NoProfile", "-STA", "-Command", &script]).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let text = std::fs::read_to_string(&report).unwrap();
+        std::fs::remove_file(report).unwrap();
+        text.trim_start_matches('\u{feff}').lines().map(PathBuf::from).collect()
+    }
+
+    /// Each round starts from a clipboard another program owns, as in real use. Leaves it empty.
     #[test]
-    #[ignore = "Uses the Windows clipboard; run explicitly with --ignored --test-threads=1"]
+    #[ignore = "Replaces the Windows clipboard; run explicitly with --ignored --test-threads=1"]
     fn a_finished_cut_leaves_nothing_to_paste_again() {
-        let _ole = Ole::new().unwrap();
-        let mut previous = ptr::null_mut();
-        checked(unsafe { OleGetClipboard(&mut previous) }).unwrap();
-        struct Restore(Data);
-        impl Drop for Restore { fn drop(&mut self) { unsafe { OleSetClipboard(self.0.0); OleFlushClipboard(); } } }
-        let _restore = Restore(Data(previous));
         let root = crate::windows_fs::shown(&std::fs::canonicalize(std::env::temp_dir()).unwrap()).join(format!("fc_cut_{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let file = root.join("cut.txt");
         std::fs::write(&file, b"x").unwrap();
-        write(std::slice::from_ref(&file), true).unwrap();
-        assert_eq!(read().unwrap(), Some((vec![file.clone()], true)));
-        forget_cut();
-        assert_eq!(read().unwrap(), None, "a second paste would move whatever is at this path now");
+        for round in 0..25 {
+            let foreign = std::process::Command::new("powershell.exe").args(["-NoProfile", "-STA", "-Command", &format!("Set-Clipboard -Value 'round {round}'")]).status().unwrap();
+            assert!(foreign.success());
+            write(std::slice::from_ref(&file), true).unwrap();
+            assert_eq!(read().unwrap(), Some((vec![file.clone()], true)), "round {round}");
+            assert_eq!(listed_by_another_program(), vec![file.clone()], "round {round}: another program must see the cut files");
+            forget_cut();
+            assert_eq!(read().unwrap(), None, "round {round}: a second paste would move whatever is at this path now");
+        }
         std::fs::remove_file(file).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
@@ -322,14 +332,6 @@ mod tests {
     #[test]
     #[ignore = "Uses the Windows clipboard; run explicitly with --ignored --test-threads=1"]
     fn shell_clipboard_interoperates_with_windows() {
-        let _ole = Ole::new().unwrap();
-        let mut previous = ptr::null_mut();
-        checked(unsafe { OleGetClipboard(&mut previous) }).unwrap();
-        struct Restore(Data);
-        impl Drop for Restore {
-            fn drop(&mut self) { unsafe { OleSetClipboard(self.0.0); OleFlushClipboard(); } }
-        }
-        let _restore = Restore(Data(previous));
         let root = crate::windows_fs::shown(&std::fs::canonicalize(std::env::temp_dir()).unwrap()).join(format!("fc_shell_{}", std::process::id()));
         let folder = root.join("Folder Łódź");
         let nested = root.join("other");
@@ -341,13 +343,7 @@ mod tests {
         for cut in [false, true] {
             write(&paths, cut).unwrap();
             assert_eq!(read().unwrap(), Some((paths.clone(), cut)));
-            // Independent Shell consumer: Windows PowerShell FileDropList.
-            let output = std::process::Command::new("powershell.exe")
-                .args(["-NoProfile", "-STA", "-Command", "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); @(Get-Clipboard -Format FileDropList | ForEach-Object FullName) | ConvertTo-Json -Compress"])
-                .output().unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-            let names: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(names.into_iter().map(PathBuf::from).collect::<Vec<_>>(), paths);
+            assert_eq!(listed_by_another_program(), paths);
             assert!(folder.is_dir());
             assert_eq!(std::fs::read(&file).unwrap(), b"unchanged");
         }

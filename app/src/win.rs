@@ -173,6 +173,50 @@ pub fn subst_target(letter: char) -> Option<String> {
     s.strip_prefix("\\??\\").map(String::from)
 }
 
+/// What a test can read about this process's memory and handles.
+#[cfg(test)]
+pub mod measure {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut core::ffi::c_void;
+        fn K32GetProcessMemoryInfo(process: *mut core::ffi::c_void, counters: *mut Counters, size: u32) -> i32;
+        fn GetProcessHandleCount(process: *mut core::ffi::c_void, count: *mut u32) -> i32;
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct Counters { size: u32, faults: u32, peak_set: usize, set: usize, a: usize, b: usize, c: usize, d: usize, private: usize, peak_private: usize }
+
+    pub fn private_bytes() -> usize {
+        let mut counters = Counters { size: size_of::<Counters>() as u32, ..Default::default() };
+        // SAFETY: `counters` is valid for writing and its size is passed.
+        unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size_of::<Counters>() as u32); }
+        counters.private
+    }
+
+    pub fn handles() -> u32 {
+        let mut count = 0;
+        // SAFETY: `count` is valid for writing.
+        unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count); }
+        count
+    }
+
+    /// How much private memory `work` needed at its worst, above what was in use before it.
+    pub fn memory_used_by<T>(work: impl FnOnce() -> T) -> (T, usize) {
+        let (start, stop) = (private_bytes(), Arc::new(AtomicBool::new(false)));
+        let flag = stop.clone();
+        let sampler = std::thread::spawn(move || {
+            let mut most = 0;
+            while !flag.load(Ordering::Relaxed) { most = most.max(private_bytes()); std::thread::sleep(std::time::Duration::from_millis(10)); }
+            most
+        });
+        let out = work();
+        stop.store(true, Ordering::Relaxed);
+        (out, sampler.join().unwrap().saturating_sub(start))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

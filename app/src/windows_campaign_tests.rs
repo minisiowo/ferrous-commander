@@ -692,32 +692,7 @@ fn campaign_archive_entries_never_leave_the_destination() {
     }
 }
 
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn GetCurrentProcess() -> *mut std::ffi::c_void;
-    fn K32GetProcessMemoryInfo(process: *mut std::ffi::c_void, counters: *mut Counters, size: u32) -> i32;
-}
-#[repr(C)]
-#[derive(Default)]
-struct Counters { size: u32, faults: u32, peak_set: usize, set: usize, a: usize, b: usize, c: usize, d: usize, private: usize, peak_private: usize }
-fn private_bytes() -> usize {
-    let mut counters = Counters { size: size_of::<Counters>() as u32, ..Default::default() };
-    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size_of::<Counters>() as u32); }
-    counters.private
-}
-/// How much private memory `work` needed at its worst, above what was in use before it.
-fn memory_used_by<T>(work: impl FnOnce() -> T) -> (T, usize) {
-    let (start, stop) = (private_bytes(), Arc::new(no(false)));
-    let flag = stop.clone();
-    let sampler = std::thread::spawn(move || {
-        let mut most = 0;
-        while !flag.load(Ordering::Relaxed) { most = most.max(private_bytes()); std::thread::sleep(std::time::Duration::from_millis(10)); }
-        most
-    });
-    let out = work();
-    stop.store(true, Ordering::Relaxed);
-    (out, sampler.join().unwrap().saturating_sub(start))
-}
+use crate::win::measure::memory_used_by;
 
 #[test]
 #[ignore = "Campaign: writes to C:\\FerrousTest and the test disks"]

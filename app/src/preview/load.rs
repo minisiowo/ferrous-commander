@@ -283,6 +283,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// `cargo test --release campaign_preview -- --ignored --nocapture`
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "measures memory for a very large picture"]
+    fn campaign_preview_peak_memory() {
+        let root = scratch("peak");
+        let huge = root.join("huge.png");
+        image::RgbaImage::new(12000, 12000).save_with_format(&huge, image::ImageFormat::Png).unwrap();
+        let text = root.join("large.txt");
+        std::fs::write(&text, "a line of ordinary text\n".repeat(8_000_000)).unwrap();
+        for file in [&huge, &text] {
+            let started = std::time::Instant::now();
+            let (_, memory) = crate::win::measure::memory_used_by(|| load(file, whole(crate::preview::MAX_SIDE)));
+            eprintln!("[preview peak] {} on disk {} MB: {:?}, peak {} MB", fsx::display_name(file), std::fs::metadata(file).unwrap().len() >> 20, started.elapsed(), memory >> 20);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     #[ignore = "worker of damaged_files_never_crash_or_hang_the_preview"]
     fn damaged_files_worker() {

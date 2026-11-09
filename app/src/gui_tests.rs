@@ -1,5 +1,119 @@
 //! Drives the real UI headlessly with simulated mouse and keyboard input.
 
+/// Timings and leak checks on large folders in C:\FerrousTest\perf:
+/// `cargo test --release campaign_perf -- --ignored --nocapture --test-threads=1`
+#[cfg(windows)]
+mod campaign_perf {
+    use super::*;
+    use crate::win::measure::{handles, private_bytes};
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    fn folder(n: usize) -> PathBuf {
+        let dir = PathBuf::from(format!(r"C:\FerrousTest\perf\f{n}"));
+        let done = PathBuf::from(format!(r"C:\FerrousTest\perf\f{n}.done"));
+        if !done.exists() {
+            std::fs::create_dir_all(&dir).unwrap();
+            for k in 0..n { std::fs::write(dir.join(format!("document {k}.txt")), [7u8; 64]).unwrap(); }
+            std::fs::write(done, b"x").unwrap();
+        }
+        dir
+    }
+
+    fn median(mut values: Vec<f64>) -> f64 { values.sort_by(f64::total_cmp); values[values.len() / 2] }
+    fn worst(mut values: Vec<f64>, percent: usize) -> f64 { values.sort_by(f64::total_cmp); values[(values.len() - 1) * percent / 100] }
+
+    fn open(ctx: &egui::Context, app: &mut App, to: &Path, count: usize) {
+        app.navigate(0, to.to_path_buf(), None);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while app.panes[0].view.len() != count || app.panes[0].path() != to {
+            assert!(Instant::now() < deadline, "{to:?} never finished loading: {} of {count}", app.panes[0].view.len());
+            frame(ctx, app, vec![], Modifiers::NONE);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    #[ignore = "Campaign: measures folders of up to 500 000 files"]
+    fn campaign_perf_listing_frames_and_search() {
+        for n in [1000usize, 10_000, 100_000, 500_000] {
+            let dir = folder(n);
+            let times = (0..5).map(|_| { let t = Instant::now(); assert_eq!(crate::fsx::read_dir(&dir).unwrap().len(), n); t.elapsed().as_secs_f64() * 1000.0 }).collect();
+            let listing = median(times);
+            let before = private_bytes();
+            let ctx = egui::Context::default();
+            let mut app = App::new(Some(dir.join("unused.png")));
+            let started = Instant::now();
+            open(&ctx, &mut app, &dir, n);
+            let opened = started.elapsed();
+            let memory = private_bytes().saturating_sub(before) >> 20;
+            let mut frames = Vec::new();
+            for k in 0..300 {
+                app.panes[0].scroll_to = Some(k * (n - 1) / 299);
+                let t = Instant::now();
+                frame(&ctx, &mut app, vec![], Modifiers::NONE);
+                frames.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            let started = Instant::now();
+            app.panes[0].filter = "999".into();
+            frame(&ctx, &mut app, vec![], Modifiers::NONE);
+            let filtered = started.elapsed();
+            app.panes[0].filter.clear();
+            let started = Instant::now();
+            let search = crate::ops::search(dir.clone(), "document 99".into(), false, ctx.clone());
+            while !search.done.load(std::sync::atomic::Ordering::Relaxed) { std::thread::sleep(Duration::from_millis(1)); }
+            let found = search.results.lock().unwrap().len();
+            eprintln!("[perf {n}] read_dir {listing:.1} ms, open in app {opened:?}, +{memory} MB, frame median {:.2} ms p99 {:.2} ms, filter {filtered:?}, search {:?} ({found} found)", median(frames.clone()), worst(frames, 99), started.elapsed());
+        }
+    }
+
+    #[test]
+    #[ignore = "Campaign: repeats navigation, tabs and jobs to look for leaks"]
+    fn campaign_perf_no_growth_over_many_cycles() {
+        let cycles: usize = std::env::var("FERROUS_CAMPAIGN_CYCLES").ok().and_then(|n| n.parse().ok()).unwrap_or(1500);
+        let (small, large) = (folder(1000), folder(10_000));
+        let work = PathBuf::from(format!(r"C:\FerrousTest\work\ferrous-campaign-leak-{}", std::process::id()));
+        std::fs::create_dir_all(&work).unwrap();
+        let file = work.join("payload.bin");
+        std::fs::write(&file, vec![1u8; 1 << 20]).unwrap();
+        let out = work.join("out");
+        std::fs::create_dir(&out).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(work.join("unused.png")));
+        let mut samples = Vec::new();
+        for cycle in 0..cycles {
+            open(&ctx, &mut app, &small, 1000);
+            app.panes[0].filter = "12".into();
+            frame(&ctx, &mut app, vec![], Modifiers::NONE);
+            app.panes[0].filter.clear();
+            frame(&ctx, &mut app, vec![], Modifiers::NONE);
+            open(&ctx, &mut app, &large, 10_000);
+            app.panes[0].scroll_to = Some(cycle * 37 % 10_000);
+            frame(&ctx, &mut app, vec![], Modifiers::NONE);
+            app.new_tab(0, Some(small.clone()), true);
+            frame(&ctx, &mut app, vec![], Modifiers::NONE);
+            let last = app.panes[0].tabs.len() - 1;
+            app.close_tab(0, last);
+            frame(&ctx, &mut app, vec![], Modifiers::NONE);
+            let run = |kind, sources: Vec<PathBuf>, dest: Option<PathBuf>| {
+                let job = crate::ops::start(kind, sources, dest, ctx.clone());
+                while !job.progress.lock().unwrap().finished { std::thread::sleep(Duration::from_millis(1)); }
+                assert!(job.progress.lock().unwrap().errors.is_empty(), "{:?}", job.progress.lock().unwrap().errors);
+            };
+            run(crate::ops::OpKind::Copy, vec![file.clone()], Some(out.clone()));
+            run(crate::ops::OpKind::Destroy, vec![out.join("payload.bin")], None);
+            if cycle % 25 == 0 { samples.push((private_bytes(), handles())); }
+        }
+        let quarter = samples.len() / 4;
+        let mean = |part: &[(usize, u32)]| (part.iter().map(|s| s.0).sum::<usize>() / part.len(), part.iter().map(|s| s.1 as usize).sum::<usize>() / part.len());
+        let (early, late) = (mean(&samples[quarter..quarter * 2]), mean(&samples[quarter * 3..]));
+        eprintln!("[leak] {cycles} cycles: private {} -> {} MB, handles {} -> {}", early.0 >> 20, late.0 >> 20, early.1, late.1);
+        let _ = std::fs::remove_dir_all(&work);
+        assert!(late.0 < early.0 + (16 << 20), "memory keeps growing");
+        assert!(late.1 < early.1 + 50, "handles keep growing");
+    }
+}
+
 #[test]
 fn the_configuration_folder_opens_in_a_new_tab_of_the_app() {
     let root = std::env::temp_dir().join(format!("fc_config_folder_{}", std::process::id()));
