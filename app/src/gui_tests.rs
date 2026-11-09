@@ -1691,3 +1691,80 @@ fn the_path_field_completes_folders_in_its_own_line() {
     assert_eq!(app.panes[0].path().as_os_str(), root.join("Documents").as_os_str());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Where this exact text is painted highest up inside a panel.
+fn painted_at(ctx: &egui::Context, app: &mut App, wanted: &str, pane: Rect) -> Pos2 {
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+    output.textures_delta.clear();
+    output.shapes.iter().filter_map(|s| match &s.shape {
+        egui::epaint::Shape::Text(t) if t.galley.job.text == wanted => {
+            Some(Rect::from_min_size(t.pos, t.galley.size()).center())
+        }
+        _ => None,
+    }).filter(|p| pane.contains(*p)).min_by(|a, b| a.y.total_cmp(&b.y))
+        .unwrap_or_else(|| panic!("{wanted} is not painted"))
+}
+
+#[test]
+fn tabs_and_path_pieces_become_shortcuts_without_moving_anything() {
+    use crate::app::{DropTarget, Tab};
+    use crate::settings::{FavGroup, SidebarSection};
+    let root = std::env::temp_dir().join(format!("fc_crumb_drag_{}", std::process::id()));
+    let (one, two, kept) = (root.join("one"), root.join("one/two"), root.join("kept"));
+    std::fs::create_dir_all(&two).unwrap();
+    std::fs::create_dir_all(&kept).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(root.join("unused.png")));
+    app.st.show_columns = false;
+    app.st.favorites = vec![FavGroup::new("Beloved", vec![kept.clone()])];
+    app.st.sidebar_order = vec![SidebarSection::Favorite(0), SidebarSection::Drives,
+        SidebarSection::Cloud, SidebarSection::History];
+    assert!(app.panes.len() >= 2);
+    app.panes[0].tabs = vec![Tab::new(two.clone())];
+    app.panes[0].active = 0;
+    app.panes[1].tabs = vec![Tab::new(root.clone())];
+    app.panes[1].active = 0;
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    let pane = |app: &App, id| app.pane_rects.iter().find(|(k, _)| *k == id).unwrap().1;
+    let card = |app: &App| app.drop_zones.iter().find_map(|(r, t)| matches!(t, DropTarget::Favorites { .. }).then_some(*r)).unwrap();
+    let h = app.row_h() + 1.0;
+    let row_top = |card: Rect| card.max.y - 6.0 - h - 1.0;
+
+    // A tab lands above the shortcut and stays open.
+    let c = card(&app);
+    let (a, tabs) = (pane(&app, 0), app.panes.len());
+    drag_mouse(&ctx, &mut app, pos2(a.min.x + 50.0, a.min.y + 16.0), pos2(c.min.x + 40.0, row_top(c) + 1.0));
+    assert_eq!(app.st.favorites[0].paths, [two.clone(), kept.clone()]);
+    assert_eq!((app.panes.len(), app.panes[0].tabs.len()), (tabs, 1), "the tab is not moved or closed");
+    assert!(!egui::DragAndDrop::has_any_payload(&ctx));
+
+    // A path piece lands below the last shortcut.
+    let piece = painted_at(&ctx, &mut app, "one", a);
+    let c = card(&app);
+    drag_mouse(&ctx, &mut app, piece, pos2(c.min.x + 40.0, c.max.y - 8.0));
+    assert_eq!(app.st.favorites[0].paths, [two.clone(), kept.clone(), one.clone()]);
+
+    // Over another panel it opens a tab, and over its own list nothing happens.
+    let piece = painted_at(&ctx, &mut app, "one", a);
+    let other = pane(&app, 1).center();
+    drag_mouse(&ctx, &mut app, piece, other);
+    assert_eq!(app.panes[1].path(), one.as_path());
+    assert_eq!(app.panes[1].tabs.len(), 2);
+    let piece = painted_at(&ctx, &mut app, "one", a);
+    drag_mouse(&ctx, &mut app, piece, a.center());
+    assert_eq!(app.panes[0].tabs.len(), 1, "a drop on its own list opens nothing");
+    assert!(app.jobs.is_empty(), "no file operation starts");
+    assert!(two.is_dir() && kept.is_dir(), "folders stay where they are");
+
+    // "This PC" is no folder, so it cannot be dragged.
+    let computer = painted_at(&ctx, &mut app, "This PC", a);
+    let favorites = app.st.favorites[0].paths.clone();
+    let c = card(&app);
+    drag_mouse(&ctx, &mut app, computer, pos2(c.min.x + 40.0, c.max.y - 8.0));
+    assert_eq!(app.st.favorites[0].paths, favorites);
+    std::fs::remove_dir_all(root).unwrap();
+}

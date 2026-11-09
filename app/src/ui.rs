@@ -7,7 +7,7 @@ use egui::{
     Stroke, Ui, UiBuilder, pos2, vec2,
 };
 
-use crate::app::{Act, App, Dialog, DragPaths, DropTarget, FavDrag, ToastKind, is_computer};
+use crate::app::{Act, App, CrumbDrag, Dialog, DragPaths, DropTarget, FavDrag, ToastKind, is_computer};
 use crate::fsx;
 use crate::icons;
 use crate::settings::{Layout, SidebarSection};
@@ -733,6 +733,30 @@ impl App {
         }
     }
 
+    /// The folder a dragged tab or path-bar piece stands for.
+    fn dragged_folder(&self, ctx: &egui::Context) -> Option<PathBuf> {
+        if let Some(crumb) = egui::DragAndDrop::payload::<CrumbDrag>(ctx) {
+            return Some(crumb.path.clone());
+        }
+        let drag = egui::DragAndDrop::payload::<TabDrag>(ctx)?;
+        let path = self.panes.get(drag.pane)?.tabs.get(drag.tab?)?.path.clone();
+        (!is_computer(&path)).then_some(path)
+    }
+
+    /// Adds a dragged tab or path-bar piece to a group as a shortcut, where the line shows.
+    fn fav_folder_drop(&mut self, ui: &Ui, card: Rect, g: usize, rows: &[Rect]) {
+        let Some(path) = self.dragged_folder(ui.ctx()) else { return };
+        let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| card.contains(*p) && ui.clip_rect().contains(*p));
+        let Some(pos) = pointer else { return };
+        let (RowDrop::At(at) | RowDrop::Into(at)) = row_drop(rows, pos.y, |_| false);
+        insertion_line(ui, card, rows, at, self.pal.accent);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if ui.input(|i| i.pointer.any_released()) {
+            egui::DragAndDrop::clear_payload(ui.ctx());
+            self.acts.push(Act::PlaceFavorites { group: g, at, paths: vec![path] });
+        }
+    }
+
     /// What releasing dragged files on a group does, shown on the group as it is
     /// decided: a highlighted folder, or a line between two shortcuts.
     fn fav_paths_target(&self, ui: &Ui, card: Rect, g: usize, paths: &[PathBuf], rows: &[Rect]) -> DropTarget {
@@ -836,6 +860,7 @@ impl App {
             }
         });
         self.fav_item_drop(ui, &r.response, g, &rows);
+        self.fav_folder_drop(ui, r.response.rect, g, &rows);
         self.sidebar_group_drop(ui, &r.response, SidebarSection::Favorite(g));
         let target = self.fav_paths_target(ui, r.response.rect, g, paths, &rows);
         self.drop_zones.push((r.response.rect, target));
@@ -1129,6 +1154,22 @@ impl App {
                         }
                     }
                 }
+        if let Some(payload) = egui::DragAndDrop::payload::<CrumbDrag>(ui.ctx())
+            && let Some(pos) = ui.input(|inp| inp.pointer.interact_pos())
+            && let Some((target, r)) = rects.iter().find(|(_, r)| r.contains(pos))
+            // Over its own panel only the tab strip counts, so a shaky click opens nothing.
+            && (*target != payload.pane || pos.y < r.min.y + 1.0 + TAB_H)
+        {
+            let mut preview = *r;
+            if *target == payload.pane {
+                preview.max.y = r.min.y + 1.0 + TAB_H;
+            }
+            ui.painter().rect_filled(preview, CornerRadius::same(1), self.pal.accent.gamma_multiply(0.25));
+            if ui.input(|inp| inp.pointer.any_released()) {
+                self.acts.push(Act::OpenNewTab(*target, payload.path.clone(), true));
+                egui::DragAndDrop::clear_payload(ui.ctx());
+            }
+        }
         self.pane_rects = rects;
     }
 
@@ -1305,7 +1346,7 @@ impl App {
             } else {
                 path.display().to_string()
             };
-            resp.on_hover_text(format!("{tip}\nDrag to reorder, join another panel, or split at an edge")).context_menu(|ui| {
+            resp.on_hover_text(format!("{tip}\nDrag to reorder, join another panel, split at an edge, or add to a favorites group")).context_menu(|ui| {
                 if ui.button("Close tab").clicked() {
                     self.acts.push(Act::CloseTab(i, t));
                     ui.close();

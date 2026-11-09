@@ -163,6 +163,8 @@ Ctrl+drag adds to the selection; drag an already selected row to move files.
 File operations have their own toolbar row; narrow toolbars scroll horizontally.
 New panels split the last tile on the right/bottom, along its longer side.
 Drag a tab to an edge to create a panel, or onto another panel to join its tabs.
+Drag a tab or a piece of the path bar onto a favorites group to add it as a shortcut. A piece of
+the path bar dropped on another panel, or on a tab strip, opens in a new tab. Neither moves the folder.
 Drop on the tab strip to reorder tabs; empty panels close automatically.
 Each tab has its own × button, including the last tab in a panel. Closing the
 last tab in the last panel closes the window. Controls use nearly square corners.

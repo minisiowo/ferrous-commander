@@ -8,7 +8,7 @@ use egui::{
     StrokeKind, Ui, UiBuilder, pos2, vec2,
 };
 
-use crate::app::{Act, App, DragPaths, DropTarget, ToastKind, is_computer};
+use crate::app::{Act, App, CrumbDrag, DragPaths, DropTarget, ToastKind, is_computer};
 use crate::preview::{Key as PreviewKey, PreviewContent};
 use crate::fsx::{self, Entry, SortBy};
 use crate::icons;
@@ -442,8 +442,15 @@ impl App {
                 pos2(x, title_r.center().y - 10.0),
                 vec2(widths[k] - 6.0, 20.0),
             );
-            let resp = ui.interact(cr, ui.scope_id().with(("crumb", i, k)), Sense::click());
-            if resp.hovered() {
+            let sense = if is_computer(&crumbs[k]) { Sense::click() } else { Sense::click_and_drag() };
+            let resp = ui.interact(cr, ui.scope_id().with(("crumb", i, k)), sense);
+            if resp.drag_started() {
+                egui::DragAndDrop::set_payload(ui.ctx(), CrumbDrag { pane: i, path: crumbs[k].clone() });
+            }
+            if resp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+            if resp.hovered() || resp.dragged() {
                 p.rect_filled(cr, CornerRadius::same(1), pal.hover);
             }
             let col = if resp.hovered() || k + 1 == crumbs.len() {

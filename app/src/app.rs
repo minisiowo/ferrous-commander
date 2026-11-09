@@ -234,6 +234,13 @@ pub struct SearchUi {
 #[derive(Clone)]
 pub struct DragPaths(pub Vec<PathBuf>);
 
+/// A piece of the path bar being dragged: stands for the folder, and never moves it.
+#[derive(Clone)]
+pub struct CrumbDrag {
+    pub pane: usize,
+    pub path: PathBuf,
+}
+
 /// A sidebar shortcut being rearranged: moves the shortcut, never the folder.
 #[derive(Clone)]
 pub struct FavDrag {
