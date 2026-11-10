@@ -17,17 +17,26 @@ pub fn handoff(app: &mut crate::app::App, ctx: &egui::Context, frame: &eframe::F
             if ok { app.acts.push(crate::app::Act::Refresh); }
         }
     }
-    let Some(paths) = egui::DragAndDrop::payload::<crate::app::DragPaths>(ctx) else { return };
+    // Whether the window held the keyboard at some point of the drag in progress.
+    static HAD_FOCUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    use std::sync::atomic::Ordering::Relaxed;
+    let Some(paths) = egui::DragAndDrop::payload::<crate::app::DragPaths>(ctx) else {
+        HAD_FOCUS.store(false, Relaxed);
+        return;
+    };
     // Keep checking even when winit stops delivering motion at the surface edge.
     ctx.request_repaint_after(Duration::from_millis(10));
-    let (rect, pos, delta, down) = ctx.input(|i| (i.content_rect(), i.pointer.hover_pos(),
-        i.pointer.delta(), i.pointer.primary_down()));
-    // Wayland keeps reporting motion outside the surface during the implicit
-    // grab, so internal drags stay local right up to the window border.
-    let outward = if wayland.is_some() { down && pos.is_none_or(|p| !rect.contains(p)) }
+    let (rect, pos, delta, down, focused) = ctx.input(|i| (i.content_rect(), i.pointer.hover_pos(),
+        i.pointer.delta(), i.pointer.primary_down(), i.focused));
+    // Only a focus lost during the drag counts: a window dragged from without
+    // the keyboard must still move files between its own panels.
+    let lost_focus = !focused && HAD_FOCUS.load(Relaxed);
+    if focused { HAD_FOCUS.store(true, Relaxed); }
+    let outward = if wayland.is_some() { leaves_wayland_window(rect, pos, down, !lost_focus) }
         else { should_handoff(rect, pos, delta, down) };
     if !outward { return; }
     egui::DragAndDrop::clear_payload(ctx);
+    HAD_FOCUS.store(false, Relaxed);
     let result = match wayland {
         Some(_) => match frame.window_handle().map(|w| w.as_raw()) {
             Ok(RawWindowHandle::Wayland(window)) => wayland::start(window.surface, &paths.0),
@@ -180,6 +189,15 @@ mod wayland {
 }
 
 const URI_LIST: &str = "text/uri-list";
+
+/// Wayland keeps reporting motion outside the surface during the implicit grab, so
+/// internal drags stay local right up to the window border. The same grab hides a
+/// window that comes up over this one: a shortcut that shows another workspace or a
+/// scratchpad mid-drag leaves the pointer inside this window's rectangle. What does
+/// change then is the keyboard focus, so losing it hands the drag to the compositor.
+fn leaves_wayland_window(rect: egui::Rect, pos: Option<egui::Pos2>, down: bool, focused: bool) -> bool {
+    down && (!focused || pos.is_none_or(|p| !rect.contains(p)))
+}
 
 fn should_handoff(rect: egui::Rect, pos: Option<egui::Pos2>, delta: egui::Vec2, down: bool) -> bool {
     if !down { return false; }
@@ -404,6 +422,17 @@ mod tests {
         assert!(!should_handoff(rect, Some(pos2(600.0, 300.0)), vec2(20.0, 0.0), true));
         assert!(should_handoff(rect, None, egui::Vec2::ZERO, true));
         assert!(!should_handoff(rect, None, egui::Vec2::ZERO, false));
+    }
+    #[test]
+    fn a_wayland_drag_leaves_at_the_border_or_when_another_window_takes_the_keyboard() {
+        use egui::{Rect, pos2};
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(1200.0, 750.0));
+        let inside = Some(pos2(600.0, 300.0));
+        assert!(!leaves_wayland_window(rect, inside, true, true), "a drag inside the window stays local");
+        assert!(leaves_wayland_window(rect, Some(pos2(1300.0, 300.0)), true, true));
+        assert!(leaves_wayland_window(rect, None, true, true));
+        assert!(leaves_wayland_window(rect, inside, true, false), "a scratchpad came up over the window");
+        assert!(!leaves_wayland_window(rect, inside, false, false), "nothing is held");
     }
     #[test]
     fn uri_payload_preserves_filename_bytes_and_sources() {
