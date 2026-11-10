@@ -131,11 +131,12 @@ fn tab_changes_what_the_palette_lists_and_history_is_latest_first() {
     key(&ctx, &mut app, Key::Tab, Modifiers::NONE);
     assert_eq!(palette(&app).mode(), Mode::History);
     assert_eq!(palette(&app).titles(), ["dir20", "dir11", "dir03"]);
-    word(&ctx, &mut app, "03");
-    assert_eq!(palette(&app).query, "@03", "typing goes on after the mode's character");
+    // Not just "03": text also matches the parent path, and that holds this process's id.
+    word(&ctx, &mut app, "r03");
+    assert_eq!(palette(&app).query, "@r03", "typing goes on after the mode's character");
     assert_eq!(palette(&app).titles(), ["dir03"]);
     key(&ctx, &mut app, Key::Tab, Modifiers::SHIFT);
-    assert_eq!(palette(&app).query, ">03", "the text is kept across modes");
+    assert_eq!(palette(&app).query, ">r03", "the text is kept across modes");
     key(&ctx, &mut app, Key::Tab, Modifiers::NONE);
     key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
     settle(&ctx, &mut app);
