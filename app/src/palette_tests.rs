@@ -42,7 +42,7 @@ fn alt_p_opens_the_palette_which_takes_the_keyboard_and_goes_to_a_folder() {
     let (ctx, mut app, root) = palette_app("palette_go");
     alt_p(&ctx, &mut app);
     assert_eq!(palette(&app).query, "", "the shortcut's own letter is not typed");
-    assert!(paints_text(&ctx, &mut app, "Go to"));
+    assert!(paints_text(&ctx, &mut app, Mode::Places.hint()));
     word(&ctx, &mut app, "dir07");
     assert_eq!(palette(&app).query, "dir07");
     assert_eq!(app.panes[0].filter, "", "the list behind does not filter");

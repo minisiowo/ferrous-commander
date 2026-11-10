@@ -203,6 +203,11 @@ pub fn glyph(p: &Painter, r: Rect, name: &str, c: Color32) {
             bar(vec2(0.0, 4.5));
         }
         "minus" => bar(vec2(4.5, 0.0)),
+        "clock" => {
+            p.circle_stroke(r.center(), 6.5, s);
+            p.line_segment([r.center(), r.center() + vec2(0.0, -4.0)], s);
+            p.line_segment([r.center(), r.center() + vec2(3.0, 0.0)], s);
+        }
         "prev" => chevron(p, r.center(), 4.0, false, s),
         "next" => chevron(p, r.center(), 4.0, true, s),
         // Columns layout: three columns

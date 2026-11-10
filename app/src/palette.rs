@@ -37,6 +37,15 @@ impl Mode {
         }
     }
 
+    /// What stands for the mode beside the field. See `icons::face`.
+    pub fn face(self) -> &'static str {
+        match self {
+            Mode::Places => "🔍",
+            Mode::Commands => "#next",
+            Mode::History => "#clock",
+        }
+    }
+
     pub fn hint(self) -> &'static str {
         match self {
             Mode::Places => "Go to a folder or file. Type > for commands, @ for history",

@@ -391,7 +391,9 @@ impl App {
                         ui.set_width(width);
                         ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
                         Frame::NONE.inner_margin(Margin::symmetric(12, 9)).show(ui, |ui| ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(mode.label()).color(pal.accent).strong());
+                            // The symbol and the text stand in the same columns as those of the rows.
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            let slot = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                             if std::mem::take(&mut palette.cursor_to_end) {
                                 let end = CCursor::new(CharIndex(palette.query.chars().count()));
                                 let mut state = TextEdit::load_state(ui.ctx(), field).unwrap_or_default();
@@ -402,7 +404,11 @@ impl App {
                                 .hint_text(mode.hint()).desired_width(f32::INFINITY)
                                 .font(FontId::proportional(self.st.font_size + 2.0));
                             // Every frame: a click on a row or Tab must not take the keyboard away.
-                            ui.add(edit).request_focus();
+                            let typed = ui.add(edit);
+                            typed.request_focus();
+                            let middle = pos2(slot.0.center().x, typed.rect.center().y);
+                            icons::face(ui.painter(), Rect::from_center_size(middle, slot.0.size()), mode.face(), 15.0, pal.accent);
+                            slot.1.on_hover_text(mode.label());
                         }));
                         if palette.query != before { palette.changed = Instant::now(); }
                         self.palette_rows(&mut palette, ui.ctx());
@@ -428,7 +434,7 @@ impl App {
                             if palette.rows.is_empty() {
                                 let (r, _) = ui.allocate_exact_size(vec2(width, row_h), Sense::hover());
                                 let text = if palette::split(&palette.query).1.is_empty() { "Nothing here yet" } else { "Nothing matches" };
-                                ui.painter().text(pos2(r.min.x + 12.0, r.center().y), Align2::LEFT_CENTER, text, FontId::proportional(self.st.font_size), pal.text_weak);
+                                ui.painter().text(pos2(r.min.x + 38.0, r.center().y), Align2::LEFT_CENTER, text, FontId::proportional(self.st.font_size), pal.text_weak);
                             }
                         });
                         self.palette_footer(ui, width, &palette);
