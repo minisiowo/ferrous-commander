@@ -829,8 +829,8 @@ fn doc_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<DocData>, body: Rect) {
             if at.y + size.y + 16.0 < viewport.min.y || at.y - 16.0 > viewport.max.y { continue; }
             let pos = r.min + vec2(left + at.x, at.y);
             match kind {
-                BlockKind::Quote => { p.rect_filled(Rect::from_min_size(pos - vec2(14.0, 0.0), vec2(3.0, size.y)), CornerRadius::same(1), pal.raised); }
-                BlockKind::Code => { p.rect_filled(Rect::from_min_size(pos - vec2(8.0, 6.0), vec2(width - at.x, size.y + 12.0)), CornerRadius::same(4), blend(pal.raised, pal.window, 0.45)); }
+                BlockKind::Quote => { p.rect_filled(Rect::from_min_size(pos - vec2(14.0, 0.0), vec2(3.0, size.y)), CornerRadius::ZERO, pal.raised); }
+                BlockKind::Code => { p.rect_filled(Rect::from_min_size(pos - vec2(8.0, 6.0), vec2(width - at.x, size.y + 12.0)), CornerRadius::ZERO, blend(pal.raised, pal.window, 0.45)); }
                 BlockKind::Item => { p.circle_filled(pos + vec2(-11.0, 10.0), 2.5, pal.text_weak); }
                 BlockKind::Rule => { p.line_segment([pos, pos + vec2(width, 0.0)], Stroke::new(1.0, pal.raised)); }
                 _ => {}
@@ -990,7 +990,7 @@ fn control_bar(ui: &mut Ui, s: &mut Shared, body: Rect, ctx: &egui::Context, ima
     let r = Rect::from_center_size(pos2(body.center().x, body.max.y - 30.0), vec2(width, 36.0));
     let mut bar = ui.new_child(UiBuilder::new().max_rect(r).layout(egui::Layout::left_to_right(egui::Align::Center)));
     bar.multiply_opacity(opacity);
-    bar.painter().rect_filled(r, CornerRadius::same(8), blend(pal.raised, pal.window, 0.2));
+    bar.painter().rect_filled(r, CornerRadius::ZERO, blend(pal.raised, pal.window, 0.2));
     bar.add_space(8.0);
     let flat = |text: &str| egui::Button::new(egui::RichText::new(text).size(15.0)).frame(false);
     if symbol_button(&mut bar, "#prev", false, &pal).on_hover_text("Previous file").clicked() { s.send(Cmd::Step(-1), ctx); }

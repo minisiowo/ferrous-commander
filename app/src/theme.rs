@@ -167,8 +167,8 @@ impl Palette {
         v.panel_fill = self.window;
         v.window_fill = self.panel;
         v.window_stroke = Stroke::new(1.0, blend(self.panel, self.text_weak, 0.28));
-        v.window_corner_radius = CornerRadius::same(2);
-        v.menu_corner_radius = CornerRadius::same(2);
+        v.window_corner_radius = CornerRadius::ZERO;
+        v.menu_corner_radius = CornerRadius::ZERO;
         v.window_shadow = egui::epaint::Shadow::NONE;
         v.popup_shadow = egui::epaint::Shadow::NONE;
         v.extreme_bg_color = if self.dark { blend(self.window, self.panel, 0.5) } else { hex("#FFFFFF") };
@@ -177,7 +177,7 @@ impl Palette {
         v.hyperlink_color = self.text_important;
         v.selection.bg_fill = self.selection();
         v.selection.stroke = Stroke::new(1.0, self.text);
-        let r = CornerRadius::same(1);
+        let r = CornerRadius::ZERO;
         let w = &mut v.widgets;
         w.noninteractive.bg_fill = self.panel;
         w.noninteractive.weak_bg_fill = self.panel;

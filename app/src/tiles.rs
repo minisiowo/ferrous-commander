@@ -4,8 +4,8 @@
 use egui::{Rect, pos2};
 use serde::{Deserialize, Serialize};
 
-/// Gap between panels (also the divider's grab area).
-pub const GAP: f32 = 4.0;
+/// Gap between panels: the line that divides them.
+pub const GAP: f32 = 1.0;
 /// A split never gives a side less than this share.
 const MIN_RATIO: f32 = 0.12;
 

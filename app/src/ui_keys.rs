@@ -159,7 +159,7 @@ impl App {
             .order(egui::Order::Foreground)
             .interactable(false)
             .show(ctx, |ui| {
-                Frame::NONE.fill(pal.panel).corner_radius(CornerRadius::same(1))
+                Frame::NONE.fill(pal.panel).corner_radius(CornerRadius::ZERO)
                     .stroke(Stroke::new(1.0, pal.border)).inner_margin(Margin::symmetric(12, 8))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {

@@ -115,7 +115,7 @@ pub fn icon_button(ui: &mut Ui, text: &str, tip: &str, on: bool, pal: &Palette) 
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(r, CornerRadius::same(1), bg);
+    ui.painter().rect_filled(r, CornerRadius::ZERO, bg);
     let col = if resp.hovered() || on {
         pal.text
     } else {
@@ -181,7 +181,7 @@ fn chip_with_room(ui: &mut Ui, text: &str, on: bool, arrow_w: f32, pal: &Palette
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(r, CornerRadius::same(1), bg);
+    ui.painter().rect_filled(r, CornerRadius::ZERO, bg);
     ui.painter().text(
         r.center() - vec2(arrow_w / 2.0, 0.0),
         Align2::CENTER_CENTER,
@@ -204,7 +204,7 @@ pub fn card<R>(
     };
     Frame::NONE
         .fill(pal.surface(pal.card))
-        .corner_radius(CornerRadius::same(1))
+        .corner_radius(CornerRadius::ZERO)
         .inner_margin(Margin::symmetric(8, 6))
         .stroke(stroke)
         .show(ui, add)
@@ -297,8 +297,8 @@ fn insertion_line(ui: &Ui, card: Rect, rows: &[Rect], at: usize, color: Color32)
 /// Marks a sidebar row as the folder that dragged files will go into.
 fn highlight_drop_row(ui: &Ui, row: Rect, color: Color32) {
     let painter = ui.painter();
-    painter.rect_filled(row, CornerRadius::same(1), color.gamma_multiply(0.25));
-    painter.rect_stroke(row, CornerRadius::same(1), Stroke::new(1.5, color), egui::StrokeKind::Inside);
+    painter.rect_filled(row, CornerRadius::ZERO, color.gamma_multiply(0.25));
+    painter.rect_stroke(row, CornerRadius::ZERO, Stroke::new(1.5, color), egui::StrokeKind::Inside);
 }
 
 impl App {
@@ -845,10 +845,10 @@ impl App {
         let current = self.panes[self.active].path() == path;
         if current {
             ui.painter()
-                .rect_filled(r, CornerRadius::same(1), pal.selection());
+                .rect_filled(r, CornerRadius::ZERO, pal.selection());
         } else if resp.hovered() {
             ui.painter()
-                .rect_filled(r, CornerRadius::same(1), pal.hover);
+                .rect_filled(r, CornerRadius::ZERO, pal.hover);
         }
         let ir = Rect::from_min_size(pos2(r.min.x + 4.0, r.center().y - 8.0), vec2(16.0, 16.0));
         let (exists, is_file) = side_metadata(path);
@@ -1090,7 +1090,7 @@ impl App {
         let rect = Rect::from_center_size(pos2(row.rect.max.x - 46.0, row.rect.min.y + 11.0), vec2(20.0, 20.0));
         let button = ui.interact(rect, row.id.with("eject"), if busy { Sense::hover() } else { Sense::click() });
         let pal = self.pal;
-        if button.hovered() && !busy { ui.painter().rect_filled(rect, CornerRadius::same(3), pal.hover); }
+        if button.hovered() && !busy { ui.painter().rect_filled(rect, CornerRadius::ZERO, pal.hover); }
         icons::eject(ui.painter(), rect.shrink(3.0), if busy { blend(pal.panel, pal.text_weak, 0.4) } else { pal.text_weak });
         let clicked = button.on_hover_text(if busy { "Ejecting…" } else { "Eject safely" }).clicked();
         let mut chosen = clicked;
@@ -1120,7 +1120,7 @@ impl App {
             Color32::TRANSPARENT
         };
         let p = ui.painter();
-        p.rect_filled(r, CornerRadius::same(1), bg);
+        p.rect_filled(r, CornerRadius::ZERO, bg);
         let ir = Rect::from_min_size(pos2(r.min.x + 4.0, r.min.y + 4.0), vec2(16.0, 14.0));
         if d.network {
             icons::glyph(p, ir, "network", pal.text_weak);
@@ -1162,13 +1162,13 @@ impl App {
         );
         p.rect_filled(
             bar,
-            CornerRadius::same(2),
+            CornerRadius::ZERO,
             blend(pal.panel, pal.text_weak, 0.2),
         );
         let fill = Rect::from_min_size(bar.min, vec2(bar.width() * pct, bar.height()));
         p.rect_filled(
             fill,
-            CornerRadius::same(2),
+            CornerRadius::ZERO,
             if pct > 0.9 {
                 hex("#ef7063")
             } else {
@@ -1281,6 +1281,12 @@ impl App {
             self.tiles
                 .layout(full, &mut rects, &mut divs, &mut Vec::new());
         }
+        for (i, r) in rects.clone() {
+            if i < self.panes.len() {
+                self.pane(ui, i, r);
+            }
+        }
+        // After the panels, so that a one-point line can be grabbed a little beside it too.
         for d in &divs {
             let id = ui.scope_id().with(("divider", &d.path));
             let resp = ui.interact(d.rect.expand(2.0), id, Sense::click_and_drag());
@@ -1292,7 +1298,7 @@ impl App {
             if resp.hovered() || resp.dragged() {
                 ui.ctx().set_cursor_icon(icon);
                 ui.painter().rect_filled(
-                    d.rect,
+                    d.rect.expand(1.0),
                     CornerRadius::ZERO,
                     blend(self.pal.border, self.pal.accent, 0.6),
                 );
@@ -1312,11 +1318,6 @@ impl App {
             if resp.double_clicked() {
                 self.tiles.set_ratio(&d.path, 0.5);
                 self.mark_dirty();
-            }
-        }
-        for (i, r) in rects.clone() {
-            if i < self.panes.len() {
-                self.pane(ui, i, r);
             }
         }
         if let Some(payload) = egui::DragAndDrop::payload::<TabDrag>(ui.ctx())
@@ -1345,9 +1346,10 @@ impl App {
                             }
                         } else if in_tabs {
                             let x = (r.min.x + 5.0 + at as f32 * w).min(r.max.x - 2.0);
-                            preview = Rect::from_min_max(pos2(x, r.min.y + 4.0), pos2(x + 2.0, r.min.y + TAB_H));
+                            // From the top of a tab to its bottom: see `tab_bar`, inside the panel's 1-point edge.
+                            preview = Rect::from_min_max(pos2(x, r.min.y + 1.0 + 4.0), pos2(x + 2.0, r.min.y + 1.0 + TAB_H));
                         }
-                        ui.painter().rect_filled(preview, CornerRadius::same(1), self.pal.accent.gamma_multiply(if in_tabs { 0.9 } else { 0.25 }));
+                        ui.painter().rect_filled(preview, CornerRadius::ZERO, self.pal.accent.gamma_multiply(if in_tabs { 0.9 } else { 0.25 }));
                         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                         if ui.input(|inp| inp.pointer.any_released()) {
                             self.acts.push(match payload.tab {
@@ -1368,7 +1370,7 @@ impl App {
             if *target == payload.pane {
                 preview.max.y = r.min.y + 1.0 + TAB_H;
             }
-            ui.painter().rect_filled(preview, CornerRadius::same(1), self.pal.accent.gamma_multiply(0.25));
+            ui.painter().rect_filled(preview, CornerRadius::ZERO, self.pal.accent.gamma_multiply(0.25));
             if ui.input(|inp| inp.pointer.any_released()) {
                 self.acts.push(Act::OpenNewTab(*target, payload.path.clone(), true));
                 egui::DragAndDrop::clear_payload(ui.ctx());
@@ -1422,7 +1424,7 @@ impl App {
         } else {
             pal.panel
         };
-        painter.rect_filled(rect, CornerRadius::same(2), pal.surface(fill));
+        painter.rect_filled(rect, CornerRadius::ZERO, pal.surface(fill));
         let mut r = rect.shrink(1.0);
         // Reserve the summary before any controls, even in a very short tile.
         let status = take_bottom(&mut r, STATUS_H);
@@ -1496,7 +1498,7 @@ impl App {
             let selected = self.panes[i].active == t;
             let look = crate::theme::tab_look(&pal, selected, self.active == i, resp.hovered());
             let bg = look.fill;
-            p.rect_filled(tr, CornerRadius::same(1), bg);
+            p.rect_filled(tr, CornerRadius::ZERO, bg);
             let path = self.panes[i].tabs[t].path.clone();
             let ir =
                 Rect::from_min_size(pos2(tr.min.x + 8.0, tr.center().y - 7.0), vec2(14.0, 14.0));
@@ -1525,7 +1527,7 @@ impl App {
                 let xresp = ui.interact(xr, id.with("x"), Sense::click())
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                 if xresp.hovered() {
-                    p.rect_filled(xr, CornerRadius::same(1), blend(bg, pal.text, 0.15));
+                    p.rect_filled(xr, CornerRadius::ZERO, blend(bg, pal.text, 0.15));
                 }
                 icons::glyph(&p, xr, "close", pal.text_weak);
                 if xresp.on_hover_text(self.tip("Close tab", Command::CloseTab)).clicked() {
@@ -1579,7 +1581,7 @@ impl App {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             }
             if resp.hovered() {
-                p.rect_filled(br, CornerRadius::same(1), pal.hover);
+                p.rect_filled(br, CornerRadius::ZERO, pal.hover);
             }
             icons::glyph(&p, br, "grip", if resp.hovered() { pal.text } else { pal.text_weak });
             resp.on_hover_text("Drag to move this panel with all its tabs: join another panel, or split at an edge");
@@ -1589,7 +1591,7 @@ impl App {
             bx -= 26.0;
             let resp = ui.interact(br, ui.scope_id().with(("panelbtn", i, key)), Sense::click());
             if resp.hovered() {
-                p.rect_filled(br, CornerRadius::same(1), pal.hover);
+                p.rect_filled(br, CornerRadius::ZERO, pal.hover);
             }
             let col = if resp.hovered() {
                 pal.text
@@ -1620,7 +1622,7 @@ impl App {
         let pr = Rect::from_min_size(pos2(x + 2.0, r.min.y + 6.0), vec2(26.0, r.height() - 8.0));
         let presp = ui.interact(pr, ui.scope_id().with(("newtab", i)), Sense::click());
         if presp.hovered() {
-            p.rect_filled(pr, CornerRadius::same(1), pal.hover);
+            p.rect_filled(pr, CornerRadius::ZERO, pal.hover);
         }
         icons::glyph(&p, pr, "plus", pal.text_weak);
         if presp.on_hover_text(self.tip("Create new tab", Command::NewTab)).clicked() {
@@ -1738,7 +1740,7 @@ impl App {
                             if on {
                                 ui.painter().rect_filled(
                                     resp.rect,
-                                    CornerRadius::same(1),
+                                    CornerRadius::ZERO,
                                     pal.accent.gamma_multiply(0.2),
                                 );
                             }
@@ -1791,9 +1793,9 @@ impl App {
                     );
                     let p = ui.painter();
                     if hl_idx == Some(k) {
-                        p.rect_filled(rr, CornerRadius::same(1), pal.cursor(false));
+                        p.rect_filled(rr, CornerRadius::ZERO, pal.cursor(false));
                     } else if resp.hovered() {
-                        p.rect_filled(rr, CornerRadius::same(1), pal.hover);
+                        p.rect_filled(rr, CornerRadius::ZERO, pal.hover);
                     }
                     let ir = Rect::from_min_size(
                         pos2(rr.min.x + 4.0, rr.center().y - 7.0),

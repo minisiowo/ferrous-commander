@@ -169,7 +169,7 @@ fn cursor_at_end(cursor: Option<CCursorRange>, text: &str) -> bool {
 fn in_place_frame(ui: &Ui, margin: i8) -> egui::Frame {
     egui::Frame::new()
         .fill(ui.visuals().text_edit_bg_color())
-        .corner_radius(CornerRadius::same(1))
+        .corner_radius(CornerRadius::ZERO)
         .inner_margin(egui::Margin::symmetric(margin, 0))
 }
 
@@ -496,7 +496,7 @@ impl App {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             }
             if resp.hovered() || resp.dragged() {
-                p.rect_filled(cr, CornerRadius::same(1), pal.hover);
+                p.rect_filled(cr, CornerRadius::ZERO, pal.hover);
             }
             let col = if resp.hovered() || k + 1 == crumbs.len() {
                 pal.text
@@ -960,7 +960,7 @@ impl App {
                                 pos2(cr.max.x - 12.0 - g.size().x, cr.center().y - 8.0),
                                 vec2(g.size().x + 8.0, 16.0),
                             );
-                            p.rect_filled(br, CornerRadius::same(1), ac);
+                            p.rect_filled(br, CornerRadius::ZERO, ac);
                             put(s, small.clone(), Color32::from_rgb(0x1a, 0x1a, 0x1e));
                         }
                         None => put(s, small.clone(), weak),
@@ -1262,7 +1262,7 @@ impl App {
             (PreviewContent::Text(t), true) if r.width() > 160.0 && !t.text.is_empty() => {
                 p.rect_filled(
                     r,
-                    CornerRadius::same(1),
+                    CornerRadius::ZERO,
                     if pal.dark {
                         blend(pal.window, pal.panel, 0.5)
                     } else {
