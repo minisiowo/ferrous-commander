@@ -137,6 +137,48 @@ pub struct Pane {
     pub pending_select: Option<PathBuf>,
     /// New items selected before the folder's fresh listing shows them.
     arriving: HashSet<PathBuf>,
+    /// The status bar's numbers for a large folder, which are slow to add up.
+    pub counted: std::cell::Cell<Option<Counted>>,
+    /// The numbers just shown may be up to `COUNTED_FOR` old.
+    pub counted_old: std::cell::Cell<bool>,
+}
+
+#[derive(Clone, Copy)]
+pub struct Counted {
+    pub at: Instant,
+    pub rows: usize,
+    pub selected: usize,
+    pub result: (usize, usize, u64),
+}
+
+/// How long the numbers for a large folder last before they are added up again.
+pub const COUNTED_FOR: Duration = Duration::from_millis(250);
+/// Below this many rows the numbers are cheap to add up for every frame.
+pub const COUNTED_FROM: usize = 20_000;
+
+/// Reading and sorting a huge folder takes seconds, and a copy into it changes it all the
+/// time. It is read again only after a multiple of what the last reading took.
+#[derive(Default)]
+struct RefreshPace {
+    wait_until: HashMap<PathBuf, Instant>,
+}
+
+impl RefreshPace {
+    const SLOW_READ: Duration = Duration::from_millis(100);
+    const WAIT_FACTOR: u32 = 5;
+    const LONGEST_WAIT: Duration = Duration::from_secs(10);
+
+    fn due(&self, path: &Path, now: Instant) -> bool {
+        self.wait_until.get(path).is_none_or(|until| now >= *until)
+    }
+
+    fn note(&mut self, path: &Path, took: Duration, now: Instant) {
+        if took < Self::SLOW_READ {
+            self.wait_until.remove(path);
+        } else {
+            self.wait_until.insert(path.to_path_buf(), now + (took * Self::WAIT_FACTOR).min(Self::LONGEST_WAIT));
+        }
+    }
 }
 
 impl Pane {
@@ -540,9 +582,11 @@ impl App {
         let watch = std::sync::Arc::new(std::sync::Mutex::new(Vec::<FolderRequest>::new()));
         let watching = std::sync::Arc::new(std::sync::Mutex::new(HashSet::<PathBuf>::new()));
         spawn_folder_watcher(std::sync::Arc::downgrade(&watch), watching.clone(), folder_tx.clone());
+        let refresh_pace = std::sync::Arc::new(std::sync::Mutex::new(RefreshPace::default()));
         for _ in 0..FOLDER_WORKERS {
             let (requests, results, wake) = (requests.clone(), results.clone(), wake.clone());
             let watching = watching.clone();
+            let refresh_pace = refresh_pace.clone();
             std::thread::spawn(move || {
                 // The closure consumes the lock guard, so it is released before the work.
                 while let Ok(req) = requests.lock().map_err(drop).and_then(|queue| queue.recv().map_err(drop)) {
@@ -563,12 +607,16 @@ impl App {
                     None
                 };
                 let mtime = metadata.and_then(|m| m.modified()).ok();
-                let listing = if req.force || mtime != req.old_mtime {
+                // Asked for by the user, it is read at once. The watcher comes back anyway.
+                let due = !req.poll || req.force || refresh_pace.lock().map_or(true, |pace| pace.due(&req.path, Instant::now()));
+                let listing = if due && (req.force || mtime != req.old_mtime) {
+                    let started = Instant::now();
                     let (mut entries, error) = match fsx::read_dir(&req.path) {
                         Ok(entries) => (entries, None),
                         Err(error) => (Vec::new(), Some(error)),
                     };
                     fsx::sort_entries(&mut entries, req.sorting);
+                    if let Ok(mut pace) = refresh_pace.lock() { pace.note(&req.path, started.elapsed(), Instant::now()); }
                     Some(Listing {
                         entries,
                         error,
@@ -886,7 +934,10 @@ impl App {
             if let Some(mut listing) = result.listing.filter(|_| !stale) {
                 self.generation += 1;
                 listing.generation = self.generation;
-                self.cache.insert(result.path.clone(), listing);
+                // Freeing hundreds of thousands of names would be a visible pause here.
+                if let Some(old) = self.cache.insert(result.path.clone(), listing) && old.entries.len() >= COUNTED_FROM {
+                    std::thread::spawn(move || drop(old));
+                }
             }
             if let Some(parent) = result.fallback {
                 for pane in &mut self.panes {
@@ -1169,6 +1220,9 @@ impl App {
         };
         if self.folder_tx.try_send(req).is_ok() {
             self.folder_pending.insert(p.to_path_buf(), false);
+        } else if let Some(ctx) = self.wake.get() {
+            // The queue is full, and the next frame asks again. It may be far off otherwise.
+            ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 
@@ -1381,9 +1435,11 @@ impl App {
                 pane.cursor_path = pane.cursor.map(|c| entries[view[c]].path.clone());
             }
         }
-        let alive: HashSet<&PathBuf> = view.iter().map(|&k| &entries[k].path).collect();
-        pane.arriving.retain(|s| !alive.contains(s));
-        pane.selected.retain(|s| alive.contains(s) || pane.arriving.contains(s));
+        if !pane.arriving.is_empty() || !pane.selected.is_empty() {
+            let alive: HashSet<&PathBuf> = view.iter().map(|&k| &entries[k].path).collect();
+            pane.arriving.retain(|s| !alive.contains(s));
+            pane.selected.retain(|s| alive.contains(s) || pane.arriving.contains(s));
+        }
         pane.view = view;
         pane.view_key = Some(key);
     }
@@ -2349,6 +2405,21 @@ impl Drop for App {
 
 #[cfg(test)]
 mod performance_tests {
+    #[test]
+    fn a_huge_changing_folder_is_read_again_less_often() {
+        use std::path::Path;
+        use std::time::{Duration, Instant};
+        let (mut pace, now, huge) = (super::RefreshPace::default(), Instant::now(), Path::new("huge"));
+        assert!(pace.due(huge, now), "a folder never read is read");
+        pace.note(huge, Duration::from_secs(1), now);
+        assert!(!pace.due(huge, now + Duration::from_secs(4)));
+        assert!(pace.due(huge, now + Duration::from_secs(5)));
+        pace.note(huge, Duration::from_secs(60), now);
+        assert!(pace.due(huge, now + Duration::from_secs(10)), "not for longer than this");
+        pace.note(huge, Duration::from_millis(10), now);
+        assert!(pace.due(huge, now), "quick to read, it follows every change");
+    }
+
     #[test]
     fn the_window_changes_with_the_desktop_theme_and_can_leave_it() {
         let dir = std::env::temp_dir().join(format!("fc-omarchy-app-{}", std::process::id()));

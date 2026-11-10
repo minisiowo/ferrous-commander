@@ -324,6 +324,52 @@ mod tests {
         (values[values.len() / 2], values[(values.len() * 95 / 100).min(values.len() - 1)])
     }
 
+    #[cfg(windows)]
+    fn memory_of(child: u32) -> u64 {
+        let script = format!("(Get-Process -Id {child}).PrivateMemorySize64");
+        let output = Command::new("powershell").args(["-NoProfile", "-Command", &script]).output().unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().parse().unwrap()
+    }
+
+    #[cfg(not(windows))]
+    fn memory_of(child: u32) -> u64 {
+        let status = std::fs::read_to_string(format!("/proc/{child}/status")).unwrap();
+        let line = status.lines().find(|line| line.starts_with("VmRSS:")).unwrap();
+        line.split_whitespace().nth(1).unwrap().parse::<u64>().unwrap() * 1024
+    }
+
+    /// Many looks at one model must not make the helper grow. Same set-up as the baseline below,
+    /// with `FERROUS_LOOK_TRIANGLES` (one number) and `FERROUS_LOOK_ROUNDS`.
+    #[test]
+    #[ignore = "needs the release program, named by FERROUS_HELPER_EXE"]
+    fn model_look_endurance() {
+        let program = std::env::var_os("FERROUS_HELPER_EXE").expect("FERROUS_HELPER_EXE");
+        let number = |name, default| std::env::var(name).map_or(default, |n: String| n.parse().unwrap());
+        let (wanted, rounds): (usize, i16) = (number("FERROUS_LOOK_TRIANGLES", 1_000_000), number("FERROUS_LOOK_ROUNDS", 1500) as i16);
+        let root = load::scratch("endurance");
+        let file = root.join("ball.stl");
+        let triangles = write_ball(&file, wanted);
+        let mut command = Command::new(&program);
+        command.arg(FLAG);
+        let mut running = Some(Helper::from_command(command).unwrap());
+        let child = running.as_ref().unwrap().child.as_ref().unwrap().id();
+        let no_second_helper = || Err(io::ErrorKind::NotFound.into());
+        let never_stale = || false;
+        let mut ask_for = |view| ask(&mut running, no_second_helper, &file, Options { max_side: 2048, view, ..ANY }, Duration::from_secs(120), &never_stale).unwrap();
+        assert!(matches!(ask_for(None).0, Loaded::Model(_)));
+        let mut seen = Vec::new();
+        for look in 0..rounds {
+            let view = ModelView { turn: look.wrapping_mul(30), tilt: look % 300, zoom: 100 + (look % 50) as u16 * 20, pan: [0; 2], size: [1600, 900], fit: 850, fine: look % 20 == 0 };
+            assert!(ask_for(Some(view)).1.is_some(), "look {look}");
+            if look + 1 == rounds / 8 || look + 1 == rounds { seen.push(memory_of(child)); }
+        }
+        println!("{triangles} triangles, {rounds} looks: helper {} MB after the first eighth, {} MB at the end", seen[0] >> 20, seen[1] >> 20);
+        assert!(seen[1] < seen[0] + (64 << 20), "the helper keeps growing");
+        drop(ask_for);
+        drop(running);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Looks at the same models on any machine, through the real helper and its pipe:
     /// `cargo build --release`, then with `FERROUS_HELPER_EXE=target/release/ferrous-commander`
     /// `cargo test --release model_look_baseline -- --ignored --nocapture`.

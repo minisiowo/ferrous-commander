@@ -365,15 +365,17 @@ impl App {
                 ui.label(RichText::new("Type part of a name and press Enter. All words must match.").color(pal.text_weak));
                 return;
             };
-            let results = run.results.lock().unwrap().clone();
+            let found = run.results.lock().unwrap().len();
             let scanned = run.scanned.load(Ordering::Relaxed);
-            let msg = format!("{} found   ·   {} items scanned", results.len(), scanned);
+            let msg = format!("{found} found   ·   {scanned} items scanned");
             ui.label(RichText::new(msg).color(pal.text_weak).size(11.0));
             let rh = self.row_h() + 4.0;
             let font = FontId::proportional(self.st.font_size);
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, rh, results.len(), |ui, range| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, rh, found, |ui, range| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                for e in &results[range] {
+                // Only what is visible: a spinner keeps these frames coming during a search.
+                let visible = run.results.lock().unwrap()[range].to_vec();
+                for e in &visible {
                     let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), rh), Sense::click());
                     let p = ui.painter();
                     if resp.hovered() {

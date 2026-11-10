@@ -618,6 +618,7 @@ impl App {
         let mut clicks: Vec<(usize, Modifiers)> = Vec::new();
         let mut drag: Option<(PathBuf, bool)> = None;
         let marquee_id = ui.scope_id().with(("marquee", i));
+        let marquee_rows_id = marquee_id.with("rows");
         let mut marquee = ctx.data_mut(|d| d.get_temp::<(egui::Pos2, Vec<PathBuf>)>(marquee_id));
         self.panes[i].rename_drawn = false;
         let out = ui.scope_builder(UiBuilder::new().max_rect(list_r), |ui| {
@@ -744,18 +745,20 @@ impl App {
                 let selection =
                     Rect::from_two_pos(*origin - vec2(0.0, self.panes[i].list_offset), pointer)
                         .intersect(list_r);
-                self.panes[i].selected = base.iter().cloned().collect();
-                for row in 0..n {
-                    let rr = Rect::from_min_size(
-                        pos2(
-                            list_r.min.x,
-                            list_r.min.y + row as f32 * rh - self.panes[i].list_offset,
-                        ),
-                        vec2(list_r.width() - 10.0, rh),
-                    );
-                    if selection.intersects(rr) {
-                        let path = listing.entries[self.panes[i].view[row]].path.clone();
-                        self.panes[i].selected.insert(path);
+                // The rows it touches, worked out instead of trying every one of them.
+                let top = list_r.min.y - self.panes[i].list_offset;
+                let reaches = selection.min.x <= list_r.max.x - 10.0 && list_r.min.x <= selection.max.x;
+                let first = (((selection.min.y - top) / rh).ceil() as i64 - 1).max(0);
+                let last = (((selection.max.y - top) / rh).floor() as i64).min(n as i64 - 1);
+                let rows = (reaches && first <= last).then_some((first as usize, last as usize));
+                if ctx.data_mut(|d| d.get_temp::<Option<(usize, usize)>>(marquee_rows_id)) != Some(rows) {
+                    ctx.data_mut(|d| d.insert_temp(marquee_rows_id, rows));
+                    self.panes[i].selected = base.iter().cloned().collect();
+                    if let Some((first, last)) = rows {
+                        for row in first..=last {
+                            let path = listing.entries[self.panes[i].view[row]].path.clone();
+                            self.panes[i].selected.insert(path);
+                        }
                     }
                 }
                 ui.painter_at(list_r).rect_filled(
@@ -778,6 +781,7 @@ impl App {
                 d.insert_temp(marquee_id, state);
             } else {
                 d.remove::<(egui::Pos2, Vec<PathBuf>)>(marquee_id);
+                d.remove::<Option<(usize, usize)>>(marquee_rows_id);
             }
         });
         if n == 0 {
@@ -1484,6 +1488,12 @@ impl App {
             return (0, 0, 0);
         };
         let sel = pane.selected.len();
+        let large = pane.view.len() >= crate::app::COUNTED_FROM;
+        if large && let Some(known) = pane.counted.get()
+            && known.rows == pane.view.len() && known.selected == sel && known.at.elapsed() < crate::app::COUNTED_FOR {
+            pane.counted_old.set(true);
+            return known.result;
+        }
         let items = pane.view.iter().filter_map(|&k| entries.get(k));
         let total: u64 = if sel > 0 {
             items
@@ -1493,7 +1503,9 @@ impl App {
         } else {
             items.filter(|e| !e.is_dir).map(|e| e.size).sum()
         };
-        (pane.view.len(), sel, total)
+        let result = (pane.view.len(), sel, total);
+        if large { pane.counted.set(Some(crate::app::Counted { at: std::time::Instant::now(), rows: pane.view.len(), selected: sel, result })); }
+        result
     }
 
     pub fn status_bar(&mut self, ui: &mut Ui, i: usize, r: Rect) {
@@ -1507,6 +1519,8 @@ impl App {
             Stroke::new(1.0, pal.raised),
         );
         let (n, sel, total) = self.counts(i);
+        // Numbers from a moment ago are put right even if nothing else happens.
+        if self.panes[i].counted_old.take() { ui.ctx().request_repaint_after(crate::app::COUNTED_FOR); }
         let mut s = format!("{n} items");
         if sel > 0 {
             s += &format!("   ·   {sel} selected");

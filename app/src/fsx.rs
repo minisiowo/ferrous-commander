@@ -357,9 +357,55 @@ fn compare_entries(keyed_a: &(NameKey, Entry), keyed_b: &(NameKey, Entry), s: So
 }
 
 pub fn sort_entries(v: &mut Vec<Entry>, s: Sorting) {
-    let mut keyed: Vec<(NameKey, Entry)> = std::mem::take(v).into_iter().map(|e| (name_key(&e), e)).collect();
-    keyed.sort_by(|a, b| compare_entries(a, b, s));
-    *v = keyed.into_iter().map(|(_, e)| e).collect();
+    let keyed: Vec<(NameKey, Entry)> = std::mem::take(v).into_iter().map(|e| (name_key(&e), e)).collect();
+    *v = sort_in_parts(keyed, |a, b| compare_entries(a, b, s)).into_iter().map(|(_, e)| e).collect();
+}
+
+/// From this many items a sort is worth spreading over the processor's cores.
+const SORT_IN_PARTS_FROM: usize = 20_000;
+
+/// A stable sort like `sort_by`, with the same result, on several cores when there is much to do.
+fn sort_in_parts<T: Send>(mut items: Vec<T>, compare: impl Fn(&T, &T) -> Ordering + Sync) -> Vec<T> {
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+    if items.len() < SORT_IN_PARTS_FROM || workers < 2 {
+        items.sort_by(compare);
+        return items;
+    }
+    let size = items.len().div_ceil(workers);
+    let mut rest = items.into_iter();
+    let mut parts: Vec<Vec<T>> = (0..workers).map(|_| rest.by_ref().take(size).collect()).collect();
+    let compare = &compare;
+    std::thread::scope(|scope| {
+        for part in &mut parts { scope.spawn(move || part.sort_by(compare)); }
+    });
+    while parts.len() > 1 {
+        let mut waiting = parts.into_iter();
+        parts = std::thread::scope(|scope| {
+            let mut jobs = Vec::new();
+            while let Some(left) = waiting.next() {
+                let right = waiting.next();
+                jobs.push(scope.spawn(move || match right {
+                    Some(right) => merged(left, right, compare),
+                    None => left,
+                }));
+            }
+            jobs.into_iter().map(|job| job.join().unwrap()).collect()
+        });
+    }
+    parts.pop().unwrap_or_default()
+}
+
+/// Of two equal items the one from `left` comes first, which keeps the sort stable.
+fn merged<T>(left: Vec<T>, right: Vec<T>, compare: &impl Fn(&T, &T) -> Ordering) -> Vec<T> {
+    let mut out = Vec::with_capacity(left.len() + right.len());
+    let (mut left, mut right) = (left.into_iter().peekable(), right.into_iter().peekable());
+    while let (Some(a), Some(b)) = (left.peek(), right.peek()) {
+        let next = if compare(b, a) == Ordering::Less { right.next() } else { left.next() };
+        out.extend(next);
+    }
+    out.extend(left);
+    out.extend(right);
+    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -626,6 +672,16 @@ pub fn is_link_like(md: &std::fs::Metadata) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sorting_in_parts_gives_what_a_stable_sort_gives() {
+        for len in [0, 1, super::SORT_IN_PARTS_FROM, super::SORT_IN_PARTS_FROM + 7, 200_003] {
+            let items: Vec<(u32, u32)> = (0..len as u32).map(|k| (k.wrapping_mul(2_654_435_761) >> 22, k)).collect();
+            let mut expected = items.clone();
+            expected.sort_by_key(|item| item.0);
+            assert_eq!(super::sort_in_parts(items, |a, b| a.0.cmp(&b.0)), expected, "{len} items");
+        }
+    }
+
     use std::path::PathBuf;
 
     #[test]

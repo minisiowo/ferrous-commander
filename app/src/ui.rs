@@ -1799,23 +1799,17 @@ impl App {
         }
         let Some(l) = self.cache.get(dir) else { return };
         let show_hidden = self.st.show_hidden;
-        let items: Vec<(PathBuf, String, bool, fsx::Kind, String)> = l
+        // Positions only: this runs every frame, and only the visible rows need their text.
+        let items: Vec<usize> = l
             .entries
             .iter()
-            .filter(|e| (e.is_dir || with_files) && (show_hidden || !e.hidden))
-            .map(|e| {
-                (
-                    e.path.clone(),
-                    e.name().to_string(),
-                    e.is_dir,
-                    e.kind,
-                    e.ext().to_string(),
-                )
-            })
+            .enumerate()
+            .filter(|(_, e)| (e.is_dir || with_files) && (show_hidden || !e.hidden))
+            .map(|(k, _)| k)
             .collect();
         let err = l.error.clone();
         let rh = self.row_h();
-        let hl_idx = highlight.and_then(|h| items.iter().position(|it| it.0 == h));
+        let hl_idx = highlight.and_then(|h| items.iter().position(|&k| l.entries[k].path == h));
         let key = (i, dir.to_path_buf());
         let need_scroll =
             highlight.is_some_and(|h| self.col_hl.get(&key).map(|p| p.as_path()) != Some(h));
@@ -1834,7 +1828,9 @@ impl App {
             sa.show_rows(ui, rh, items.len(), |ui, range| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for k in range {
-                    let (path, name, is_dir, kind, ext) = &items[k];
+                    let Some(e) = self.cache.get(dir).and_then(|l| l.entries.get(items[k])) else { continue };
+                    let row = (e.path.clone(), e.name().to_string(), e.is_dir, e.kind, e.ext().to_string());
+                    let (path, name, is_dir, kind, ext) = &row;
                     let (rr, resp) = ui.allocate_exact_size(
                         vec2(ui.available_width(), rh),
                         Sense::click_and_drag(),

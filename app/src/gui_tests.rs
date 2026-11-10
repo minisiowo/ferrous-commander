@@ -67,6 +67,38 @@ mod campaign_perf {
         }
     }
 
+    /// `cargo test --release campaign_perf_selection -- --ignored --nocapture --test-threads=1`
+    #[test]
+    #[ignore = "Campaign: measures folders of up to 500 000 files"]
+    fn campaign_perf_selection_columns_and_sorting() {
+        for n in [100_000usize, 500_000] {
+            let dir = folder(n);
+            let entries = crate::fsx::read_dir(&dir).unwrap();
+            let sorting = crate::fsx::Sorting::default();
+            let sorts = (0..5).map(|_| { let mut copy = entries.clone(); let t = Instant::now(); crate::fsx::sort_entries(&mut copy, sorting); t.elapsed().as_secs_f64() * 1000.0 }).collect();
+            let ctx = egui::Context::default();
+            let mut app = App::new(Some(dir.join("unused.png")));
+            open(&ctx, &mut app, &dir, n);
+            let timed = |app: &mut App| -> (f64, f64) {
+                let mut frames = Vec::new();
+                for k in 0..120 {
+                    app.panes[0].scroll_to = Some(k * (n - 1) / 119);
+                    let t = Instant::now();
+                    frame(&ctx, app, vec![], Modifiers::NONE);
+                    frames.push(t.elapsed().as_secs_f64() * 1000.0);
+                }
+                (median(frames.clone()), worst(frames, 99))
+            };
+            let plain = timed(&mut app);
+            app.panes[0].selected = entries.iter().map(|e| e.path.clone()).collect();
+            let selected = timed(&mut app);
+            app.panes[0].selected.clear();
+            app.st.show_columns = true;
+            let columns = timed(&mut app);
+            eprintln!("[perf {n}] sort {:.1} ms; frame median/p99: plain {:.2}/{:.2}, all selected {:.2}/{:.2}, with columns {:.2}/{:.2}", median(sorts), plain.0, plain.1, selected.0, selected.1, columns.0, columns.1);
+        }
+    }
+
     #[test]
     #[ignore = "Campaign: repeats navigation, tabs and jobs to look for leaks"]
     fn campaign_perf_no_growth_over_many_cycles() {
