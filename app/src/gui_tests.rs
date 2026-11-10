@@ -2592,3 +2592,19 @@ fn searching_also_narrows_your_commands() {
 
 #[path = "palette_tests.rs"]
 mod palette_tests;
+
+#[test]
+fn font_symbols_exist_and_sit_on_the_middle_of_their_buttons() {
+    let ctx = egui::Context::default();
+    crate::fonts(&ctx);
+    let mut out = ctx.run_ui(RawInput::default(), |ui| {
+        let target = pos2(40.0, 30.5);
+        let font = egui::FontId::proportional(14.0);
+        for face in ["⚙", "◑", "👁", "🔍", "⬆", "⬅", "➡", "⟳", "🗋", "🗀", "🗑", "✏", "🗐", "✂", "📋", "☰", "⚠", "🔒", ">_"] {
+            assert!(ui.fonts_mut(|f| f.has_glyphs(&font, face)), "{face} has no font");
+            let drawn = crate::icons::ink_centre(ui.painter(), target, face, font.clone());
+            assert!((drawn - target).abs().max_elem() <= 0.5, "{face} is off the middle at {drawn:?}");
+        }
+    });
+    out.textures_delta.clear();
+}

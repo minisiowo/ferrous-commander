@@ -466,8 +466,8 @@ impl App {
                 let ext = fsx::split_ext(&item.title, false);
                 icons::entry(&p, icon, fsx::Kind::from_ext(ext), ext, pal.dark, false);
             }
-            Pick::Theme(_) => { p.text(icon.center(), Align2::CENTER_CENTER, "◑", FontId::proportional(13.0), pal.text_weak); }
-            Pick::Command(_) | Pick::Setting(_) | Pick::Sort(_) => { p.text(icon.center(), Align2::CENTER_CENTER, ">", FontId::monospace(13.0), pal.text_weak); }
+            Pick::Theme(_) => icons::face(&p, icon, "◑", 13.0, pal.text_weak),
+            Pick::Command(_) | Pick::Setting(_) | Pick::Sort(_) => icons::glyph(&p, icon, "next", pal.text_weak),
         }
         let small = FontId::proportional(11.0);
         let mut right = r.max.x - 12.0;

@@ -1,9 +1,66 @@
 //! Small vector glyphs drawn with the painter, so the app ships no icon files.
 
-use egui::{Color32, CornerRadius, Painter, Rect, Stroke, StrokeKind, pos2, vec2};
+use std::sync::Arc;
+
+use egui::emath::GuiRounding;
+use egui::{Color32, CornerRadius, FontId, Galley, Painter, Pos2, Rect, Stroke, StrokeKind, Vec2, pos2, vec2};
 
 use crate::fsx::Kind;
 use crate::theme::blend;
+
+/// What a galley really draws, which is often far from the middle of its line box.
+fn ink(galley: &Galley) -> Rect {
+    let mut ink = Rect::NOTHING;
+    for row in &galley.rows {
+        for glyph in row.row.glyphs.iter().filter(|g| !g.uv_rect.is_nothing()) {
+            let min = row.pos + glyph.pos.to_vec2() + glyph.uv_rect.offset;
+            ink |= Rect::from_min_size(min, glyph.uv_rect.size);
+        }
+    }
+    if ink.is_positive() { ink } else { galley.rect }
+}
+
+/// Where to put a galley so that its ink is centred on `center`.
+fn centred(p: &Painter, center: Pos2, text: &str, font: FontId, color: Color32) -> (Pos2, Arc<Galley>) {
+    let galley = p.layout_no_wrap(text.to_string(), font, color);
+    let origin = center - ink(&galley).center().to_vec2();
+    (origin.round_to_pixels(p.pixels_per_point()), galley)
+}
+
+#[cfg(test)]
+pub fn ink_centre(p: &Painter, center: Pos2, text: &str, font: FontId) -> Pos2 {
+    let (origin, galley) = centred(p, center, text, font, Color32::WHITE);
+    origin + ink(&galley).center().to_vec2()
+}
+
+/// A symbol from the fonts, centred on its shape rather than on its line of text.
+pub fn symbol(p: &Painter, center: Pos2, text: &str, font: FontId, color: Color32) {
+    let (origin, galley) = centred(p, center, text, font, color);
+    p.galley(origin, galley, color);
+}
+
+/// What a button shows: `#name` for a shape drawn by `glyph`, anything else from the fonts.
+pub fn face(p: &Painter, r: Rect, face: &str, size: f32, color: Color32) {
+    match face.strip_prefix('#') {
+        Some(name) => glyph(p, r, name, color),
+        None => symbol(p, r.center(), face, FontId::proportional(size), color),
+    }
+}
+
+/// A diagonal cross reaching `half` from its middle.
+pub fn cross(p: &Painter, center: Pos2, half: f32, stroke: Stroke) {
+    let (down, up) = (vec2(half, half), vec2(half, -half));
+    p.line_segment([center - down, center + down], stroke);
+    p.line_segment([center - up, center + up], stroke);
+}
+
+/// A thin arrowhead pointing sideways, `half` tall each way from its middle.
+pub fn chevron(p: &Painter, center: Pos2, half: f32, right: bool, stroke: Stroke) {
+    let reach = if right { half * 0.5 } else { -half * 0.5 };
+    let tip = center + vec2(reach, 0.0);
+    p.line_segment([center + vec2(-reach, -half), tip], stroke);
+    p.line_segment([tip, center + vec2(-reach, half)], stroke);
+}
 
 pub fn folder(p: &Painter, r: Rect, base: Color32) {
     let s = r.width().min(r.height());
@@ -131,7 +188,23 @@ pub fn sort_arrow(p: &Painter, center: egui::Pos2, ascending: bool, c: Color32) 
 pub fn glyph(p: &Painter, r: Rect, name: &str, c: Color32) {
     let s = Stroke::new(1.3, c);
     let b = Rect::from_center_size(r.center(), vec2(14.0, 12.0));
+    // One-pixel lines stay sharp only when they run along the middle of a pixel row.
+    let sharp = r.center().round_to_pixel_center(p.pixels_per_point());
+    let bar = |along: Vec2| { p.line_segment([sharp - along, sharp + along], s); };
     match name {
+        "close" => cross(p, r.center(), 4.0, s),
+        "more" => {
+            for dx in [-4.5, 0.0, 4.5] {
+                p.circle_filled(r.center() + vec2(dx, 0.0), 1.25, c);
+            }
+        }
+        "plus" => {
+            bar(vec2(4.5, 0.0));
+            bar(vec2(0.0, 4.5));
+        }
+        "minus" => bar(vec2(4.5, 0.0)),
+        "prev" => chevron(p, r.center(), 4.0, false, s),
+        "next" => chevron(p, r.center(), 4.0, true, s),
         // Columns layout: three columns
         "layout" => {
             p.rect_stroke(b, CornerRadius::same(2), s, StrokeKind::Inside);

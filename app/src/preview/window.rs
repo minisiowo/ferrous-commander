@@ -19,7 +19,7 @@ use crate::chrome::{self, BAR_H, Icon};
 use crate::fsx::{self, Entry, Kind};
 use crate::icons;
 use crate::theme::{Palette, blend};
-use crate::ui::fit_text;
+use crate::ui::{fit_text, symbol_button};
 
 /// How long the file list waits for content before showing a window with a spinner.
 /// Content that arrives in time also sets the size the window first appears at.
@@ -993,19 +993,19 @@ fn control_bar(ui: &mut Ui, s: &mut Shared, body: Rect, ctx: &egui::Context, ima
     bar.painter().rect_filled(r, CornerRadius::same(8), blend(pal.raised, pal.window, 0.2));
     bar.add_space(8.0);
     let flat = |text: &str| egui::Button::new(egui::RichText::new(text).size(15.0)).frame(false);
-    if bar.add(flat("‹")).on_hover_text("Previous file").clicked() { s.send(Cmd::Step(-1), ctx); }
-    if bar.add(flat("›")).on_hover_text("Next file").clicked() { s.send(Cmd::Step(1), ctx); }
+    if symbol_button(&mut bar, "#prev", false, &pal).on_hover_text("Previous file").clicked() { s.send(Cmd::Step(-1), ctx); }
+    if symbol_button(&mut bar, "#next", false, &pal).on_hover_text("Next file").clicked() { s.send(Cmd::Step(1), ctx); }
     if let Some((page, total)) = pages {
         bar.add_space(10.0);
-        if bar.add(flat("‹")).on_hover_text("Previous page").clicked() { s.send(Cmd::Page(-1), ctx); }
+        if symbol_button(&mut bar, "#prev", false, &pal).on_hover_text("Previous page").clicked() { s.send(Cmd::Page(-1), ctx); }
         bar.label(egui::RichText::new(format!("{} / {total}", page + 1)).size(12.0).color(pal.text_weak));
-        if bar.add(flat("›")).on_hover_text("Next page").clicked() { s.send(Cmd::Page(1), ctx); }
+        if symbol_button(&mut bar, "#next", false, &pal).on_hover_text("Next page").clicked() { s.send(Cmd::Page(1), ctx); }
     }
     if image {
         bar.add_space(10.0);
-        if bar.add(flat("−")).clicked() { zoom_by(&mut s.view, 0.8); }
+        if symbol_button(&mut bar, "#minus", false, &pal).clicked() { zoom_by(&mut s.view, 0.8); }
         bar.label(egui::RichText::new(format!("{:.0}%", s.view.zoom * 100.0)).size(12.0).color(pal.text_weak));
-        if bar.add(flat("+")).clicked() { zoom_by(&mut s.view, 1.25); }
+        if symbol_button(&mut bar, "#plus", false, &pal).clicked() { zoom_by(&mut s.view, 1.25); }
     }
     bar.add_space(10.0);
     if bar.add(flat("Open")).clicked() { s.send(Cmd::Open, ctx); }

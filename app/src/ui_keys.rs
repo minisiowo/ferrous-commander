@@ -8,6 +8,7 @@ use crate::app::{App, is_computer};
 use crate::chrome::{self, Icon, Panel};
 use crate::keymap::{self, COMMANDS, Chord, Command, FolderKey, Group, Info, Input, Layer, MAX_KEYS, Mode, Target};
 use crate::theme::hex;
+use crate::ui::symbol_button;
 
 /// How long an unfinished shortcut waits before its next keys are shown, so that
 /// typing a familiar sequence quickly never flashes a panel.
@@ -401,7 +402,7 @@ impl App {
                                 change = Some(Change::Remove(info, k));
                             }
                         }
-                        if ui.add(Button::new("+").small()).on_hover_text("Add a shortcut").clicked() {
+                        if symbol_button(ui, "#plus", true, &self.pal).on_hover_text("Add a shortcut").clicked() {
                             change = Some(Change::Record(info.command));
                         }
                         if self.st.keymap.layer(layer).bindings.contains_key(info.id)
@@ -450,7 +451,7 @@ impl App {
                             change = Some(Change::EditFolder(folder.clone()));
                         }
                         ui.label(RichText::new(if folder.new_tab { "new tab" } else { "this tab" }).color(weak).size(11.0));
-                        if ui.add(Button::new("×").small()).on_hover_text("Remove this command").clicked() {
+                        if symbol_button(ui, "#close", true, &self.pal).on_hover_text("Remove this command").clicked() {
                             change = Some(Change::RemoveFolder(folder.target()));
                         }
                     });

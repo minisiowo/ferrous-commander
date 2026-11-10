@@ -43,7 +43,7 @@ pub fn title_bar(ui: &mut Ui, pal: Palette, r: Rect, icon: Icon, title: &str, in
     let slot = Rect::from_center_size(pos2(r.min.x + 22.0, r.center().y), Vec2::splat(20.0));
     match icon {
         Icon::Glyph(glyph, color) => {
-            p.text(slot.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(14.0), color.unwrap_or(pal.text_weak));
+            icons::symbol(&p, slot.center(), glyph, FontId::proportional(14.0), color.unwrap_or(pal.text_weak));
         }
         Icon::Folder(color) => icons::folder(&p, slot, color),
         Icon::Entry(kind, ext) => icons::entry(&p, slot, kind, ext, pal.dark, false),
@@ -51,10 +51,7 @@ pub fn title_bar(ui: &mut Ui, pal: Palette, r: Rect, icon: Icon, title: &str, in
     let close = Rect::from_center_size(pos2(r.max.x - 22.0, r.center().y), Vec2::splat(26.0));
     let hit = ui.interact(close, ui.scope_id().with("chrome_close"), Sense::click());
     if hit.hovered() { p.rect_filled(close, CornerRadius::same(4), pal.hover); }
-    let x = close.shrink(8.0);
-    let stroke = Stroke::new(1.5, if hit.hovered() { pal.text } else { pal.text_weak });
-    p.line_segment([x.left_top(), x.right_bottom()], stroke);
-    p.line_segment([x.right_top(), x.left_bottom()], stroke);
+    icons::cross(&p, close.center(), 5.0, Stroke::new(1.5, if hit.hovered() { pal.text } else { pal.text_weak }));
     let small = FontId::proportional(12.0);
     let room = close.min.x - 10.0 - (r.min.x + 40.0);
     let shown = fit_text(&p, info, &small, room * 0.6);

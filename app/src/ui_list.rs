@@ -14,7 +14,7 @@ use crate::preview::{Key as PreviewKey, PreviewContent};
 use crate::fsx::{self, Entry, SortBy};
 use crate::icons;
 use crate::theme::{TAGS, blend, hex};
-use crate::ui::{chip, sort_chip, fit_text, icon_button, menu_entry, take_bottom, take_left, take_top};
+use crate::ui::{chip, dismiss_chip, sort_chip, fit_text, icon_button, menu_entry, take_bottom, take_left, take_top};
 
 thread_local! {
     static OPEN_WITH: std::cell::RefCell<std::collections::HashMap<String, AppMenu>> = Default::default();
@@ -174,13 +174,7 @@ fn in_place_frame(ui: &Ui, margin: i8) -> egui::Frame {
 }
 
 fn paint_path_icon(p: &egui::Painter, title_r: Rect, color: Color32) {
-    p.text(
-        title_r.left_center() + vec2(2.0, 0.0),
-        Align2::LEFT_CENTER,
-        "☰",
-        FontId::proportional(13.0),
-        color,
-    );
+    icons::symbol(p, title_r.left_center() + vec2(8.0, 0.0), "☰", FontId::proportional(13.0), color);
 }
 
 /// Where the crumbs of a path row start, and the path field with them.
@@ -381,7 +375,7 @@ impl App {
                         }
                         if !self.panes[i].filter.is_empty() {
                             let f = self.panes[i].filter.clone();
-                            let resp = chip(ui, &format!("Contains: {f}  ✖"), true, &pal);
+                            let resp = dismiss_chip(ui, &format!("Contains: {f}"), &pal);
                             if resp
                                 .on_hover_text(if self.st.vim_keys { "/ filters this folder. Esc clears it." } else { "Typing filters this folder. Esc clears it." })
                                 .clicked()
@@ -517,13 +511,8 @@ impl App {
                 col,
             );
             if k + 1 < crumbs.len() {
-                p.text(
-                    pos2(cr.max.x + 3.0, cr.center().y),
-                    Align2::CENTER_CENTER,
-                    "›",
-                    cfont.clone(),
-                    pal.text_weak,
-                );
+                // One point low: it sits level with the capitals of the crumbs beside it.
+                icons::chevron(&p, pos2(cr.max.x + 3.0, cr.center().y + 1.0), 3.0, true, Stroke::new(1.2, pal.text_weak));
             }
             if resp.clicked() {
                 self.acts.push(Act::Navigate(i, crumbs[k].clone()));
@@ -911,9 +900,9 @@ impl App {
                         let expanded = self.panes[i].expanded.contains(&e.path);
                         let center = pos2(ir.min.x - 9.0, cr.center().y);
                         let points = if expanded {
-                            vec![center + vec2(-4.0, -2.0), center + vec2(4.0, -2.0), center + vec2(0.0, 3.0)]
+                            vec![center + vec2(-4.0, -2.5), center + vec2(4.0, -2.5), center + vec2(0.0, 2.5)]
                         } else {
-                            vec![center + vec2(-2.0, -4.0), center + vec2(-2.0, 4.0), center + vec2(3.0, 0.0)]
+                            vec![center + vec2(-2.5, -4.0), center + vec2(-2.5, 4.0), center + vec2(2.5, 0.0)]
                         };
                         p.add(egui::Shape::convex_polygon(points, weak, Stroke::NONE));
                         if expanded {

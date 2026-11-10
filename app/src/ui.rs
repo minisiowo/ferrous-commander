@@ -121,33 +121,58 @@ pub fn icon_button(ui: &mut Ui, text: &str, tip: &str, on: bool, pal: &Palette) 
     } else {
         pal.text_weak
     };
-    match text.strip_prefix('#') {
-        Some(name) => icons::glyph(ui.painter(), r, name, col),
-        None => {
-            ui.painter().text(
-                r.center(),
-                Align2::CENTER_CENTER,
-                text,
-                FontId::proportional(14.0),
-                col,
-            );
-        }
-    }
+    icons::face(ui.painter(), r, text, 14.0, col);
     resp.on_hover_text(tip)
 }
 
+/// An egui button's room and frame around one symbol. See `icons::face`.
+fn captionless(framed: bool) -> egui::Button<'static> {
+    egui::Button::new("").frame(framed).min_size(vec2(22.0, 20.0))
+}
+
+fn paint_button_face(ui: &Ui, resp: &egui::Response, face: &str, pal: &Palette) {
+    icons::face(ui.painter(), resp.rect, face, 14.0, if resp.hovered() { pal.text } else { pal.text_weak });
+}
+
+pub fn symbol_button(ui: &mut Ui, face: &str, framed: bool, pal: &Palette) -> egui::Response {
+    let resp = ui.add(captionless(framed));
+    paint_button_face(ui, &resp, face, pal);
+    resp
+}
+
+fn symbol_menu(ui: &mut Ui, face: &str, pal: &Palette, add: impl FnOnce(&mut Ui)) -> egui::Response {
+    let (resp, _) = egui::containers::menu::MenuButton::from_button(captionless(true)).ui(ui, add);
+    paint_button_face(ui, &resp, face, pal);
+    resp
+}
+
 pub fn chip(ui: &mut Ui, text: &str, on: bool, pal: &Palette) -> egui::Response {
-    sort_chip(ui, text, on, None, pal)
+    chip_with_room(ui, text, on, 0.0, pal)
 }
 
 pub fn sort_chip(ui: &mut Ui, text: &str, on: bool, ascending: Option<bool>, pal: &Palette) -> egui::Response {
+    let resp = chip_with_room(ui, text, on, if ascending.is_some() { 12.0 } else { 0.0 }, pal);
+    if let Some(ascending) = ascending {
+        icons::sort_arrow(ui.painter(), resp.rect.right_center() - vec2(9.0, 0.0), ascending, pal.text);
+    }
+    resp
+}
+
+/// A lit chip that goes away when clicked, marked with a cross.
+pub fn dismiss_chip(ui: &mut Ui, text: &str, pal: &Palette) -> egui::Response {
+    let resp = chip_with_room(ui, text, true, 12.0, pal);
+    icons::cross(ui.painter(), resp.rect.right_center() - vec2(10.0, 0.0), 3.0, Stroke::new(1.2, pal.text));
+    resp
+}
+
+/// A chip whose text leaves `arrow_w` free at its right end for the caller to paint in.
+fn chip_with_room(ui: &mut Ui, text: &str, on: bool, arrow_w: f32, pal: &Palette) -> egui::Response {
     let font = FontId::proportional(11.0);
     let gw = ui
         .painter()
         .layout_no_wrap(text.to_string(), font.clone(), pal.text)
         .size()
         .x;
-    let arrow_w = if ascending.is_some() { 12.0 } else { 0.0 };
     let (r, resp) = ui.allocate_exact_size(vec2(gw + 14.0 + arrow_w, 22.0), Sense::click());
     let bg = if on {
         blend(pal.panel, pal.accent, 0.35)
@@ -164,9 +189,6 @@ pub fn sort_chip(ui: &mut Ui, text: &str, on: bool, ascending: Option<bool>, pal
         font,
         if on { pal.text } else { pal.text_weak },
     );
-    if let Some(ascending) = ascending {
-        icons::sort_arrow(ui.painter(), r.right_center() - vec2(9.0, 0.0), ascending, pal.text);
-    }
     resp
 }
 
@@ -295,7 +317,8 @@ impl App {
                 .frame(Frame::NONE.fill(pal.backdrop()).inner_margin(Margin {
                     left: 6,
                     right: SIDEBAR_GAP - PANELS_LEFT,
-                    top: 6,
+                    // Level with the file panels, which start at the very top.
+                    top: 0,
                     bottom: 0,
                 }))
                 .show(ui, |ui| self.sidebar(ui));
@@ -966,7 +989,7 @@ impl App {
             ui.horizontal(|ui| {
                 Self::sidebar_heading(ui, &pal, &name, SidebarSection::Favorite(g));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.menu_button(RichText::new("+").color(pal.text_weak), |ui| {
+                    symbol_menu(ui, "#plus", &pal, |ui| {
                         if ui.add_enabled(!is_computer(&cur), egui::Button::new("Add current folder")).clicked() {
                             self.acts.push(Act::AddFavorite(g, cur.clone()));
                             ui.close();
@@ -975,8 +998,8 @@ impl App {
                             self.dialog = Some(Dialog::AddLocation { group: g, name: String::new(), focus: true });
                             ui.close();
                         }
-                    }).response.on_hover_text("Add a folder or network location to this group");
-                    ui.menu_button(RichText::new("…").color(pal.text_weak), |ui| {
+                    }).on_hover_text("Add a folder or network location to this group");
+                    symbol_menu(ui, "#more", &pal, |ui| {
                         if ui.button("Rename group").clicked() {
                             self.dialog = Some(Dialog::RenameGroup {
                                 group: g,
@@ -1215,7 +1238,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icon_button(
                         ui,
-                        "✖",
+                        "#close",
                         "Hide History (restore in Settings → Restore groups)",
                         false,
                         &pal,
@@ -1504,13 +1527,7 @@ impl App {
                 if xresp.hovered() {
                     p.rect_filled(xr, CornerRadius::same(1), blend(bg, pal.text, 0.15));
                 }
-                p.text(
-                    xr.center(),
-                    Align2::CENTER_CENTER,
-                    "×",
-                    FontId::proportional(14.0),
-                    pal.text_weak,
-                );
+                icons::glyph(&p, xr, "close", pal.text_weak);
                 if xresp.on_hover_text(self.tip("Close tab", Command::CloseTab)).clicked() {
                     self.acts.push(Act::CloseTab(i, t));
                     continue;
@@ -1579,18 +1596,7 @@ impl App {
             } else {
                 pal.text_weak
             };
-            match glyph.strip_prefix('#') {
-                Some(g) => icons::glyph(&p, br, g, col),
-                None => {
-                    p.text(
-                        br.center(),
-                        Align2::CENTER_CENTER,
-                        glyph,
-                        FontId::proportional(13.0),
-                        col,
-                    );
-                }
-            }
+            icons::face(&p, br, glyph, 13.0, col);
             resp.on_hover_text(tip).clicked()
         };
         if panel_btn(
@@ -1616,13 +1622,7 @@ impl App {
         if presp.hovered() {
             p.rect_filled(pr, CornerRadius::same(1), pal.hover);
         }
-        p.text(
-            pr.center(),
-            Align2::CENTER_CENTER,
-            "+",
-            FontId::proportional(17.0),
-            pal.text_weak,
-        );
+        icons::glyph(&p, pr, "plus", pal.text_weak);
         if presp.on_hover_text(self.tip("Create new tab", Command::NewTab)).clicked() {
             self.acts.push(Act::NewTab(i));
         }
