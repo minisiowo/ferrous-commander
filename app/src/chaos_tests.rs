@@ -287,16 +287,22 @@ fn rounds(there: &Path, tag: &str, count: u64, p: Profile) {
         let (name, tree, _) = fresh(&mut rng, 3);
         let (stop, folder) = (Arc::new(AtomicBool::new(false)), tree.clone());
         let flag = stop.clone();
+        let (wrote, first_write) = std::sync::mpsc::channel();
         let writer = std::thread::spawn(move || {
             let mut written = Vec::new();
             // Paced: a slow drive keeps this going for a long time, and inodes run out.
             while !flag.load(Ordering::Relaxed) && written.len() < 2000 {
                 let file = format!("written during the move {}", written.len());
-                if std::fs::write(folder.join(&file), b"precious").is_ok() { written.push(file); }
+                if std::fs::write(folder.join(&file), b"precious").is_ok() {
+                    written.push(file);
+                    let _ = wrote.send(());
+                }
                 std::thread::sleep(std::time::Duration::from_micros(300));
             }
             written
         });
+        // On a busy machine a small tree could be gone before the writer got its first turn.
+        let _ = first_write.recv_timeout(std::time::Duration::from_secs(30));
         let result = move_item(&tree, &arena.dst, &AtomicBool::new(false));
         stop.store(true, Ordering::Relaxed);
         let written = writer.join().unwrap();
