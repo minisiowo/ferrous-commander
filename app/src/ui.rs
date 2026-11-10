@@ -316,6 +316,7 @@ impl App {
         self.search_window(&ctx);
         self.settings_window(&ctx);
         self.shortcuts_window(&ctx);
+        self.palette_ui(&ctx);
         self.overlays(&ctx);
         self.which_key(&ctx);
         self.handle_drop(&ctx);
@@ -330,7 +331,7 @@ impl App {
         // Before anything returns, so that a release is never missed.
         keymap::drop_held_pastes(&mut events, &mut self.paste_held);
         let away = events.iter().any(|e| matches!(e, egui::Event::WindowFocused(false)));
-        let busy = self.dialog.is_some() || !self.notices.is_empty() || ctx.text_edit_focused() || self.recording_shortcut();
+        let busy = self.dialog.is_some() || !self.notices.is_empty() || ctx.text_edit_focused() || self.recording_shortcut() || self.palette.is_some();
         if away || busy {
             self.matcher.clear();
         }
@@ -649,6 +650,8 @@ impl App {
                     self.preview_window = !self.preview_window;
                 }
             }
+            Command::Palette => self.open_palette(crate::palette::Mode::Places),
+            Command::PaletteCommands => self.open_palette(crate::palette::Mode::Commands),
         }
     }
 

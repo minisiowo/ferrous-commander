@@ -118,6 +118,10 @@ pub struct Settings {
     pub folder_sorting: HashMap<String, Sorting>,
     pub favorites: Vec<FavGroup>,
     pub history: Vec<PathBuf>,
+    /// Folders visited, the latest first: the quick palette's history, longer than the sidebar's.
+    pub recent_folders: Vec<PathBuf>,
+    /// Commands and settings last used from the quick palette, by their ids.
+    pub palette_recent: Vec<String>,
     pub show_history: bool,
     pub show_cloud: bool,
     pub sidebar_order: Vec<SidebarSection>,
@@ -158,6 +162,8 @@ impl Default for Settings {
             folder_sorting: HashMap::new(),
             favorites: default_favorites(),
             history: Vec::new(),
+            recent_folders: Vec::new(),
+            palette_recent: Vec::new(),
             show_history: true,
             show_cloud: true,
             sidebar_order: Vec::new(),
@@ -323,6 +329,7 @@ impl Settings {
         let text = |p: &PathBuf| p.to_str().is_some();
         let mut s = self.clone();
         s.history.retain(text);
+        s.recent_folders.retain(text);
         for group in s.favorites.iter_mut().chain(&mut s.removed_groups) { group.paths.retain(text); }
         for pane in &mut s.panes {
             for tab in &mut pane.tabs {
@@ -519,6 +526,20 @@ mod tests {
         let edited = Settings::from_lua("return { window = { width = 3, height = 99999 } }").unwrap();
         assert_eq!(edited.window.size(), [WindowPlace::MIN[0], 16_000.0]);
         assert_eq!(WindowPlace { width: f32::NAN, height: f32::INFINITY, maximized: false }.size(), [1200.0, 750.0]);
+    }
+
+    #[test]
+    fn the_palette_history_survives_the_lua_file_empty_or_filled() {
+        let old = Settings::from_lua("return { font_size = 14 }").unwrap();
+        assert!(old.recent_folders.is_empty() && old.palette_recent.is_empty(), "settings saved before the palette");
+        let mut s = Settings::default();
+        let round = |s: &Settings| Settings::from_lua(&crate::lua_config::encode(&serde_json::to_value(s).unwrap())).unwrap();
+        // An empty Lua table says nothing about being a list.
+        assert!(round(&s).recent_folders.is_empty() && round(&s).palette_recent.is_empty());
+        s.recent_folders = vec![PathBuf::from("/home/me/Projects"), PathBuf::from(r"C:\Work")];
+        s.palette_recent = vec!["toggle_hidden".into(), "theme:Gruvbox".into()];
+        assert_eq!(round(&s).recent_folders, s.recent_folders);
+        assert_eq!(round(&s).palette_recent, s.palette_recent);
     }
 
     #[test]

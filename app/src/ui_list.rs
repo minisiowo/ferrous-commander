@@ -259,7 +259,7 @@ impl App {
                     // The next edit shows another path, so the old cursor must not carry over.
                     egui::TextEdit::store_state(ui.ctx(), id, Default::default());
                     if ui.input(|inp| inp.key_pressed(Key::Enter)) {
-                        self.go_to_typed(i, enter_destination(&text, completion.as_deref()));
+                        self.go_to_typed(i, enter_destination(&text, completion.as_deref()), false, false);
                     }
                 }
             });
@@ -428,12 +428,18 @@ impl App {
         folder_completion(text, &listing.entries, self.st.show_hidden)
     }
 
-    fn go_to_typed(&mut self, i: usize, text: &str) {
+    /// Goes to a path as typed: a folder opens here, in a new tab or in the other panel, and a
+    /// file is shown in its folder.
+    pub(crate) fn go_to_typed(&mut self, i: usize, text: &str, new_tab: bool, other_panel: bool) {
         let raw = text.trim().trim_matches('"');
         let p = typed_path(text);
         match fsx::probe_paths(std::slice::from_ref(&p), crate::app::PATH_PROBE_LIMIT)[0] {
             // No answer yet: the folder loader reports a share that stays silent.
-            Some(fsx::PathKind::Folder) | None => self.acts.push(Act::Navigate(i, p)),
+            Some(fsx::PathKind::Folder) | None => self.acts.push(match (new_tab, other_panel) {
+                (true, _) => Act::OpenNewTab(i, p, true),
+                (false, true) => Act::OpenOtherPane(i, p),
+                (false, false) => Act::Navigate(i, p),
+            }),
             Some(fsx::PathKind::File) => {
                 if let Some(par) = p.parent() {
                     self.acts

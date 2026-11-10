@@ -22,6 +22,7 @@ mod lua_config;
 mod omarchy;
 mod openwith;
 mod ops;
+mod palette;
 mod preview;
 mod defaults;
 mod settings;
@@ -30,6 +31,7 @@ mod tiles;
 mod ui;
 mod ui_keys;
 mod ui_list;
+mod ui_palette;
 mod ui_win;
 #[cfg(windows)]
 mod win;

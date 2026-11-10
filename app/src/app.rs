@@ -387,6 +387,7 @@ pub struct App {
     /// When the preview window closed itself; its key press must not open it again.
     pub preview_closed: Option<Instant>,
     pub search: Option<SearchUi>,
+    pub palette: Option<crate::ui_palette::PaletteUi>,
     pub settings_open: bool,
     pub shot: Option<ShotState>,
     pub frame: u64,
@@ -452,11 +453,12 @@ impl App {
     pub fn with_settings(shot: Option<PathBuf>, loaded: Option<(Settings, Option<String>)>) -> App {
         let persist = loaded.is_some();
         let (mut st, load_problem) = loaded.unwrap_or_else(|| (Settings::default(), None));
+        let mut palette = None;
         if !persist {
             // A clean, deterministic first-start picture: start in the home folder.
             st.panes = Vec::new();
             st.tiles = None;
-            // For checking other looks: FC_SHOT=columns,light,dual,gruvbox
+            // For checking other looks: FC_SHOT=columns,light,dual,gruvbox,palette,commands
             let look = std::env::var("FC_SHOT").unwrap_or_default();
             if look.contains("columns") {
                 st.layout = Layout::Columns;
@@ -483,6 +485,15 @@ impl App {
             if look.contains("full") {
                 st.show_columns = true;
                 st.show_preview = true;
+            }
+            if look.contains("palette") {
+                let mode = if look.contains("commands") { crate::palette::Mode::Commands } else { crate::palette::Mode::Places };
+                let mut shown = crate::ui_palette::PaletteUi::new(mode);
+                // FC_SHOT=palette:doc shows it with "doc" typed.
+                if let Some((_, typed)) = look.split_once("palette:") {
+                    shown.query.push_str(typed.split(',').next().unwrap_or_default());
+                }
+                palette = Some(shown);
             }
         }
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
@@ -638,6 +649,7 @@ impl App {
             quick: None,
             preview_closed: None,
             search: None,
+            palette,
             settings_open: false,
             shot: shot.map(|file| ShotState {
                 file,
@@ -1087,7 +1099,7 @@ impl App {
         }
     }
 
-    fn sorting_for(&self, p: &Path) -> Sorting {
+    pub(crate) fn sorting_for(&self, p: &Path) -> Sorting {
         self.st
             .folder_sorting
             .get(&p.to_string_lossy().to_string())
@@ -1487,6 +1499,9 @@ impl App {
         self.st.history.retain(|h| h != p);
         self.st.history.insert(0, p.to_path_buf());
         self.st.history.truncate(HISTORY_MAX);
+        self.st.recent_folders.retain(|h| h != p);
+        self.st.recent_folders.insert(0, p.to_path_buf());
+        self.st.recent_folders.truncate(crate::ui_palette::RECENT_FOLDERS_MAX);
     }
 
     pub fn go_back(&mut self, i: usize) {

@@ -505,6 +505,9 @@ impl App {
             ui.checkbox(&mut self.st.vim_keys, "Neovim-style keys");
             ui.label(RichText::new("j, k, h, l move, / filters, and letters no longer filter as you type.").color(weak).size(11.0));
             ui.checkbox(&mut self.st.which_key, "Show which keys can come next in a key sequence");
+            let palette = [("Quick palette", Command::Palette), ("its commands and settings", Command::PaletteCommands)]
+                .map(|(text, command)| self.tip(text, command)).join(", ");
+            ui.label(RichText::new(format!("{palette}: go anywhere and run anything from the keyboard.")).color(weak).size(11.0));
             if ui.button("Customize shortcuts…").clicked() {
                 let layer = if self.st.vim_keys { crate::keymap::Layer::Neovim } else { crate::keymap::Layer::Standard };
                 self.shortcuts = Some(crate::ui_keys::ShortcutsWindow::new(layer));

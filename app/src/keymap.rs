@@ -150,7 +150,7 @@ pub enum Command {
     Delete, DeleteForever, NewFile, NewFolder, Refresh, Terminal, Properties,
     NewTab, CloseTab, ReopenTab, NextTab, PrevTab,
     NewPanel, ClosePanel, ToggleSplit, FocusLeft, FocusRight, FocusUp, FocusDown, NextPanel, PrevPanel,
-    Escape, ToggleHidden, ToggleColumns, TogglePreview,
+    Escape, ToggleHidden, ToggleColumns, TogglePreview, Palette, PaletteCommands,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -243,6 +243,8 @@ pub const COMMANDS: &[Info] = &[
     c(K::ToggleHidden, "toggle_hidden", "Hidden files", View, &["ctrl+h"], &["leader u h"], false),
     c(K::ToggleColumns, "toggle_columns", "Folder columns", View, &["`"], &["leader u c"], false),
     c(K::TogglePreview, "toggle_preview", "Preview", View, &["space"], &["leader u p"], false),
+    c(K::Palette, "palette", "Quick palette: go to a folder or file", View, &["alt+p"], &[], false),
+    c(K::PaletteCommands, "palette_commands", "Quick palette: commands and settings", View, &["ctrl+shift+p"], &[], false),
 ];
 
 impl Command {

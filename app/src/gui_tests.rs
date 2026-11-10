@@ -2589,3 +2589,6 @@ fn searching_also_narrows_your_commands() {
     assert!(!paints_text(&ctx, &mut app, "g o"));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[path = "palette_tests.rs"]
+mod palette_tests;

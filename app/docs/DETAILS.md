@@ -168,7 +168,31 @@ keymap = {
 },
 ```
 
-The preview window's own keys, Tab and → in the path field, and keys inside dialogs are not configurable.
+The preview window's own keys, Tab and → in the path field, and keys inside dialogs and the quick palette
+are not configurable.
+
+## Quick palette
+
+Alt+P opens one field over the window for going anywhere and running anything without the mouse. Both
+shortcuts that open it can be changed like any other, under **View** in **Customize shortcuts…**.
+
+| Typed first | Lists |
+|---|---|
+| nothing | Folders visited lately, favorites, drives and the items of the current folder. From the second letter it also searches the folders below the current one, nearest first. A full path, or one that starts with `~`, is offered as it stands |
+| `>` | Commands with their shortcuts, and quick settings: themes, sorting, hidden files, sidebar, tree, columns, text size, Neovim-style keys. Ctrl+Shift+P opens the palette here. What you used last comes first |
+| `@` | The last 200 folders visited, the latest first |
+
+Letters need not be next to each other: `fcom` finds `ferrous-commander`, and `newtab` finds **New tab**.
+Several words must all match, in the name or in the folder shown beside it.
+
+| Key | Action |
+|---|---|
+| ↑ / ↓, or Ctrl+P / Ctrl+N, Ctrl+K / Ctrl+J | Move. PgUp / PgDn move by a page, Ctrl+Home / Ctrl+End to the ends |
+| Enter | Go to the folder, show the file in its folder, or run the command |
+| Ctrl+Enter | Open the folder in a new tab, open the file, or change a setting and keep the palette open |
+| Shift+Enter | Open the folder in the other panel |
+| Tab / Shift+Tab | Next, previous list, keeping what was typed |
+| Esc, or the shortcut that opened it | Close |
 
 ## Working with files and panels
 

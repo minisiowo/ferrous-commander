@@ -92,7 +92,7 @@ enum Change {
     ResetLayer,
 }
 
-const GROUPS: [(Group, &str); 6] = [
+pub(crate) const GROUPS: [(Group, &str); 6] = [
     (Group::Moving, "Moving"),
     (Group::Folders, "Folders"),
     (Group::Files, "Files"),

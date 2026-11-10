@@ -145,7 +145,7 @@ pub fn decode(text: &str) -> Result<Value, String> {
     fn lists(v: &mut Value) {
         match v {
             Value::Object(map) => for (key, value) in map {
-                if ["favorites", "history", "sidebar_order", "removed_groups", "panes", "paths", "tabs", "folders"].contains(&key.as_str()) && value.as_object().is_some_and(|m| m.is_empty()) { *value = Value::Array(Vec::new()); }
+                if ["favorites", "history", "sidebar_order", "removed_groups", "panes", "paths", "tabs", "folders", "recent_folders", "palette_recent"].contains(&key.as_str()) && value.as_object().is_some_and(|m| m.is_empty()) { *value = Value::Array(Vec::new()); }
                 lists(value);
             },
             Value::Array(array) => for value in array { lists(value); },

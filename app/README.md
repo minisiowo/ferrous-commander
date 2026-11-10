@@ -66,6 +66,8 @@ No administrator rights are needed for the per-user install, which is also avail
 | <kbd>\</kbd> or <kbd>Alt</kbd>+<kbd>D</kbd> | Edit path. <kbd>Tab</kbd> or <kbd>→</kbd> takes the suggested folder, <kbd>Enter</kbd> goes to it |
 | <kbd>Ctrl</kbd>+<kbd>L</kbd> | Edit path with all of it selected |
 | <kbd>Ctrl</kbd>+<kbd>F</kbd> | Search |
+| <kbd>Alt</kbd>+<kbd>P</kbd> | Quick palette: folders, files, history |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Quick palette: commands and settings |
 | <kbd>Ctrl</kbd>+<kbd>H</kbd> | Hidden files |
 | <kbd>Space</kbd> | Preview |
 | <kbd>`</kbd> | Folder columns |

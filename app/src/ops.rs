@@ -549,6 +549,12 @@ impl Drop for Search {
 
 /// Search names under `root` containing every word of `query` (case-insensitive).
 pub fn search(root: PathBuf, query: String, show_hidden: bool, ctx: egui::Context) -> Search {
+    search_within(root, query, show_hidden, None, ctx)
+}
+
+/// With a limit the search ends at that many results, and takes the folders nearest the
+/// root first, so that the few results kept are the ones closest to hand.
+pub fn search_within(root: PathBuf, query: String, show_hidden: bool, limit: Option<usize>, ctx: egui::Context) -> Search {
     let s = Search {
         results: Arc::new(Mutex::new(Vec::new())),
         done: Arc::new(AtomicBool::new(false)),
@@ -558,10 +564,11 @@ pub fn search(root: PathBuf, query: String, show_hidden: bool, ctx: egui::Contex
     let (res, done, cancel, scanned) = (s.results.clone(), s.done.clone(), s.cancel.clone(), s.scanned.clone());
     std::thread::spawn(move || {
         let words: Vec<String> = query.to_lowercase().split_whitespace().map(String::from).collect();
-        let mut stack = vec![root];
+        let mut stack = std::collections::VecDeque::from([root]);
         let mut last = std::time::Instant::now();
-        while let Some(dir) = stack.pop() {
-            if cancel.load(Ordering::Relaxed) {
+        let mut full = false;
+        while let Some(dir) = if limit.is_some() { stack.pop_front() } else { stack.pop_back() } {
+            if full || cancel.load(Ordering::Relaxed) {
                 break;
             }
             let Ok(list) = fsx::read_dir(&dir) else { continue };
@@ -576,11 +583,16 @@ pub fn search(root: PathBuf, query: String, show_hidden: bool, ctx: egui::Contex
                 if e.is_dir {
                     let link = std::fs::symlink_metadata(&e.path).map(|m| fsx::is_link_like(&m)).unwrap_or(true);
                     if !link {
-                        stack.push(e.path.clone());
+                        stack.push_back(e.path.clone());
                     }
                 }
                 if !words.is_empty() && words.iter().all(|w| e.lname().contains(w.as_str())) {
-                    res.lock().unwrap().push(e);
+                    let mut found = res.lock().unwrap();
+                    found.push(e);
+                    if limit.is_some_and(|limit| found.len() >= limit) {
+                        full = true;
+                        break;
+                    }
                 }
             }
             if last.elapsed().as_millis() > 100 {
@@ -1482,6 +1494,29 @@ mod tests {
         let cancel = s.cancel.clone();
         drop(s);
         assert!(cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_limited_search_takes_the_nearest_folders_first_and_stops() {
+        let root = std::env::temp_dir().join(format!("fc_search_limit_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("a").join("b").join("c")).unwrap();
+        for (folder, n) in [("a/b/c", 0), ("a/b", 1), ("a", 2), ("", 3)] {
+            std::fs::write(root.join(folder).join(format!("note{n}.txt")), b"x").unwrap();
+        }
+        let wait = |s: &Search| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !s.done.load(Ordering::Relaxed) {
+                assert!(std::time::Instant::now() < until, "the search never ended");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            s.results.lock().unwrap().iter().map(|e| e.name().to_string()).collect::<Vec<_>>()
+        };
+        let limited = search_within(root.clone(), "note".into(), false, Some(2), egui::Context::default());
+        assert_eq!(wait(&limited), ["note3.txt", "note2.txt"]);
+        let all = search(root.clone(), "note".into(), false, egui::Context::default());
+        assert_eq!(wait(&all).len(), 4);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
