@@ -2,6 +2,9 @@
 
 Celem była ochrona przed utratą plików. Problemy potwierdzono eksperymentem albo testem.
 
+Wyniki pełnej kampanii testów z 2026-11-09 i aktualne liczby testów są w `WINDOWS_TEST_REPORT.md`.
+Liczby testów poniżej opisują stan z dnia danego przeglądu.
+
 | Problem przed zmianą | Skutek | Obecne zachowanie i dowód |
 | --- | --- | --- |
 | Kosz na lokalizacji bez Kosza: `trash` używa `FOF_NO_UI`, a Shell zwraca sukces | **Trwałe usunięcie bez pytania** i komunikat „Moved to Recycle Bin”. Potwierdzone na `\\localhost\C$` | `recycle_blocker` sprawdza typ dysku, `SHQueryRecycleBinW`, politykę, `NukeOnDelete` i `MaxCapacity`. Takie elementy zostają nietknięte, a dialog pyta o trwałe usunięcie. Test na prawdziwej ścieżce UNC. |
@@ -19,9 +22,11 @@ uruchamiany ręcznie; zmieniono w nim tylko ścieżkę). `cargo check --tests` d
 Trzy celowe uszkodzenia zabezpieczeń (porównanie treści, usuwanie folderów, autorepeat)
 zostały wykryte przez testy.
 
-Nadal nieprzetestowane: fizyczny pendrive (FAT/exFAT), wyciągnięcie nośnika podczas pracy,
-pełny dysk, prawdziwy OneDrive, kosz ponad `MaxCapacity`. Kopiowanie (bez przenoszenia) nie
-jest weryfikowane bajt po bajcie. Linux: zob. `SECURITY_REVIEW.md`.
+Nadal nieprzetestowane: fizyczny pendrive, wyciągnięcie nośnika podczas pracy, prawdziwy
+OneDrive. Pełny dysk, FAT32, exFAT i Kosz ponad `MaxCapacity` sprawdzono później na dyskach VHD
+(zob. `WINDOWS_TEST_REPORT.md`). Kopiowanie bez przenoszenia na dysku lokalnym nie jest
+weryfikowane bajt po bajcie; na udziale sieciowym i nośniku wymiennym kopia jest odczytywana
+z powrotem. Linux: zob. `SECURITY_REVIEW.md`.
 
 # Przegląd systemu plików Windows — 2026-11-04
 
@@ -50,24 +55,25 @@ Nie oznacza to 100% zgodności ze wszystkimi systemami plików i dostawcami Wind
 
 ## Granice zgodności
 
-- Kopiowanie junctionów, mount pointów i placeholderów OneDrive jest celowo
-  blokowane; dla tych elementów komunikat odsyła do Eksploratora Windows.
+- Kopiowanie junctionów i mount pointów jest celowo blokowane; komunikat odsyła do
+  Eksploratora Windows. Placeholdery OneDrive są kopiowane jak zwykła zawartość.
   Odtwarzanie symlinków wymaga uprawnień przyznanych przez Windows / trybu dewelopera;
-  w tej sesji nie wykonano uprzywilejowanego testu ich tworzenia.
+  przetestowano je w trybie dewelopera w kampanii z 2026-11-09.
 - Nie ma edytora Windows ACL/właściciela/audytu ani edytora strumieni ADS,
   kompresji NTFS czy EFS. Kopie otrzymują uprawnienia według reguł Windows;
   nie obiecujemy zachowania właściciela, DACL/SACL ani pełnych metadanych folderów.
-  Hardlinki w kopiowanym drzewie stają się niezależnymi kopiami danych.
-- Nie przetestowano fizycznego przenoszenia pomiędzy woluminami, FAT/exFAT/ReFS,
-  dostępnego udziału SMB/UNC, utraty połączenia, pełnego dysku, EFS,
-  plików sparse/compressed, trybu case-sensitive ani plików chmurowych offline.
-  Formatowanie UNC w teście nie jest testem transferu sieciowego.
+  Hardlinki w kopiowanym drzewie stają się niezależnymi kopiami danych. Pliki sparse
+  zachowują treść, ale w kopii przestają być rzadkie i zajmują pełny rozmiar.
+- Nie przetestowano ReFS, prawdziwego serwera SMB, utraty połączenia, EFS, trybu
+  case-sensitive ani plików chmurowych offline. Przenoszenie między woluminami, FAT32,
+  exFAT, udział `\\localhost`, pełny dysk i pliki sparse/compressed sprawdzono w kampanii
+  z 2026-11-09 na dyskach VHD i udziale lokalnym.
 - Kopia nie jest migawką. Równoczesna podmiana plików/dowiązań przez inny proces
   nie jest objęta gwarancją. Błędy po zakończonej kopii, ale przed usunięciem
   źródła, pozostawiają kopię i raportują problem; źródło nie jest celowo nadpisywane.
 - Kosz nadal korzysta z biblioteki `trash`; nie usuwano rzeczywistych plików
-  użytkownika ani nie testowano opróżniania kosza. Instalator, aktualizacja
-  uruchomionego EXE i odinstalowanie nie były wykonywane na profilu użytkownika.
+  użytkownika ani nie testowano opróżniania kosza. Instalator, aktualizację
+  uruchomionego EXE i odinstalowanie sprawdzono w kampanii z 2026-11-09.
 - Wyświetlanie nazw i edycja/config używają tekstu Unicode. Operacje zachowują
   `PathBuf`, lecz nazwy zawierające niepoprawne sekwencje UTF-16 nie mają gwarancji
   edycji i zapisu sesji bez utraty informacji. Bardzo długi komponent z dodanym
