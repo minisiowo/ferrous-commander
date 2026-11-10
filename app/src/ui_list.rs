@@ -1007,6 +1007,8 @@ impl App {
                     .frame(frame)
                     .align(Align2::LEFT_CENTER);
                 let r = ui.put(er, te);
+                // The row is lit like any selected one; this says where the typing goes.
+                p.rect_stroke(r.rect, CornerRadius::ZERO, Stroke::new(1.0, pal.accent), egui::StrokeKind::Inside);
                 if focus {
                     self.panes[i].rename_focus = false;
                 } else if r.lost_focus() {
