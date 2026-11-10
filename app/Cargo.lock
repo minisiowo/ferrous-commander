@@ -1083,7 +1083,7 @@ checksum = "629c9d6b6f30b5604089e0980f4d924a013aacb1654a6cdf5d3d852224f68651"
 
 [[package]]
 name = "ferrous-commander"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bzip2",
  "calamine",
