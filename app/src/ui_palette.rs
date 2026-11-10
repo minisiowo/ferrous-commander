@@ -331,6 +331,7 @@ impl App {
             (Setting::FoldersOnTop, "Folders above files", Some(st.sorting.folders_on_top)),
             (Setting::Mebibytes, "Sizes in MiB, as in Windows Explorer", Some(st.mebibytes)),
             (Setting::HistoryCard, "History in the sidebar", Some(st.show_history)),
+            (Setting::Rounded, "Rounded corners", Some(st.rounded)),
             (Setting::NeovimKeys, "Neovim-style keys", Some(st.vim_keys)),
             (Setting::WhichKey, "Hints for the next key of a sequence", Some(st.which_key)),
             (Setting::FontLarger, "Larger text", None),
@@ -471,10 +472,12 @@ impl App {
         let mode = palette.mode();
         let area = egui::Area::new(egui::Id::unique("palette"))
             .order(egui::Order::Foreground)
+            // It is asked for by a key and typed into at once: it must be there, not arrive.
+            .fade_in(false)
             .fixed_pos(pos2(screen.center().x - width / 2.0, screen.top() + (screen.height() * 0.08).min(56.0)))
             .show(ctx, |ui| {
                 ui.painter().with_clip_rect(screen).rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(if pal.dark { 90 } else { 50 }));
-                Frame::NONE.fill(pal.content_fill()).corner_radius(CornerRadius::ZERO)
+                Frame::NONE.fill(pal.content_fill()).corner_radius(pal.corner_large())
                     .stroke(Stroke::new(1.0, pal.border)).shadow(ctx.global_style().visuals.popup_shadow)
                     .show(ui, |ui| {
                         ui.set_width(width);
@@ -518,10 +521,12 @@ impl App {
                                 }
                                 // The rows scrolled out of sight cost their text's layout for nothing.
                                 if !ui.is_rect_visible(r) { continue; }
+                                // A rounded row stands clear of the edges, whose corners it would cross.
+                                let lit = if pal.round { r.shrink2(vec2(4.0, 0.0)) } else { r };
                                 if selected {
-                                    ui.painter().rect_filled(r, CornerRadius::ZERO, pal.selection());
+                                    ui.painter().rect_filled(lit, pal.corner(), pal.selection());
                                 } else if response.hovered() {
-                                    ui.painter().rect_filled(r, CornerRadius::ZERO, pal.hover);
+                                    ui.painter().rect_filled(lit, pal.corner(), pal.hover);
                                 }
                                 self.palette_row(ui, r, &palette.rows[n], selected);
                                 if response.clicked() {
@@ -583,8 +588,8 @@ impl App {
             // A small switch, so that on and off read without a word.
             let track = Rect::from_min_size(pos2(right - 24.0, r.center().y - 6.0), vec2(24.0, 12.0));
             let knob = pos2(if on { track.max.x - 6.0 } else { track.min.x + 6.0 }, track.center().y);
-            p.rect_filled(track, CornerRadius::ZERO, if on { pal.accent } else { blend(pal.panel, pal.text_weak, 0.3) });
-            p.rect_filled(Rect::from_center_size(knob, vec2(8.0, 8.0)), CornerRadius::ZERO, if on { Color32::WHITE } else { pal.text_weak });
+            p.rect_filled(track, CornerRadius::same(if pal.round { 6 } else { 0 }), if on { pal.accent } else { blend(pal.panel, pal.text_weak, 0.3) });
+            p.rect_filled(Rect::from_center_size(knob, vec2(8.0, 8.0)), pal.corner(), if on { Color32::WHITE } else { pal.text_weak });
             right = track.min.x - 10.0;
         }
         let left = icon.max.x + 10.0;
@@ -692,6 +697,7 @@ impl App {
                     Setting::NeovimKeys => st.vim_keys = !st.vim_keys,
                     Setting::WhichKey => st.which_key = !st.which_key,
                     Setting::HistoryCard => st.show_history = !st.show_history,
+                    Setting::Rounded => st.rounded = !st.rounded,
                     Setting::FontLarger => st.font_size = (st.font_size + 1.0).min(18.0),
                     Setting::FontSmaller => st.font_size = (st.font_size - 1.0).max(10.0),
                     Setting::OpenSettings => {

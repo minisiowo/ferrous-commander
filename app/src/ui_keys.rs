@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use egui::{Align2, Button, CornerRadius, Event, Frame, Margin, RichText, Stroke, TextEdit, vec2};
+use egui::{Align2, Button, Event, Frame, Margin, RichText, Stroke, TextEdit, vec2};
 
 use crate::app::{App, is_computer};
 use crate::chrome::{self, Icon, Panel};
@@ -159,7 +159,7 @@ impl App {
             .order(egui::Order::Foreground)
             .interactable(false)
             .show(ctx, |ui| {
-                Frame::NONE.fill(pal.panel).corner_radius(CornerRadius::ZERO)
+                Frame::NONE.fill(pal.panel).corner_radius(pal.corner_large())
                     .stroke(Stroke::new(1.0, pal.border)).inner_margin(Margin::symmetric(12, 8))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {

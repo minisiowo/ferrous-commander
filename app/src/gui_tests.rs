@@ -2794,3 +2794,47 @@ fn moving_a_stacked_panel_below_brings_both_into_view() {
     assert!(!app.panels_stacked, "one above the other they do");
     std::fs::remove_dir_all(narrow_root("unstack")).unwrap();
 }
+
+/// The right edge of the sidebar's cards, as painted in one more frame.
+fn cards_right(ctx: &egui::Context, app: &mut App) -> f32 {
+    let card = app.pal.surface(app.pal.card);
+    let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))), ..Default::default() };
+    let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+    output.textures_delta.clear();
+    output.shapes.iter().filter_map(|s| match &s.shape {
+        egui::epaint::Shape::Rect(r) if r.fill == card => Some(r.rect.max.x),
+        _ => None,
+    }).fold(0.0, f32::max)
+}
+
+#[test]
+fn the_sidebar_stops_at_its_limits_while_dragged_and_stays_there() {
+    let (ctx, mut app, root) = neovim_app("sidebar_limits");
+    let at = |x: f32| pos2(x, 400.0);
+    for round in [false, true] {
+        app.st.rounded = round;
+        for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+        // From the sidebar's own edge to where the panels begin.
+        let gap = if round { 10.0 } else { 2.0 };
+        for far in [900.0, 20.0] {
+            let before = app.panels_area.x;
+            let edge = at(1200.0 - before - gap);
+            frame(&ctx, &mut app, vec![Event::PointerMoved(edge)], Modifiers::NONE);
+            frame(&ctx, &mut app, vec![Event::PointerButton { pos: edge, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }], Modifiers::NONE);
+            for _ in 0..3 { frame(&ctx, &mut app, vec![Event::PointerMoved(at(far))], Modifiers::NONE); }
+            let held = app.panels_area.x;
+            assert_ne!(held, before, "the edge was not caught at {edge:?}");
+            // While held past the limit the cards still reach the sidebar's edge: the
+            // pointer cannot take the edge further than the sidebar itself goes.
+            let sidebar = 1200.0 - held - gap;
+            assert_eq!(cards_right(&ctx, &mut app) + 6.0, sidebar, "round {round}, held at {far}");
+            frame(&ctx, &mut app, vec![Event::PointerButton { pos: at(far), button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }], Modifiers::NONE);
+            for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+            assert_eq!(app.panels_area.x, held, "round {round}, dragged to {far}: it moved back when let go");
+            assert_eq!(cards_right(&ctx, &mut app) + 6.0, sidebar, "round {round}, let go at {far}");
+        }
+        let sidebar = 1200.0 - app.panels_area.x - gap;
+        assert_eq!(sidebar, crate::ui::sidebar_min(round), "round {round}: as narrow as egui was told it may be");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

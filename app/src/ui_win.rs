@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use egui::{Align2, CornerRadius, FontId, Frame, Key, Margin, Rect, RichText, Sense, Stroke, pos2, vec2};
+use egui::{Align2, FontId, Frame, Key, Margin, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use crate::app::{Act, App, Dialog, DragPaths, DropTarget, Notice, ToastKind, is_computer};
 use crate::chrome::{self, Icon, Panel};
@@ -385,7 +385,7 @@ impl App {
                     let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), rh), Sense::click());
                     let p = ui.painter();
                     if resp.hovered() {
-                        p.rect_filled(rr, CornerRadius::ZERO, pal.hover);
+                        p.rect_filled(rr, pal.corner(), pal.hover);
                     }
                     let ir = Rect::from_min_size(pos2(rr.min.x + 4.0, rr.center().y - 8.0), vec2(16.0, 16.0));
                     icons::entry(p, ir, e.kind, e.ext(), pal.dark, false);
@@ -488,6 +488,12 @@ impl App {
                 ui.end_row();
                 ui.label("Font size");
                 ui.add(egui::Slider::new(&mut self.st.font_size, 10.0..=18.0).step_by(0.5));
+                ui.end_row();
+                ui.label("Corners");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.st.rounded, false, "Square");
+                    ui.selectable_value(&mut self.st.rounded, true, "Rounded");
+                });
                 ui.end_row();
                 #[cfg(windows)]
                 {
@@ -619,7 +625,7 @@ impl App {
         area.show(ctx, |ui| {
             ui.set_max_width(380.0);
             ui.spacing_mut().item_spacing.y = 6.0;
-            let frame = || Frame::NONE.fill(pal.raised).corner_radius(CornerRadius::ZERO).stroke(Stroke::new(1.0, pal.border));
+            let frame = || Frame::NONE.fill(pal.raised).corner_radius(pal.corner_large()).stroke(Stroke::new(1.0, pal.border));
             for job in &self.jobs {
                 let pr = job.progress.lock().unwrap();
                 frame().inner_margin(Margin::same(10)).show(ui, |ui| {
@@ -647,7 +653,7 @@ impl App {
                 });
                 let r = resp.response.rect;
                 let br = Rect::from_min_size(r.min + vec2(5.0, 7.0), vec2(3.0, r.height() - 14.0));
-                ui.painter().rect_filled(br, CornerRadius::ZERO, bar);
+                ui.painter().rect_filled(br, pal.corner_small(), bar);
             }
         });
     }
@@ -697,7 +703,7 @@ impl App {
         let area = egui::Area::new(egui::Id::unique("dragtip")).fixed_pos(tip_pos).order(egui::Order::Tooltip).interactable(false);
         area.show(ctx, |ui| {
             ui.set_width(width);
-            let f = Frame::NONE.fill(pal.raised).corner_radius(CornerRadius::ZERO).inner_margin(Margin::symmetric(12, 8));
+            let f = Frame::NONE.fill(pal.raised).corner_radius(pal.corner()).inner_margin(Margin::symmetric(12, 8));
             f.stroke(Stroke::new(1.0, pal.accent)).show(ui, |ui| {
                 ui.set_width(width - 26.0);
                 ui.add(egui::Label::new(RichText::new(&label).color(pal.text).size(13.0).strong()).truncate());

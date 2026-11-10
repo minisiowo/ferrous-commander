@@ -139,6 +139,8 @@ pub struct Settings {
     pub window: WindowPlace,
     /// Windows 11 only: the desktop's Mica material behind the whole window.
     pub window_effect: bool,
+    /// Buttons, cards, menus and windows have rounded corners instead of square ones.
+    pub rounded: bool,
 }
 
 impl Default for Settings {
@@ -177,6 +179,7 @@ impl Default for Settings {
             keymap: Default::default(),
             window: WindowPlace::default(),
             window_effect: false,
+            rounded: crate::defaults::ROUNDED_CORNERS,
         }
     }
 }

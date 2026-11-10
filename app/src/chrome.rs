@@ -50,7 +50,7 @@ pub fn title_bar(ui: &mut Ui, pal: Palette, r: Rect, icon: Icon, title: &str, in
     }
     let close = Rect::from_center_size(pos2(r.max.x - 22.0, r.center().y), Vec2::splat(26.0));
     let hit = ui.interact(close, ui.scope_id().with("chrome_close"), Sense::click());
-    if hit.hovered() { p.rect_filled(close, CornerRadius::ZERO, pal.hover); }
+    if hit.hovered() { p.rect_filled(close, pal.corner(), pal.hover); }
     icons::cross(&p, close.center(), 5.0, Stroke::new(1.5, if hit.hovered() { pal.text } else { pal.text_weak }));
     let small = FontId::proportional(12.0);
     let room = close.min.x - 10.0 - (r.min.x + 40.0);
@@ -145,6 +145,8 @@ impl<'a> Panel<'a> {
         if let Some(position) = state.position { builder = builder.with_position(position); }
         let mut closed = false;
         ctx.show_viewport_immediate(id, builder, |ui, _class| {
+            // The system shapes a window of its own, and the bars inside follow this.
+            ui.visuals_mut().window_corner_radius = CornerRadius::ZERO;
             let full = ui.max_rect();
             ui.painter().rect_filled(full, CornerRadius::ZERO, pal.content_fill());
             if cfg!(windows) { ui.painter().rect_stroke(full, CornerRadius::ZERO, Stroke::new(1.0, pal.border), egui::StrokeKind::Inside); }
@@ -174,7 +176,8 @@ impl<'a> Panel<'a> {
             ui.visuals_mut().text_edit_bg_color = Some(pal.raised);
             if let Some(width) = width { ui.set_width(width); }
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), BAR_H), Sense::hover());
-            ui.painter().rect_filled(r, CornerRadius::ZERO, pal.panel);
+            let corner = crate::theme::top(crate::theme::inside(ui.visuals().window_corner_radius));
+            ui.painter().rect_filled(r, corner, pal.panel);
             closed = title_bar(ui, pal, r, icon, title, info);
             add(ui);
         });
@@ -221,7 +224,8 @@ pub fn scrolled_body<R>(ui: &mut Ui, footer: bool, add: impl FnOnce(&mut Ui) -> 
 /// The strip of buttons at the bottom of a window.
 pub fn footer<R>(ui: &mut Ui, pal: Palette, add: impl FnOnce(&mut Ui) -> R) -> R {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), FOOTER_H), Sense::hover());
-    ui.painter().rect_filled(r, CornerRadius::ZERO, pal.panel);
+    let corner = crate::theme::bottom(crate::theme::inside(ui.visuals().window_corner_radius));
+    ui.painter().rect_filled(r, corner, pal.panel);
     let inner = r.shrink2(vec2(MARGIN as f32, 0.0));
     let mut strip = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)));
     spaced(&mut strip);

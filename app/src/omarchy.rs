@@ -92,6 +92,7 @@ impl Colors {
             tab_idle,
             accent,
             glass: false,
+            round: false,
         };
         // Selections are tinted with the accent. Some themes use the text colour as
         // accent, which would hide the text, so mute it until it reads.

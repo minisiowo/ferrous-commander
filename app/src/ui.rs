@@ -20,6 +20,18 @@ pub const SIDEBAR_W: f32 = crate::defaults::SIDEBAR_WIDTH;
 const SIDEBAR_GAP: i8 = 8;
 /// The part of that space beside the file panels which belongs to them.
 const PANELS_LEFT: i8 = 2;
+/// The row of tools at the sidebar's foot: seven buttons 26 wide, 2 apart. It cannot narrow.
+const SIDEBAR_TOOLS_W: f32 = 7.0 * 26.0 + 6.0 * 2.0;
+
+fn sidebar_left(round: bool) -> i8 {
+    if round { SIDEBAR_GAP } else { 6 }
+}
+
+/// The narrowest the sidebar goes: its tools and the room around them. Asking egui for
+/// less would let the edge be dragged further than the sidebar can follow.
+pub(crate) fn sidebar_min(round: bool) -> f32 {
+    SIDEBAR_TOOLS_W + f32::from(sidebar_left(round) + SIDEBAR_GAP - PANELS_LEFT)
+}
 pub const TOOLBAR_H: f32 = 36.0;
 pub const DETAILS_H: f32 = crate::defaults::DETAILS_HEIGHT;
 pub const PREVIEW_W: f32 = crate::defaults::PREVIEW_WIDTH;
@@ -114,7 +126,7 @@ pub fn icon_button(ui: &mut Ui, text: &str, tip: &str, on: bool, pal: &Palette) 
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(r, CornerRadius::ZERO, bg);
+    ui.painter().rect_filled(r, pal.corner(), bg);
     let col = if resp.hovered() || on {
         pal.text
     } else {
@@ -180,7 +192,7 @@ fn chip_with_room(ui: &mut Ui, text: &str, on: bool, arrow_w: f32, pal: &Palette
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(r, CornerRadius::ZERO, bg);
+    ui.painter().rect_filled(r, pal.corner(), bg);
     ui.painter().text(
         r.center() - vec2(arrow_w / 2.0, 0.0),
         Align2::CENTER_CENTER,
@@ -203,7 +215,7 @@ pub fn card<R>(
     };
     Frame::NONE
         .fill(pal.surface(pal.card))
-        .corner_radius(CornerRadius::ZERO)
+        .corner_radius(pal.corner_large())
         .inner_margin(Margin::symmetric(8, 6))
         .stroke(stroke)
         .show(ui, add)
@@ -296,8 +308,9 @@ fn insertion_line(ui: &Ui, card: Rect, rows: &[Rect], at: usize, color: Color32)
 /// Marks a sidebar row as the folder that dragged files will go into.
 fn highlight_drop_row(ui: &Ui, row: Rect, color: Color32) {
     let painter = ui.painter();
-    painter.rect_filled(row, CornerRadius::ZERO, color.gamma_multiply(0.25));
-    painter.rect_stroke(row, CornerRadius::ZERO, Stroke::new(1.5, color), egui::StrokeKind::Inside);
+    let corner = ui.visuals().widgets.inactive.corner_radius;
+    painter.rect_filled(row, corner, color.gamma_multiply(0.25));
+    painter.rect_stroke(row, corner, Stroke::new(1.5, color), egui::StrokeKind::Inside);
 }
 
 const NO_ROOM_TO_SPLIT: &str = "Not enough room to split";
@@ -325,27 +338,30 @@ impl App {
         self.keyboard(&ctx);
         let pal = self.pal;
 
+        // Round blocks float: the same gap lies around them as between the sidebar's cards.
+        let around = if pal.round { SIDEBAR_GAP } else { 0 };
+        let panels_left = if pal.round && !self.st.show_sidebar { SIDEBAR_GAP } else { PANELS_LEFT };
         if self.st.show_sidebar {
             egui::Panel::left("sidebar")
                 .resizable(true)
                 .default_size(SIDEBAR_W)
-                .size_range(180.0..=420.0)
+                .size_range(sidebar_min(pal.round)..=420.0)
                 .show_separator_line(false)
                 .frame(Frame::NONE.fill(pal.backdrop()).inner_margin(Margin {
-                    left: 6,
-                    right: SIDEBAR_GAP - PANELS_LEFT,
-                    // Level with the file panels, which start at the very top.
-                    top: 0,
+                    left: sidebar_left(pal.round),
+                    right: SIDEBAR_GAP - panels_left,
+                    // Level with the file panels, which start at the very top when square.
+                    top: around,
                     bottom: 0,
                 }))
                 .show(ui, |ui| self.sidebar(ui));
         }
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(pal.backdrop()).inner_margin(Margin {
-                left: PANELS_LEFT,
-                right: 0,
-                top: 0,
-                bottom: 0,
+                left: panels_left,
+                right: around,
+                top: around,
+                bottom: around,
             }))
             .show(ui, |ui| self.browsers(ui));
 
@@ -863,10 +879,10 @@ impl App {
         let current = self.panes[self.active].path() == path;
         if current {
             ui.painter()
-                .rect_filled(r, CornerRadius::ZERO, pal.selection());
+                .rect_filled(r, pal.corner(), pal.selection());
         } else if resp.hovered() {
             ui.painter()
-                .rect_filled(r, CornerRadius::ZERO, pal.hover);
+                .rect_filled(r, pal.corner(), pal.hover);
         }
         let ir = Rect::from_min_size(pos2(r.min.x + 4.0, r.center().y - 8.0), vec2(16.0, 16.0));
         let (exists, is_file) = side_metadata(path);
@@ -1108,7 +1124,7 @@ impl App {
         let rect = Rect::from_center_size(pos2(row.rect.max.x - 46.0, row.rect.min.y + 11.0), vec2(20.0, 20.0));
         let button = ui.interact(rect, row.id.with("eject"), if busy { Sense::hover() } else { Sense::click() });
         let pal = self.pal;
-        if button.hovered() && !busy { ui.painter().rect_filled(rect, CornerRadius::ZERO, pal.hover); }
+        if button.hovered() && !busy { ui.painter().rect_filled(rect, pal.corner(), pal.hover); }
         icons::eject(ui.painter(), rect.shrink(3.0), if busy { blend(pal.panel, pal.text_weak, 0.4) } else { pal.text_weak });
         let clicked = button.on_hover_text(if busy { "Ejecting…" } else { "Eject safely" }).clicked();
         let mut chosen = clicked;
@@ -1138,7 +1154,7 @@ impl App {
             Color32::TRANSPARENT
         };
         let p = ui.painter();
-        p.rect_filled(r, CornerRadius::ZERO, bg);
+        p.rect_filled(r, pal.corner(), bg);
         let ir = Rect::from_min_size(pos2(r.min.x + 4.0, r.min.y + 4.0), vec2(16.0, 14.0));
         if d.network {
             icons::glyph(p, ir, "network", pal.text_weak);
@@ -1180,13 +1196,13 @@ impl App {
         );
         p.rect_filled(
             bar,
-            CornerRadius::ZERO,
+            pal.corner_small(),
             blend(pal.panel, pal.text_weak, 0.2),
         );
         let fill = Rect::from_min_size(bar.min, vec2(bar.width() * pct, bar.height()));
         p.rect_filled(
             fill,
-            CornerRadius::ZERO,
+            pal.corner_small(),
             if pct > 0.9 {
                 hex("#ef7063")
             } else {
@@ -1286,7 +1302,8 @@ impl App {
     fn browsers(&mut self, ui: &mut Ui) {
         let full = ui.max_rect();
         // The lines between the panels. On glass the gaps themselves are the lines.
-        if !self.pal.glass {
+        // Round panels stand apart like the sidebar's cards, with no lines between them.
+        if !self.pal.glass && !self.pal.round {
             ui.painter().rect_filled(full, CornerRadius::ZERO, self.pal.border);
         }
         let mut rects = Vec::new();
@@ -1300,6 +1317,14 @@ impl App {
         } else {
             self.tiles
                 .layout(full, &mut rects, &mut divs, &mut Vec::new());
+            if self.pal.round {
+                // Each panel after the first leaves the rest of a card's gap before it.
+                let lead = f32::from(SIDEBAR_GAP) - crate::tiles::GAP;
+                for (_, r) in &mut rects {
+                    if r.min.x > full.min.x + 0.5 { r.min.x += lead; }
+                    if r.min.y > full.min.y + 0.5 { r.min.y += lead; }
+                }
+            }
         }
         for (i, r) in rects.clone() {
             if i < self.panes.len() {
@@ -1386,7 +1411,7 @@ impl App {
                             preview = Rect::from_min_max(pos2(x, r.min.y + 1.0 + 4.0), pos2(x + 2.0, r.min.y + 1.0 + TAB_H));
                         }
                         let tint = if refused { hex("#ef7063").gamma_multiply(0.25) } else { self.pal.accent.gamma_multiply(if in_tabs { 0.9 } else { 0.25 }) };
-                        ui.painter().rect_filled(preview, CornerRadius::ZERO, tint);
+                        ui.painter().rect_filled(preview, if in_tabs { self.pal.corner_small() } else { self.pal.corner_large() }, tint);
                         if refused {
                             ui.painter().text(preview.center(), Align2::CENTER_CENTER, NO_ROOM_TO_SPLIT, FontId::proportional(self.st.font_size), self.pal.text);
                         }
@@ -1415,7 +1440,7 @@ impl App {
             if *target == payload.pane {
                 preview.max.y = r.min.y + 1.0 + TAB_H;
             }
-            ui.painter().rect_filled(preview, CornerRadius::ZERO, self.pal.accent.gamma_multiply(0.25));
+            ui.painter().rect_filled(preview, self.pal.corner_large(), self.pal.accent.gamma_multiply(0.25));
             if ui.input(|inp| inp.pointer.any_released()) {
                 self.acts.push(Act::OpenNewTab(*target, payload.path.clone(), true));
                 egui::DragAndDrop::clear_payload(ui.ctx());
@@ -1469,7 +1494,7 @@ impl App {
         } else {
             pal.panel
         };
-        painter.rect_filled(rect, CornerRadius::ZERO, pal.surface(fill));
+        painter.rect_filled(rect, pal.corner_large(), pal.surface(fill));
         let mut r = rect.shrink(1.0);
         // Reserve the summary before any controls, even in a very short tile.
         let status = take_bottom(&mut r, STATUS_H);
@@ -1545,7 +1570,7 @@ impl App {
             let selected = i == shown && self.panes[i].active == t;
             let look = crate::theme::tab_look(&pal, selected, self.active == shown, resp.hovered());
             let bg = look.fill;
-            p.rect_filled(tr, CornerRadius::ZERO, bg);
+            p.rect_filled(tr, pal.corner(), bg);
             let path = self.panes[i].tabs[t].path.clone();
             let ir =
                 Rect::from_min_size(pos2(tr.min.x + 8.0, tr.center().y - 7.0), vec2(14.0, 14.0));
@@ -1574,7 +1599,7 @@ impl App {
                 let xresp = ui.interact(xr, id.with("x"), Sense::click())
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                 if xresp.hovered() {
-                    p.rect_filled(xr, CornerRadius::ZERO, blend(bg, pal.text, 0.15));
+                    p.rect_filled(xr, pal.corner(), blend(bg, pal.text, 0.15));
                 }
                 icons::glyph(&p, xr, "close", pal.text_weak);
                 if xresp.on_hover_text(self.tip("Close tab", Command::CloseTab)).clicked() {
@@ -1629,7 +1654,7 @@ impl App {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             }
             if resp.hovered() {
-                p.rect_filled(br, CornerRadius::ZERO, pal.hover);
+                p.rect_filled(br, pal.corner(), pal.hover);
             }
             icons::glyph(&p, br, "grip", if resp.hovered() { pal.text } else { pal.text_weak });
             resp.on_hover_text("Drag to move this panel with all its tabs: join another panel, or split at an edge");
@@ -1639,7 +1664,7 @@ impl App {
             bx -= 26.0;
             let resp = ui.interact(br, ui.scope_id().with(("panelbtn", i, key)), Sense::click());
             if resp.hovered() {
-                p.rect_filled(br, CornerRadius::ZERO, pal.hover);
+                p.rect_filled(br, pal.corner(), pal.hover);
             }
             let col = if resp.hovered() {
                 pal.text
@@ -1670,7 +1695,7 @@ impl App {
         let pr = Rect::from_min_size(pos2(x + 2.0, r.min.y + 6.0), vec2(26.0, r.height() - 8.0));
         let presp = ui.interact(pr, ui.scope_id().with(("newtab", i)), Sense::click());
         if presp.hovered() {
-            p.rect_filled(pr, CornerRadius::ZERO, pal.hover);
+            p.rect_filled(pr, pal.corner(), pal.hover);
         }
         icons::glyph(&p, pr, "plus", pal.text_weak);
         if presp.on_hover_text(self.tip("Create new tab", Command::NewTab)).clicked() {
@@ -1788,7 +1813,7 @@ impl App {
                             if on {
                                 ui.painter().rect_filled(
                                     resp.rect,
-                                    CornerRadius::ZERO,
+                                    pal.corner(),
                                     pal.accent.gamma_multiply(0.2),
                                 );
                             }
@@ -1837,9 +1862,9 @@ impl App {
                     );
                     let p = ui.painter();
                     if hl_idx == Some(k) {
-                        p.rect_filled(rr, CornerRadius::ZERO, pal.cursor(false));
+                        p.rect_filled(rr, pal.corner(), pal.cursor(false));
                     } else if resp.hovered() {
-                        p.rect_filled(rr, CornerRadius::ZERO, pal.hover);
+                        p.rect_filled(rr, pal.corner(), pal.hover);
                     }
                     let ir = Rect::from_min_size(
                         pos2(rr.min.x + 4.0, rr.center().y - 7.0),

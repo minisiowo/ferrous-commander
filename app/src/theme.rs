@@ -74,6 +74,24 @@ pub struct Palette {
     pub accent: Color32,
     /// The desktop's own material is behind the main window, and its surfaces let it through.
     pub glass: bool,
+    /// Corners are rounded instead of square.
+    pub round: bool,
+}
+
+/// `radius` on the two upper corners only: a tab, or the bar at the top of a window.
+pub fn top(radius: CornerRadius) -> CornerRadius {
+    CornerRadius { sw: 0, se: 0, ..radius }
+}
+
+/// `radius` on the two lower corners only: the strip at the bottom of a window.
+pub fn bottom(radius: CornerRadius) -> CornerRadius {
+    CornerRadius { nw: 0, ne: 0, ..radius }
+}
+
+/// The corners of what lies just inside a line one point wide around `radius`.
+pub fn inside(radius: CornerRadius) -> CornerRadius {
+    let less = |r: u8| r.saturating_sub(1);
+    CornerRadius { nw: less(radius.nw), ne: less(radius.ne), sw: less(radius.sw), se: less(radius.se) }
 }
 
 /// How much of a surface's own colour stays over the desktop's material.
@@ -113,6 +131,7 @@ impl Palette {
                 tab_idle: hex("#202020"),
                 accent,
                 glass: false,
+                round: false,
             },
             ThemeName::TokyoNight => preset(true, "#1a1b26", "#a9b1d6", "#7aa2f7"),
             ThemeName::Gruvbox => preset(true, "#282828", "#d4be98", "#7daea3"),
@@ -161,14 +180,29 @@ impl Palette {
         }
     }
 
+    /// The corners of small things: buttons, fields, highlights, the rows of a card.
+    pub fn corner(&self) -> CornerRadius {
+        CornerRadius::same(if self.round { 4 } else { 0 })
+    }
+
+    /// The corners of thin bars, which a larger radius would turn into dots.
+    pub fn corner_small(&self) -> CornerRadius {
+        CornerRadius::same(if self.round { 2 } else { 0 })
+    }
+
+    /// The corners of surfaces: windows, menus, cards.
+    pub fn corner_large(&self) -> CornerRadius {
+        CornerRadius::same(if self.round { 8 } else { 0 })
+    }
+
     pub fn apply(&self, ctx: &egui::Context) {
         ctx.set_theme(if self.dark { egui::Theme::Dark } else { egui::Theme::Light });
         let mut v = if self.dark { Visuals::dark() } else { Visuals::light() };
         v.panel_fill = self.window;
         v.window_fill = self.panel;
         v.window_stroke = Stroke::new(1.0, blend(self.panel, self.text_weak, 0.28));
-        v.window_corner_radius = CornerRadius::ZERO;
-        v.menu_corner_radius = CornerRadius::ZERO;
+        v.window_corner_radius = self.corner_large();
+        v.menu_corner_radius = self.corner_large();
         v.window_shadow = egui::epaint::Shadow::NONE;
         v.popup_shadow = egui::epaint::Shadow::NONE;
         v.extreme_bg_color = if self.dark { blend(self.window, self.panel, 0.5) } else { hex("#FFFFFF") };
@@ -177,7 +211,7 @@ impl Palette {
         v.hyperlink_color = self.text_important;
         v.selection.bg_fill = self.selection();
         v.selection.stroke = Stroke::new(1.0, self.text);
-        let r = CornerRadius::ZERO;
+        let r = self.corner();
         let w = &mut v.widgets;
         w.noninteractive.bg_fill = self.panel;
         w.noninteractive.weak_bg_fill = self.panel;
@@ -314,6 +348,24 @@ mod tests {
             assert_tabs_work(name.label(), &pal);
             assert_rows_work(name.label(), &pal);
         }
+    }
+
+    #[test]
+    fn corners_are_square_unless_asked_to_be_round_and_then_only_a_little() {
+        let square = Palette::get(ThemeName::Dark, hex(crate::defaults::ACCENT_RGB));
+        assert!(!square.round, "a theme does not choose the corners");
+        assert_eq!((square.corner(), square.corner_large()), (CornerRadius::ZERO, CornerRadius::ZERO));
+        let round = Palette { round: true, ..square };
+        assert!(round.corner().nw > 0 && round.corner().nw < round.corner_large().nw && round.corner_large().nw <= 8);
+        let ctx = egui::Context::default();
+        for (pal, small, large) in [(square, square.corner(), square.corner_large()), (round, round.corner(), round.corner_large())] {
+            pal.apply(&ctx);
+            let v = ctx.global_style().visuals.clone();
+            assert_eq!((v.widgets.inactive.corner_radius, v.widgets.hovered.corner_radius), (small, small));
+            assert_eq!((v.window_corner_radius, v.menu_corner_radius), (large, large));
+        }
+        assert_eq!(top(round.corner_large()), CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 });
+        assert_eq!(bottom(inside(round.corner_large())), CornerRadius { nw: 0, ne: 0, sw: 7, se: 7 });
     }
 
     #[test]

@@ -437,7 +437,7 @@ pub struct App {
     last_save: Instant,
     last_evict: Instant,
     watched_generation: u64,
-    applied: Option<(ThemeName, String, u32, Option<crate::omarchy::Colors>, bool)>,
+    applied: Option<(ThemeName, String, u32, Option<crate::omarchy::Colors>, bool, bool)>,
     /// The desktop's material is showing behind the main window right now.
     pub see_through: bool,
     /// This Windows has no such material to show.
@@ -504,8 +504,10 @@ impl App {
             // A clean, deterministic first-start picture: start in the home folder.
             st.panes = Vec::new();
             st.tiles = None;
-            // For checking other looks: FC_SHOT=columns,light,dual,gruvbox,palette,commands
+            // For checking other looks: FC_SHOT=columns,light,dual,gruvbox,palette,commands,round
             let look = std::env::var("FC_SHOT").unwrap_or_default();
+            // The same picture on every system, whatever its default.
+            st.rounded = look.contains("round");
             if look.contains("columns") {
                 st.layout = Layout::Columns;
             }
@@ -848,6 +850,7 @@ impl App {
             self.st.font_size.to_bits(),
             self.omarchy_colors,
             self.see_through,
+            self.st.rounded,
         );
         if self.applied.as_ref() != Some(&key) {
             self.pal = match self.omarchy_colors {
@@ -855,6 +858,7 @@ impl App {
                 None => Palette::get(self.st.theme, hex(&self.st.accent)),
             };
             self.pal.glass = self.see_through;
+            self.pal.round = self.st.rounded;
             self.pal.apply(ctx);
             let fs = self.st.font_size;
             ctx.global_style_mut(|s| {

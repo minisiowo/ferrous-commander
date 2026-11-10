@@ -169,7 +169,7 @@ fn cursor_at_end(cursor: Option<CCursorRange>, text: &str) -> bool {
 fn in_place_frame(ui: &Ui, margin: i8) -> egui::Frame {
     egui::Frame::new()
         .fill(ui.visuals().text_edit_bg_color())
-        .corner_radius(CornerRadius::ZERO)
+        .corner_radius(ui.visuals().widgets.inactive.corner_radius)
         .inner_margin(egui::Margin::symmetric(margin, 0))
 }
 
@@ -507,7 +507,7 @@ impl App {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             }
             if resp.hovered() || resp.dragged() {
-                p.rect_filled(cr, CornerRadius::ZERO, pal.hover);
+                p.rect_filled(cr, pal.corner(), pal.hover);
             }
             let col = if resp.hovered() || k + 1 == crumbs.len() {
                 pal.text
@@ -774,12 +774,12 @@ impl App {
                 }
                 ui.painter_at(list_r).rect_filled(
                     selection,
-                    CornerRadius::ZERO,
+                    pal.corner(),
                     pal.accent.gamma_multiply(0.15),
                 );
                 ui.painter_at(list_r).rect_stroke(
                     selection,
-                    CornerRadius::ZERO,
+                    pal.corner(),
                     Stroke::new(1.0, pal.accent),
                     StrokeKind::Inside,
                 );
@@ -866,8 +866,20 @@ impl App {
         } else {
             Color32::TRANSPARENT
         };
-        // Square corners: neighbouring selected rows must join into one block.
-        p.rect_filled(rr, CornerRadius::ZERO, bg);
+        // Neighbouring selected rows must join into one block, so only the block's ends are
+        // round. The stripes are the list's own ground and stay square.
+        let striped = !selected && !resp.hovered() && !(is_active && self.panes[i].cursor == Some(row)) && !(dragging && e.is_dir && resp.contains_pointer());
+        let corner = if striped || !pal.round {
+            CornerRadius::ZERO
+        } else {
+            let joins = |row: Option<usize>| selected && row.and_then(|row| self.entry_at(i, row)).is_some_and(|e| self.panes[i].selected.contains(&e.path));
+            let (above, below) = (joins(row.checked_sub(1)), joins(Some(row + 1)));
+            let mut corner = pal.corner();
+            if above { corner = crate::theme::bottom(corner); }
+            if below { corner = crate::theme::top(corner); }
+            corner
+        };
+        p.rect_filled(rr, corner, bg);
         let dim = e.hidden || cut.contains(&e.path);
         let font = FontId::proportional(self.st.font_size);
         let small = FontId::proportional(self.st.font_size - 1.0);
@@ -975,7 +987,7 @@ impl App {
                                 pos2(cr.max.x - 12.0 - g.size().x, cr.center().y - 8.0),
                                 vec2(g.size().x + 8.0, 16.0),
                             );
-                            p.rect_filled(br, CornerRadius::ZERO, ac);
+                            p.rect_filled(br, pal.corner(), ac);
                             put(s, small.clone(), Color32::from_rgb(0x1a, 0x1a, 0x1e));
                         }
                         None => put(s, small.clone(), weak),
@@ -1023,7 +1035,7 @@ impl App {
                     .align(Align2::LEFT_CENTER);
                 let r = ui.put(er, te);
                 // The row is lit like any selected one; this says where the typing goes.
-                p.rect_stroke(r.rect, CornerRadius::ZERO, Stroke::new(1.0, pal.accent), egui::StrokeKind::Inside);
+                p.rect_stroke(r.rect, pal.corner(), Stroke::new(1.0, pal.accent), egui::StrokeKind::Inside);
                 if focus {
                     self.panes[i].rename_focus = false;
                 } else if r.lost_focus() {
@@ -1279,7 +1291,7 @@ impl App {
             (PreviewContent::Text(t), true) if r.width() > 160.0 && !t.text.is_empty() => {
                 p.rect_filled(
                     r,
-                    CornerRadius::ZERO,
+                    pal.corner(),
                     if pal.dark {
                         blend(pal.window, pal.panel, 0.5)
                     } else {

@@ -5,6 +5,8 @@ pub const SHOW_HIDDEN_FILES: bool = false;
 pub const TREAT_DOT_FILES_AS_HIDDEN: bool = false;
 pub const SHOW_FILE_EXTENSION: bool = true;
 pub const USE_FILE_AGE_COLOR: bool = true;
+/// Square suits a tiling desktop; Windows rounds everything of its own.
+pub const ROUNDED_CORNERS: bool = cfg!(windows);
 pub const ACCENT_RGB: &str = "#0078D7";
 pub const HIDDEN_NAMES: &[&str] = &["Thumbs.db", "DumpStack.log", "pagefile.sys", "swapfile.sys", "System Volume Information", "$Recycle.Bin", "desktop.ini"];
 pub const HIDDEN_EXTENSIONS: &[&str] = &["tmp", "temp"];
