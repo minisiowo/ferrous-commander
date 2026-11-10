@@ -25,6 +25,7 @@ use crate::ui::{fit_text, symbol_button};
 /// Content that arrives in time also sets the size the window first appears at.
 const OPEN_WAIT: Duration = Duration::from_millis(200);
 const SPINNER_AFTER: Duration = Duration::from_millis(150);
+const SPINNER_FRAME: Duration = Duration::from_millis(33);
 const SWITCH_SECONDS: f32 = 0.09;
 /// Held Space must not close the preview and open it again from the file list.
 const REOPEN_PAUSE: Duration = Duration::from_millis(300);
@@ -460,6 +461,22 @@ fn reset_look(view: &mut View) {
     view.tilt = 0.0;
 }
 
+/// `egui::Spinner` asks for the next frame at once. On Windows a window that keeps doing
+/// that can leave the file list without frames, and the finished preview and the key that
+/// closes this window both go through the list. So this one leaves a pause.
+fn paced_spinner(ui: &Ui, r: Rect) {
+    use std::f64::consts::TAU;
+    ui.ctx().request_repaint_after(SPINNER_FRAME);
+    let radius = r.height() * 0.5 - 2.0;
+    let time = ui.input(|i| i.time);
+    let (start, sweep) = (time * TAU, 240f64.to_radians() * time.sin());
+    let points = (0..radius.round() as u32).map(|i| {
+        let (sin, cos) = (start + sweep * i as f64 / radius.round() as f64).sin_cos();
+        r.center() + radius * vec2(cos as f32, sin as f32)
+    }).collect();
+    ui.painter().add(egui::Shape::line(points, Stroke::new(3.0, ui.visuals().strong_text_color())));
+}
+
 fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
     let ctx = ui.ctx().clone();
     let embedded = class == ViewportClass::EmbeddedWindow;
@@ -515,8 +532,7 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
     }
     if let Some(since) = s.loading {
         if since.elapsed() >= SPINNER_AFTER {
-            let r = Rect::from_center_size(body.center(), Vec2::splat(28.0));
-            ui.put(r, egui::Spinner::new().size(28.0));
+            paced_spinner(ui, Rect::from_center_size(body.center(), Vec2::splat(28.0)));
         } else {
             ctx.request_repaint_after(SPINNER_AFTER);
         }
@@ -1064,6 +1080,22 @@ mod tests {
 
     fn turns(s: &mut Shared) -> Vec<ModelView> {
         s.commands.drain(..).filter_map(|c| if let Cmd::Turn(view) = c { Some(view) } else { None }).collect()
+    }
+
+    #[test]
+    fn the_spinner_leaves_time_for_the_file_list_to_be_drawn() {
+        let ctx = egui::Context::default();
+        let mut s = model_on_screen(&ctx);
+        s.loading = Some(Instant::now() - SPINNER_AFTER * 2);
+        let mut delay = Duration::ZERO;
+        // The first frames of a new context ask for more on their own.
+        for _ in 0..4 {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| draw(ui, &mut s, ViewportClass::Deferred));
+            out.textures_delta.clear();
+            delay = out.viewport_output[&ViewportId::ROOT].repaint_delay;
+        }
+        assert!(delay >= SPINNER_FRAME / 2, "{delay:?}");
     }
 
     #[test]
