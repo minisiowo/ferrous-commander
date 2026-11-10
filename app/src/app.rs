@@ -406,8 +406,10 @@ pub struct App {
     persist: bool,
     generation: u64,
     pub drop_zones: Vec<(egui::Rect, DropTarget)>,
-    /// The window is too narrow for the layout, so one panel shows and lists every tab.
+    /// The window is too small for the layout, so one panel shows and lists every tab.
     pub panels_stacked: bool,
+    /// The room the panels had in the last frame.
+    pub panels_area: egui::Vec2,
     pub acts: Vec<Act>,
     /// Last highlighted child per (pane, column) so a column scrolls to it once.
     pub col_hl: HashMap<(usize, PathBuf), PathBuf>,
@@ -673,6 +675,7 @@ impl App {
             generation: 1,
             drop_zones: Vec::new(),
             panels_stacked: false,
+            panels_area: egui::Vec2::ZERO,
             acts: Vec::new(),
             col_hl: HashMap::new(),
         }
@@ -1825,10 +1828,10 @@ impl App {
                 }
             }
             Act::OpenPanel(i, p) => {
-                let no_room = (self.panes.len() == 1 || self.panels_stacked)
-                    && self.pane_rects.iter().any(|(_, r)| r.width() < 2.0 * crate::ui::COLLAPSE_W);
                 self.open_panel(i, p);
-                if no_room { self.toast(ToastKind::Info, "The window is too narrow for another panel, so it opened as a tab"); }
+                if !self.tiles.fits(self.panels_area) {
+                    self.toast(ToastKind::Info, "The window is too small for another panel, so it opened as a tab");
+                }
             }
             Act::ClosePanel(i) => self.close_panel(i),
             Act::ToggleSplit(i) => {

@@ -23,7 +23,6 @@ const PANELS_LEFT: i8 = 2;
 pub const TOOLBAR_H: f32 = 36.0;
 pub const DETAILS_H: f32 = crate::defaults::DETAILS_HEIGHT;
 pub const PREVIEW_W: f32 = crate::defaults::PREVIEW_WIDTH;
-pub const COLLAPSE_W: f32 = crate::defaults::COLLAPSE_WIDTH;
 pub const COL_W: f32 = crate::defaults::COLUMN_WIDTH;
 pub const COL_SMALL_W: f32 = crate::defaults::COLUMN_SMALL_WIDTH;
 pub const COLS_H: f32 = crate::defaults::COLUMNS_HEIGHT;
@@ -1292,8 +1291,8 @@ impl App {
         }
         let mut rects = Vec::new();
         let mut divs = Vec::new();
-        let no_room = full.width() < 2.0 * COLLAPSE_W;
-        self.panels_stacked = self.panes.len() > 1 && no_room;
+        self.panels_area = full.size();
+        self.panels_stacked = self.panes.len() > 1 && !self.tiles.fits(full.size());
         if self.panels_stacked {
             // Only the active panel fits. The tab strip lists the others, and the layout
             // comes back as it was when the window grows.
@@ -1363,7 +1362,16 @@ impl App {
                     let valid = *target != payload.pane
                         || (payload.tab.is_some() && (split.is_none() || self.panes[payload.pane].tabs.len() > 1));
                     if valid {
-                        let refused = split.is_some() && no_room;
+                        // Judged by the layout the drop would leave behind.
+                        let refused = split.is_some_and(|(vertical, before)| {
+                            let mut after = self.tiles.clone();
+                            if payload.tab.is_none() || self.panes[payload.pane].tabs.len() == 1 {
+                                after.relocate(payload.pane, *target, vertical, before);
+                            } else {
+                                after.insert_at(*target, usize::MAX, vertical, before);
+                            }
+                            !after.fits(full.size())
+                        });
                         let mut preview = *r;
                         if split.is_some() {
                             match edge {
@@ -1385,7 +1393,8 @@ impl App {
                         ui.ctx().set_cursor_icon(if refused { egui::CursorIcon::NotAllowed } else { egui::CursorIcon::Grabbing });
                         if ui.input(|inp| inp.pointer.any_released()) {
                             if refused {
-                                self.toast(ToastKind::Info, format!("{NO_ROOM_TO_SPLIT}. Make the window wider first"));
+                                let side = if split.is_some_and(|(vertical, _)| vertical) { "taller" } else { "wider" };
+                                self.toast(ToastKind::Info, format!("{NO_ROOM_TO_SPLIT}. Make the window {side} first"));
                             } else {
                                 self.acts.push(match payload.tab {
                                     Some(tab) => Act::DockTab { source: payload.pane, tab, target: place, at, split },

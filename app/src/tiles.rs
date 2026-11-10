@@ -1,13 +1,17 @@
 //! Tiling layout for browser panels, in the spirit of Hyprland's "dwindle" layout:
 //! a new panel splits the active one along its longer side; dividers drag to resize.
 
-use egui::{Rect, pos2};
+use egui::{Rect, Vec2, pos2};
 use serde::{Deserialize, Serialize};
 
 /// Gap between panels: the line that divides them.
 pub const GAP: f32 = 1.0;
 /// A split never gives a side less than this share.
 const MIN_RATIO: f32 = 0.12;
+/// Any layout with panels side by side needs this much width.
+const COLUMNS_MIN_WIDTH: f32 = 2.0 * crate::defaults::COLLAPSE_WIDTH;
+/// A panel's tabs, path, tools, status and a few rows of files.
+const PANEL_MIN_HEIGHT: f32 = 200.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Tile {
@@ -219,6 +223,27 @@ impl Tile {
         }
     }
 
+    fn has_columns(&self) -> bool {
+        match self {
+            Tile::Leaf(_) => false,
+            Tile::Split { vertical, a, b, .. } => !*vertical || a.has_columns() || b.has_columns(),
+        }
+    }
+
+    /// Panels above one another add up; panels side by side need only the tallest.
+    fn min_height(&self) -> f32 {
+        match self {
+            Tile::Leaf(_) => PANEL_MIN_HEIGHT,
+            Tile::Split { vertical: true, a, b, .. } => a.min_height() + b.min_height(),
+            Tile::Split { a, b, .. } => a.min_height().max(b.min_height()),
+        }
+    }
+
+    /// Whether this layout can be shown in an area of this size.
+    pub fn fits(&self, area: Vec2) -> bool {
+        (!self.has_columns() || area.x >= COLUMNS_MIN_WIDTH) && area.y >= self.min_height()
+    }
+
     /// A valid tree for `n` panels: keeps this one when it matches, else stacks them in a row.
     pub fn sanitize(self, n: usize) -> Tile {
         let mut l = Vec::new();
@@ -239,6 +264,25 @@ impl Tile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::vec2;
+
+    #[test]
+    fn columns_need_width_and_rows_need_height() {
+        let mut columns = Tile::Leaf(0);
+        columns.split(0, 1, false);
+        assert!(columns.fits(vec2(700.0, 200.0)));
+        assert!(!columns.fits(vec2(699.0, 2000.0)));
+
+        let mut rows = Tile::Leaf(0);
+        rows.split(0, 1, true);
+        assert!(rows.fits(vec2(300.0, 400.0)), "panels above one another need no extra width");
+        assert!(!rows.fits(vec2(3000.0, 399.0)));
+
+        columns.split(1, 2, true);
+        assert!(columns.fits(vec2(700.0, 400.0)));
+        assert!(!columns.fits(vec2(700.0, 399.0)), "one column holds two rows");
+    }
+
     #[test]
     fn split_and_remove() {
         let mut t = Tile::Leaf(0);

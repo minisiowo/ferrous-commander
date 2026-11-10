@@ -2700,3 +2700,30 @@ fn splitting_without_room_says_so_and_leaves_the_tab_alone() {
     assert!(app.toasts.last().is_some_and(|t| t.text.contains("Make the window wider")));
     std::fs::remove_dir_all(narrow_root("refuse")).unwrap();
 }
+
+#[test]
+fn a_tall_narrow_window_still_splits_top_and_bottom() {
+    let (ctx, mut app) = narrow_app("rows");
+    app.close_panel(1);
+    for _ in 0..2 { narrow_frame(&ctx, &mut app, vec![], ""); }
+    let r = app.pane_rects[0].1;
+    let start = narrow_tab(&app, 0, 2);
+    assert!(!narrow_drag(&ctx, &mut app, start, pos2(r.center().x, r.max.y - 20.0)), "there is room below");
+    assert_eq!(app.panes.len(), 2);
+    assert!(!app.panels_stacked);
+    assert_eq!(app.pane_rects.len(), 2, "both panels are on screen at once");
+    std::fs::remove_dir_all(narrow_root("rows")).unwrap();
+}
+
+#[test]
+fn moving_a_stacked_panel_below_brings_both_into_view() {
+    let (ctx, mut app) = narrow_app("unstack");
+    for _ in 0..2 { narrow_frame(&ctx, &mut app, vec![], ""); }
+    assert!(app.panels_stacked, "side by side they do not fit");
+    let r = app.pane_rects[0].1;
+    let start = narrow_tab(&app, 2, 3);
+    assert!(!narrow_drag(&ctx, &mut app, start, pos2(r.center().x, r.max.y - 20.0)));
+    assert_eq!(app.panes.len(), 2);
+    assert!(!app.panels_stacked, "one above the other they do");
+    std::fs::remove_dir_all(narrow_root("unstack")).unwrap();
+}
