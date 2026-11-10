@@ -493,11 +493,13 @@ impl App {
                             let font = FontId::proportional(self.st.font_size);
                             let edit = TextEdit::singleline(&mut palette.query).id(field).frame(Frame::NONE)
                                 .hint_text(egui::RichText::new(mode.hint()).font(font.clone())).desired_width(f32::INFINITY)
-                                .font(font);
+                                .font(font.clone()).align(Align2::LEFT_CENTER);
                             // Every frame: a click on a row or Tab must not take the keyboard away.
-                            let typed = ui.add(edit);
-                            typed.request_focus();
-                            let middle = pos2(slot.0.center().x, typed.rect.center().y);
+                            let typed = edit.show(ui);
+                            typed.response.response.request_focus();
+                            // Level with the capitals of the line of text, wherever the field put it.
+                            let level = typed.galley_pos.y + typed.galley.rect.center().y + icons::capital_drop(ui.painter(), font);
+                            let middle = pos2(slot.0.center().x, level);
                             icons::face(ui.painter(), Rect::from_center_size(middle, slot.0.size()), mode.face(), 15.0, pal.accent);
                             slot.1.on_hover_text(mode.label());
                         }));

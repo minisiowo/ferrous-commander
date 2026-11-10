@@ -33,6 +33,13 @@ pub fn ink_centre(p: &Painter, center: Pos2, text: &str, font: FontId) -> Pos2 {
     origin + ink(&galley).center().to_vec2()
 }
 
+/// How far below the middle of its line a font's capital letters have their middle. A symbol
+/// beside text looks level with it there, not at the middle of the line, which descenders deepen.
+pub fn capital_drop(p: &Painter, font: FontId) -> f32 {
+    let galley = p.layout_no_wrap("H".to_string(), font, Color32::WHITE);
+    ink(&galley).center().y - galley.rect.center().y
+}
+
 /// A symbol from the fonts, centred on its shape rather than on its line of text.
 pub fn symbol(p: &Painter, center: Pos2, text: &str, font: FontId, color: Color32) {
     let (origin, galley) = centred(p, center, text, font, color);
