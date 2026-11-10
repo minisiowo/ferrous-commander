@@ -37,6 +37,30 @@ fn settle(ctx: &egui::Context, app: &mut App) {
     for _ in 0..3 { frame(ctx, app, vec![], Modifiers::NONE); }
 }
 
+/// Where and in which font the text `wanted` is painted.
+fn painted_font(ctx: &egui::Context, app: &mut App, wanted: &str) -> (egui::FontId, Pos2) {
+    let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))), ..Default::default() };
+    let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+    output.textures_delta.clear();
+    output.shapes.iter().find_map(|s| match &s.shape {
+        egui::epaint::Shape::Text(t) if t.galley.job.text == wanted => Some((t.galley.job.sections[0].format.font_id.clone(), t.pos)),
+        _ => None,
+    }).unwrap_or_else(|| panic!("{wanted} is not painted"))
+}
+
+#[test]
+fn the_hint_looks_like_the_text_that_replaces_it() {
+    let (ctx, mut app, root) = palette_app("palette_hint");
+    alt_p(&ctx, &mut app);
+    let hint = painted_font(&ctx, &mut app, Mode::Places.hint());
+    word(&ctx, &mut app, "x");
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    let typed = painted_font(&ctx, &mut app, "x");
+    assert_eq!(hint.0, typed.0, "the same font");
+    assert!((hint.1 - typed.1).abs().max_elem() < 0.51, "in the same place: {:?} and {:?}", hint.1, typed.1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn alt_p_opens_the_palette_which_takes_the_keyboard_and_goes_to_a_folder() {
     let (ctx, mut app, root) = palette_app("palette_go");

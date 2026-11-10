@@ -224,7 +224,7 @@ impl App {
                     .frame(in_place_frame(ui, CRUMB_TEXT_LEFT))
                     .align(Align2::LEFT_CENTER)
                     .desired_width(field_r.width())
-                    .hint_text("Path")
+                    .hint_text(RichText::new("Path").font(font.clone()))
                     .lock_focus(true)
                     .show(ui);
                 let completion = if cursor_at_end(output.cursor_range, &text) {

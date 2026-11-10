@@ -400,9 +400,11 @@ impl App {
                                 state.cursor.set_char_range(Some(CCursorRange::one(end)));
                                 TextEdit::store_state(ui.ctx(), field, state);
                             }
+                            // egui's `font` leaves the hint out, so it must be told the same one.
+                            let font = FontId::proportional(self.st.font_size);
                             let edit = TextEdit::singleline(&mut palette.query).id(field).frame(Frame::NONE)
-                                .hint_text(mode.hint()).desired_width(f32::INFINITY)
-                                .font(FontId::proportional(self.st.font_size + 2.0));
+                                .hint_text(egui::RichText::new(mode.hint()).font(font.clone())).desired_width(f32::INFINITY)
+                                .font(font);
                             // Every frame: a click on a row or Tab must not take the keyboard away.
                             let typed = ui.add(edit);
                             typed.request_focus();
