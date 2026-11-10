@@ -91,6 +91,7 @@ impl Colors {
             hover: toward_text(if dark { 0.09 } else { 0.06 }),
             tab_idle,
             accent,
+            glass: false,
         };
         // Selections are tinted with the accent. Some themes use the text colour as
         // accent, which would hide the text, so mute it until it reads.

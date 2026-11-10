@@ -51,6 +51,9 @@ wayland-backend = { version = "0.3.17", features = ["client_system"] }
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 x11rb = { version = "0.13.2", features = ["xtest"] }
 
+[target."cfg(windows)".dependencies]
+raw-window-handle = "0.6.2"
+
 [target."cfg(windows)".build-dependencies]
 winresource = "0.1.34"
 

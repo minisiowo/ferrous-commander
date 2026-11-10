@@ -24,6 +24,11 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn ShellExecuteExW(info: *mut ShellExecuteInfo) -> i32;
 }
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmSetWindowAttribute(window: isize, attribute: u32, value: *const core::ffi::c_void, size: u32) -> i32;
+    fn DwmExtendFrameIntoClientArea(window: isize, margins: *const [i32; 4]) -> i32;
+}
 #[link(name = "ole32")]
 unsafe extern "system" {
     fn CoInitializeEx(reserved: *mut core::ffi::c_void, flags: u32) -> i32;
@@ -53,6 +58,49 @@ pub fn work_area_at(x: f32, y: f32) -> Option<[f32; 4]> {
     // SAFETY: `info` is valid for writing and announces its own size.
     let ok = unsafe { GetMonitorInfoW(MonitorFromPoint(Point { x: x as i32, y: y as i32 }, MONITOR_DEFAULTTONEAREST), &mut info) };
     (ok != 0).then(|| info.work.map(|v| v as f32))
+}
+
+/// How the main window's frame is dressed.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct WindowLook {
+    pub dark: bool,
+    /// The title bar and its text, as red, green, blue.
+    pub bar: [u8; 3],
+    pub text: [u8; 3],
+    /// Mica behind the whole window, title bar included, in place of the colours above.
+    pub mica: bool,
+}
+
+/// Dresses the window; true when Mica is now behind it. Mica needs Windows 11 22H2,
+/// and the title bar colours need Windows 11: older systems keep their own title bar.
+pub fn dress_window(window: isize, look: WindowLook) -> bool {
+    const USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    const CAPTION_COLOR: u32 = 35;
+    const TEXT_COLOR: u32 = 36;
+    const SYSTEMBACKDROP_TYPE: u32 = 38;
+    const COLOR_DEFAULT: u32 = 0xFFFF_FFFF;
+    const BACKDROP_AUTO: u32 = 0;
+    const BACKDROP_MICA: u32 = 2;
+    // SAFETY: every value is a live u32 of the size passed, and a window that is gone is an error code.
+    let set = |attribute: u32, value: u32| unsafe {
+        DwmSetWindowAttribute(window, attribute, (&raw const value).cast(), size_of::<u32>() as u32) >= 0
+    };
+    // SAFETY: the margins are four live integers.
+    let extend = |margin: i32| unsafe { DwmExtendFrameIntoClientArea(window, &[margin; 4]) >= 0 };
+    let color = |[r, g, b]: [u8; 3]| u32::from_le_bytes([r, g, b, 0]);
+    set(USE_IMMERSIVE_DARK_MODE, look.dark as u32);
+    // The material only shows where the frame reaches, so the frame takes the whole window.
+    let mica = look.mica && set(SYSTEMBACKDROP_TYPE, BACKDROP_MICA) && extend(-1);
+    if mica {
+        set(CAPTION_COLOR, COLOR_DEFAULT);
+        set(TEXT_COLOR, COLOR_DEFAULT);
+    } else {
+        set(SYSTEMBACKDROP_TYPE, BACKDROP_AUTO);
+        extend(0);
+        set(CAPTION_COLOR, color(look.bar));
+        set(TEXT_COLOR, color(look.text));
+    }
+    mica
 }
 
 /// SHELLEXECUTEINFOW.

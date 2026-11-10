@@ -60,6 +60,38 @@ impl egui::Plugin for TextureLimit {
 
 struct Shell {
     app: app::App,
+    /// What the window's frame was last dressed for.
+    #[cfg(windows)]
+    dressed: Option<(win::WindowLook, Option<egui::Theme>)>,
+}
+
+#[cfg(windows)]
+impl Shell {
+    /// The title bar takes the theme's colour, or the whole window goes on Mica.
+    fn dress_window(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(RawWindowHandle::Win32(handle)) = frame.window_handle().map(|w| w.as_raw()) else { return };
+        let rgb = |c: egui::Color32| [c.r(), c.g(), c.b()];
+        let pal = self.app.pal;
+        // Only the OpenGL renderer hands its transparency on to the desktop.
+        self.app.effect_unavailable |= frame.gl().is_none();
+        let look = win::WindowLook {
+            dark: pal.dark,
+            bar: rgb(pal.window),
+            text: rgb(pal.text),
+            mica: self.app.st.window_effect && !self.app.effect_unavailable,
+        };
+        // Windows dresses the title bar anew when the system theme changes.
+        let wanted = Some((look, ctx.input(|i| i.raw.system_theme)));
+        if self.dressed == wanted { return; }
+        self.dressed = wanted;
+        let mica = win::dress_window(handle.hwnd.get(), look);
+        self.app.effect_unavailable |= look.mica && !mica;
+        if self.app.see_through != mica {
+            self.app.see_through = mica;
+            ctx.request_repaint();
+        }
+    }
 }
 
 /// A plugin so that text fields in every window get their clipboard shortcuts.
@@ -85,6 +117,14 @@ impl eframe::App for Shell {
         self.app.draw(ui);
         #[cfg(target_os = "linux")]
         linux_drag::handoff(&mut self.app, ui.ctx(), _frame);
+        #[cfg(windows)]
+        self.dress_window(ui.ctx(), _frame);
+    }
+
+    /// Nothing of its own behind the panels when the desktop's material shows there.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        let behind = if self.app.see_through { egui::Color32::TRANSPARENT } else { self.app.pal.window };
+        behind.to_normalized_gamma_f32()
     }
 }
 
@@ -110,32 +150,36 @@ fn fonts(ctx: &egui::Context) {
     ctx.set_fonts(defs);
 }
 
-fn options(renderer: eframe::Renderer) -> eframe::NativeOptions {
+fn options(renderer: eframe::Renderer, place: settings::WindowPlace) -> eframe::NativeOptions {
     eframe::NativeOptions {
         renderer,
         clipboard_shortcuts: !cfg!(windows),
         viewport: egui::ViewportBuilder::default()
             .with_title("Ferrous Commander")
-            .with_inner_size([1200.0, 750.0])
-            .with_min_inner_size([550.0, 420.0])
+            .with_inner_size(place.size())
+            .with_min_inner_size(settings::WindowPlace::MIN)
+            .with_maximized(place.maximized)
             .with_icon(std::sync::Arc::new(icons::app_icon()))
             .with_app_id("ferrous-commander"),
         ..Default::default()
     }
 }
 
-fn run(renderer: eframe::Renderer, shot: Option<PathBuf>) -> eframe::Result {
+fn run(renderer: eframe::Renderer, shot: Option<PathBuf>, loaded: Option<(settings::Settings, Option<String>)>) -> eframe::Result {
     archive::detect_tools();
+    let place = loaded.as_ref().map(|(settings, _)| settings.window).unwrap_or_default();
     eframe::run_native(
         "Ferrous Commander",
-        options(renderer),
+        options(renderer, place),
         Box::new(move |cc| {
             cc.egui_ctx.add_plugin(TextureLimit);
             #[cfg(windows)]
             cc.egui_ctx.add_plugin(ClipboardKeys::default());
             fonts(&cc.egui_ctx);
             Ok(Box::new(Shell {
-                app: app::App::new(shot),
+                app: app::App::with_settings(shot, loaded),
+                #[cfg(windows)]
+                dressed: None,
             }))
         }),
     )
@@ -237,9 +281,11 @@ fn main() {
         Ok("wgpu") => (eframe::Renderer::Wgpu, eframe::Renderer::Glow),
         _ => (eframe::Renderer::Glow, eframe::Renderer::Wgpu),
     };
-    if let Err(e) = run(first, shot.clone()) {
+    // Read before the window exists, which opens at the size it was left at.
+    let loaded = shot.is_none().then(settings::Settings::load);
+    if let Err(e) = run(first, shot.clone(), loaded.clone()) {
         eprintln!("renderer {first:?} failed ({e}); trying {second:?}");
-        if let Err(e) = run(second, shot) {
+        if let Err(e) = run(second, shot, loaded) {
             eprintln!("Could not start: {e}");
             std::process::exit(1);
         }

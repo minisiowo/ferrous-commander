@@ -481,6 +481,13 @@ impl App {
                 ui.label("Font size");
                 ui.add(egui::Slider::new(&mut self.st.font_size, 10.0..=18.0).step_by(0.5));
                 ui.end_row();
+                #[cfg(windows)]
+                {
+                    ui.label("Window");
+                    ui.add_enabled(!self.effect_unavailable, egui::Checkbox::new(&mut self.st.window_effect, "Mica: let the desktop show through the whole window"))
+                        .on_disabled_hover_text("Needs Windows 11 22H2 or newer and the OpenGL renderer");
+                    ui.end_row();
+                }
             });
             settings_section(ui, "Files & folders", accent);
             let label = self.tip("Show hidden files and folders", Command::ToggleHidden);

@@ -852,7 +852,7 @@ impl App {
         } else if resp.hovered() {
             pal.hover
         } else if row % 2 == 1 {
-            pal.row_odd
+            pal.stripe()
         } else {
             Color32::TRANSPARENT
         };

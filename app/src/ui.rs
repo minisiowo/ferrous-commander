@@ -181,7 +181,7 @@ pub fn card<R>(
         Stroke::NONE
     };
     Frame::NONE
-        .fill(pal.card)
+        .fill(pal.surface(pal.card))
         .corner_radius(CornerRadius::same(1))
         .inner_margin(Margin::symmetric(8, 6))
         .stroke(stroke)
@@ -292,7 +292,7 @@ impl App {
                 .default_size(SIDEBAR_W)
                 .size_range(180.0..=420.0)
                 .show_separator_line(false)
-                .frame(Frame::NONE.fill(pal.window).inner_margin(Margin {
+                .frame(Frame::NONE.fill(pal.backdrop()).inner_margin(Margin {
                     left: 6,
                     right: SIDEBAR_GAP - PANELS_LEFT,
                     top: 6,
@@ -301,7 +301,7 @@ impl App {
                 .show(ui, |ui| self.sidebar(ui));
         }
         egui::CentralPanel::default()
-            .frame(Frame::NONE.fill(pal.window).inner_margin(Margin {
+            .frame(Frame::NONE.fill(pal.backdrop()).inner_margin(Margin {
                 left: PANELS_LEFT,
                 right: 0,
                 top: 0,
@@ -1241,8 +1241,10 @@ impl App {
     /// a double-click on a divider makes both sides equal.
     fn browsers(&mut self, ui: &mut Ui) {
         let full = ui.max_rect();
-        ui.painter()
-            .rect_filled(full, CornerRadius::ZERO, self.pal.border);
+        // The lines between the panels. On glass the gaps themselves are the lines.
+        if !self.pal.glass {
+            ui.painter().rect_filled(full, CornerRadius::ZERO, self.pal.border);
+        }
         let mut rects = Vec::new();
         let mut divs = Vec::new();
         if self.panes.len() > 1 && full.width() < 2.0 * COLLAPSE_W {
@@ -1394,7 +1396,7 @@ impl App {
         } else {
             pal.panel
         };
-        painter.rect_filled(rect, CornerRadius::same(2), fill);
+        painter.rect_filled(rect, CornerRadius::same(2), pal.surface(fill));
         let mut r = rect.shrink(1.0);
         // Reserve the summary before any controls, even in a very short tile.
         let status = take_bottom(&mut r, STATUS_H);

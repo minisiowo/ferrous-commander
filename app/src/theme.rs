@@ -72,7 +72,12 @@ pub struct Palette {
     pub hover: Color32,
     pub tab_idle: Color32,
     pub accent: Color32,
+    /// The desktop's own material is behind the main window, and its surfaces let it through.
+    pub glass: bool,
 }
+
+/// How much of a surface's own colour stays over the desktop's material.
+const GLASS_SURFACE: f32 = 0.45;
 
 pub fn hex(s: &str) -> Color32 {
     let s = s.trim_start_matches('#');
@@ -107,6 +112,7 @@ impl Palette {
                 hover: hex("#2F2F2F"),
                 tab_idle: hex("#202020"),
                 accent,
+                glass: false,
             },
             ThemeName::TokyoNight => preset(true, "#1a1b26", "#a9b1d6", "#7aa2f7"),
             ThemeName::Gruvbox => preset(true, "#282828", "#d4be98", "#7daea3"),
@@ -122,6 +128,22 @@ impl Palette {
         } else {
             blend(self.panel, a, 0.22)
         }
+    }
+
+    /// Behind everything in the main window.
+    pub fn backdrop(&self) -> Color32 {
+        if self.glass { Color32::TRANSPARENT } else { self.window }
+    }
+
+    /// A large surface of the main window, such as a panel or a sidebar card.
+    pub fn surface(&self, color: Color32) -> Color32 {
+        if self.glass { color.gamma_multiply(GLASS_SURFACE) } else { color }
+    }
+
+    /// Every second row of a list. On glass a second coat of the row colour would
+    /// show as a band, so the row gets a trace of the text colour.
+    pub fn stripe(&self) -> Color32 {
+        if self.glass { self.text.gamma_multiply(0.025) } else { self.row_odd }
     }
 
     /// Behind the content of a window, a shade away from its title bar.
@@ -232,7 +254,8 @@ pub fn tab_look(pal: &Palette, selected: bool, panel_in_use: bool, hovered: bool
             text: blend(pal.text_weak, pal.text, 0.5),
         },
         (false, _) => TabLook {
-            fill: if hovered { pal.hover } else { pal.tab_idle },
+            // On glass the panel under the tab is thinned already.
+            fill: if hovered { pal.hover } else if pal.glass { Color32::TRANSPARENT } else { pal.tab_idle },
             text: if hovered { pal.text } else { pal.text_weak },
         },
     }
@@ -290,6 +313,21 @@ mod tests {
             let pal = Palette::get(name, hex(crate::defaults::ACCENT_RGB));
             assert_tabs_work(name.label(), &pal);
             assert_rows_work(name.label(), &pal);
+        }
+    }
+
+    #[test]
+    fn glass_thins_the_main_window_and_nothing_else() {
+        for name in ThemeName::ALL {
+            let solid = Palette::get(name, hex(crate::defaults::ACCENT_RGB));
+            assert_eq!((solid.backdrop(), solid.surface(solid.panel), solid.stripe()), (solid.window, solid.panel, solid.row_odd));
+            let glass = Palette { glass: true, ..solid };
+            assert_eq!(glass.backdrop(), Color32::TRANSPARENT);
+            for surface in [glass.surface(glass.panel), glass.surface(glass.card), glass.stripe(), tab_look(&glass, false, true, false).fill] {
+                assert!(!surface.is_opaque(), "{}: the desktop cannot show through {surface:?}", name.label());
+            }
+            // Dialogs are windows of their own with nothing behind them.
+            assert!(glass.content_fill().is_opaque() && glass.selection().is_opaque());
         }
     }
 

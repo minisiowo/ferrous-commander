@@ -72,6 +72,32 @@ pub struct PaneSession {
     pub active: usize,
 }
 
+/// The main window as it was last left, in points.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowPlace {
+    pub width: f32,
+    pub height: f32,
+    pub maximized: bool,
+}
+
+impl WindowPlace {
+    pub const MIN: [f32; 2] = [550.0, 420.0];
+
+    /// The size to open at. The file can be edited by hand, so nothing in it is trusted.
+    pub fn size(self) -> [f32; 2] {
+        let fit = |value: f32, min: f32, usual: f32| if value.is_finite() { value.clamp(min, 16_000.0) } else { usual };
+        let usual = WindowPlace::default();
+        [fit(self.width, Self::MIN[0], usual.width), fit(self.height, Self::MIN[1], usual.height)]
+    }
+}
+
+impl Default for WindowPlace {
+    fn default() -> Self {
+        WindowPlace { width: 1200.0, height: 750.0, maximized: false }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -106,6 +132,9 @@ pub struct Settings {
     /// While a shortcut is unfinished, show which keys can come next.
     pub which_key: bool,
     pub keymap: crate::keymap::KeymapSettings,
+    pub window: WindowPlace,
+    /// Windows 11 only: the desktop's Mica material behind the whole window.
+    pub window_effect: bool,
 }
 
 impl Default for Settings {
@@ -140,6 +169,8 @@ impl Default for Settings {
             vim_keys: false,
             which_key: true,
             keymap: Default::default(),
+            window: WindowPlace::default(),
+            window_effect: false,
         }
     }
 }
@@ -471,6 +502,23 @@ mod tests {
         std::fs::remove_dir(base.join("ferrous")).unwrap();
         std::fs::remove_dir(base.join("ferrous-commander")).unwrap();
         std::fs::remove_dir(base).unwrap();
+    }
+
+    #[test]
+    fn the_window_opens_as_it_was_left_and_never_at_a_useless_size() {
+        let old = Settings::from_lua("return { font_size = 14 }").unwrap();
+        assert_eq!(old.window, WindowPlace::default(), "settings saved before the window was remembered");
+        assert!(!old.window_effect);
+        let mut s = Settings::default();
+        s.window = WindowPlace { width: 1700.0, height: 900.0, maximized: true };
+        s.window_effect = true;
+        let back = Settings::from_lua(&crate::lua_config::encode(&serde_json::to_value(&s).unwrap())).unwrap();
+        assert_eq!(back.window, s.window);
+        assert!(back.window_effect);
+        assert_eq!(back.window.size(), [1700.0, 900.0]);
+        let edited = Settings::from_lua("return { window = { width = 3, height = 99999 } }").unwrap();
+        assert_eq!(edited.window.size(), [WindowPlace::MIN[0], 16_000.0]);
+        assert_eq!(WindowPlace { width: f32::NAN, height: f32::INFINITY, maximized: false }.size(), [1200.0, 750.0]);
     }
 
     #[test]

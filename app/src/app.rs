@@ -394,7 +394,12 @@ pub struct App {
     last_save: Instant,
     last_evict: Instant,
     watched_generation: u64,
-    applied: Option<(ThemeName, String, u32, Option<crate::omarchy::Colors>)>,
+    applied: Option<(ThemeName, String, u32, Option<crate::omarchy::Colors>, bool)>,
+    /// The desktop's material is showing behind the main window right now.
+    pub see_through: bool,
+    /// This Windows has no such material to show.
+    #[cfg(windows)]
+    pub effect_unavailable: bool,
     omarchy_watch: Option<crate::omarchy::Watch>,
     omarchy_colors: Option<crate::omarchy::Colors>,
     persist: bool,
@@ -437,13 +442,16 @@ fn spawn_folder_watcher(
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new(shot: Option<PathBuf>) -> App {
-        let persist = shot.is_none();
-        let (mut st, load_problem) = if persist {
-            Settings::load()
-        } else {
-            (Settings::default(), None)
-        };
+        let loaded = shot.is_none().then(Settings::load);
+        App::with_settings(shot, loaded)
+    }
+
+    /// `loaded` is what `Settings::load` gave; without it nothing is read or saved.
+    pub fn with_settings(shot: Option<PathBuf>, loaded: Option<(Settings, Option<String>)>) -> App {
+        let persist = loaded.is_some();
+        let (mut st, load_problem) = loaded.unwrap_or_else(|| (Settings::default(), None));
         if !persist {
             // A clean, deterministic first-start picture: start in the home folder.
             st.panes = Vec::new();
@@ -642,6 +650,9 @@ impl App {
             last_evict: Instant::now(),
             watched_generation: 0,
             applied: None,
+            see_through: false,
+            #[cfg(windows)]
+            effect_unavailable: false,
             omarchy_watch: None,
             omarchy_colors: None,
             persist,
@@ -770,12 +781,14 @@ impl App {
             self.st.accent.clone(),
             self.st.font_size.to_bits(),
             self.omarchy_colors,
+            self.see_through,
         );
         if self.applied.as_ref() != Some(&key) {
             self.pal = match self.omarchy_colors {
                 Some(colors) => colors.palette(),
                 None => Palette::get(self.st.theme, hex(&self.st.accent)),
             };
+            self.pal.glass = self.see_through;
             self.pal.apply(ctx);
             let fs = self.st.font_size;
             ctx.global_style_mut(|s| {
@@ -919,10 +932,32 @@ impl App {
         }
     }
 
+    /// Keeps the size the main window has now, for the next start. A maximized window
+    /// keeps the size it had before, which is the one it returns to.
+    fn remember_window(&mut self, ctx: &egui::Context) {
+        let (size, maximized, away) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.inner_rect.map(|r| r.size()), v.maximized.unwrap_or(false), v.minimized.unwrap_or(false) || v.fullscreen.unwrap_or(false))
+        });
+        let Some(size) = size.filter(|s| !away && s.x >= 100.0 && s.y >= 100.0) else { return };
+        let place = if maximized {
+            crate::settings::WindowPlace { maximized, ..self.st.window }
+        } else {
+            crate::settings::WindowPlace { width: size.x.round(), height: size.y.round(), maximized }
+        };
+        if place != self.st.window {
+            self.st.window = place;
+            self.mark_dirty();
+        }
+    }
+
     pub fn end_frame(&mut self, ctx: &egui::Context) {
         let acts = std::mem::take(&mut self.acts);
         for a in acts {
             self.run(a, ctx);
+        }
+        if self.persist {
+            self.remember_window(ctx);
         }
         if self.persist && self.dirty && self.last_save.elapsed() > Duration::from_secs(2) {
             self.save();
