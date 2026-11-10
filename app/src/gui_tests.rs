@@ -2608,3 +2608,95 @@ fn font_symbols_exist_and_sit_on_the_middle_of_their_buttons() {
     });
     out.textures_delta.clear();
 }
+
+fn narrow_frame(ctx: &egui::Context, app: &mut App, events: Vec<Event>, wanted: &str) -> bool {
+    let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(600.0, 700.0))), events, ..Default::default() };
+    let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+    output.textures_delta.clear();
+    output.shapes.iter().any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.job.text == wanted))
+}
+
+fn narrow_root(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("fc_narrow_{tag}_{}", std::process::id()))
+}
+
+fn narrow_app(tag: &str) -> (egui::Context, App) {
+    use crate::app::Tab;
+    let ctx = egui::Context::default();
+    let home = narrow_root(tag);
+    for name in ["alpha", "beta", "gamma"] { std::fs::create_dir_all(home.join(name)).unwrap(); }
+    let mut app = App::new(Some(home.join(format!("unused-narrow-{tag}.png"))));
+    app.st.show_sidebar = false;
+    app.panes[0].tabs = vec![Tab::new(home.join("alpha")), Tab::new(home.join("beta"))];
+    app.panes[1].tabs = vec![Tab::new(home.join("gamma"))];
+    app.panes[0].active = 0;
+    app.panes[1].active = 0;
+    app.active = 0;
+    (ctx, app)
+}
+
+/// The middle of the strip's tab at `slot`, in a 600-wide window holding `tabs` tabs.
+fn narrow_tab(app: &App, slot: usize, tabs: usize) -> Pos2 {
+    let r = app.pane_rects[0].1;
+    let w = ((r.width() - 2.0 - 140.0) / tabs as f32).clamp(12.0, 190.0);
+    pos2(r.min.x + 5.0 + (slot as f32 + 0.5) * w - 10.0, r.min.y + 16.0)
+}
+
+fn narrow_drag(ctx: &egui::Context, app: &mut App, start: Pos2, end: Pos2) -> bool {
+    let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    narrow_frame(ctx, app, vec![Event::PointerMoved(start)], "");
+    narrow_frame(ctx, app, vec![button(start, true)], "");
+    let mut warned = false;
+    for _ in 0..3 { warned |= narrow_frame(ctx, app, vec![Event::PointerMoved(end)], "Not enough room to split"); }
+    narrow_frame(ctx, app, vec![button(end, false)], "");
+    narrow_frame(ctx, app, vec![], "");
+    warned
+}
+
+#[test]
+fn a_narrow_window_lists_every_panel_as_a_tab_and_gives_the_layout_back() {
+    let (ctx, mut app) = narrow_app("stack");
+    narrow_frame(&ctx, &mut app, vec![], "");
+    assert!(narrow_frame(&ctx, &mut app, vec![], "gamma"), "the hidden panel's tab is in the strip");
+    assert!(app.panels_stacked);
+    assert_eq!(app.tab_slots(0), [(0, 0), (0, 1), (1, 0)]);
+
+    let at = narrow_tab(&app, 2, 3);
+    narrow_frame(&ctx, &mut app, vec![Event::PointerMoved(at)], "");
+    let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    narrow_frame(&ctx, &mut app, vec![button(true)], "");
+    narrow_frame(&ctx, &mut app, vec![button(false)], "");
+    narrow_frame(&ctx, &mut app, vec![], "");
+    assert_eq!(app.active, 1, "its tab brings the other panel into view");
+    assert_eq!(app.pane_rects.len(), 1);
+
+    for _ in 0..2 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(!app.panels_stacked);
+    assert_eq!((app.panes.len(), app.pane_rects.len()), (2, 2), "a wide window shows the layout again");
+    std::fs::remove_dir_all(narrow_root("stack")).unwrap();
+}
+
+#[test]
+fn a_tab_dragged_along_a_narrow_strip_joins_its_new_neighbours() {
+    let (ctx, mut app) = narrow_app("reorder");
+    for _ in 0..2 { narrow_frame(&ctx, &mut app, vec![], ""); }
+    let (start, end) = (narrow_tab(&app, 0, 3), narrow_tab(&app, 2, 3) + vec2(70.0, 0.0));
+    assert!(!narrow_drag(&ctx, &mut app, start, end), "dropping on the strip is allowed");
+    assert_eq!((app.panes[0].tabs.len(), app.panes[1].tabs.len()), (1, 2));
+    assert_eq!(app.active, 1, "the tab that moved stays in view");
+    assert_eq!(app.panes[1].active, 1);
+    std::fs::remove_dir_all(narrow_root("reorder")).unwrap();
+}
+
+#[test]
+fn splitting_without_room_says_so_and_leaves_the_tab_alone() {
+    let (ctx, mut app) = narrow_app("refuse");
+    app.close_panel(1);
+    for _ in 0..2 { narrow_frame(&ctx, &mut app, vec![], ""); }
+    let r = app.pane_rects[0].1;
+    let start = narrow_tab(&app, 0, 2);
+    assert!(narrow_drag(&ctx, &mut app, start, pos2(r.max.x - 10.0, r.center().y)), "the warning shows during the drag");
+    assert_eq!((app.panes.len(), app.panes[0].tabs.len()), (1, 2));
+    assert!(app.toasts.last().is_some_and(|t| t.text.contains("Make the window wider")));
+    std::fs::remove_dir_all(narrow_root("refuse")).unwrap();
+}

@@ -301,7 +301,25 @@ fn highlight_drop_row(ui: &Ui, row: Rect, color: Color32) {
     painter.rect_stroke(row, CornerRadius::ZERO, Stroke::new(1.5, color), egui::StrokeKind::Inside);
 }
 
+const NO_ROOM_TO_SPLIT: &str = "Not enough room to split";
+
+/// How wide each tab is in a strip of this width holding `tabs` tabs.
+fn tab_width(strip: f32, tabs: usize) -> f32 {
+    ((strip - 60.0 - 80.0) / tabs as f32).clamp(12.0, 190.0)
+}
+
 impl App {
+    /// Every tab the strip of panel `i` lists, as panel and tab. With the panels stacked
+    /// that is all of them, in the order of the layout.
+    pub fn tab_slots(&self, i: usize) -> Vec<(usize, usize)> {
+        let mut panels = Vec::new();
+        if self.panels_stacked { self.tiles.leaves(&mut panels); }
+        if !panels.contains(&i) { panels = vec![i]; }
+        panels.into_iter().filter(|p| *p < self.panes.len())
+            .flat_map(|p| (0..self.panes[p].tabs.len()).map(move |t| (p, t)))
+            .collect()
+    }
+
     pub fn draw(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         self.begin_frame(&ctx);
@@ -625,10 +643,11 @@ impl App {
                 self.acts.push(Act::CloseTab(i, t));
             }
             Command::NextTab | Command::PrevTab => {
-                let len = self.panes[i].tabs.len();
-                let t = self.panes[i].active;
-                let next = if command == Command::PrevTab { (t + len - 1) % len } else { (t + 1) % len };
-                self.acts.push(Act::SwitchTab(i, next));
+                let slots = self.tab_slots(i);
+                let len = slots.len();
+                let at = slots.iter().position(|slot| *slot == (i, self.panes[i].active)).unwrap_or(0);
+                let (pane, tab) = slots[if command == Command::PrevTab { (at + len - 1) % len } else { (at + 1) % len }];
+                self.acts.push(Act::SwitchTab(pane, tab));
             }
             // panels, Hyprland style
             Command::NewPanel => self.acts.push(Act::OpenPanel(i, None)),
@@ -1273,9 +1292,11 @@ impl App {
         }
         let mut rects = Vec::new();
         let mut divs = Vec::new();
-        if self.panes.len() > 1 && full.width() < 2.0 * COLLAPSE_W {
-            // too narrow for two browsers, so only the
-            // active panel is shown (resource MSG_I_CannotFitBothBrowsers)
+        let no_room = full.width() < 2.0 * COLLAPSE_W;
+        self.panels_stacked = self.panes.len() > 1 && no_room;
+        if self.panels_stacked {
+            // Only the active panel fits. The tab strip lists the others, and the layout
+            // comes back as it was when the window grows.
             rects.push((self.active, full));
         } else {
             self.tiles
@@ -1328,14 +1349,21 @@ impl App {
                     let distances = [local.x, 1.0 - local.x, local.y, 1.0 - local.y];
                     let edge = (0..4).min_by(|a, b| distances[*a].total_cmp(&distances[*b])).unwrap();
                     let split = (!in_tabs && distances[edge] < 0.25).then_some((edge >= 2, edge == 0 || edge == 2));
-                    let n = self.panes[*target].tabs.len();
-                    let w = ((r.width() - 2.0 - 60.0 - 80.0) / n as f32).clamp(12.0, 190.0);
-                    let at = if in_tabs {
+                    let slots = self.tab_slots(*target);
+                    let w = tab_width(r.width() - 2.0, slots.len());
+                    let slot = if in_tabs {
                         ((pos.x - r.min.x - 5.0 + w / 2.0) / w).floor().max(0.0) as usize
-                    } else { n }.min(n);
+                    } else { slots.len() }.min(slots.len());
+                    // Dropped on the list it joins the panel in view; on the strip, its neighbours.
+                    let (place, at) = match slots.get(slot) {
+                        Some(&here) if in_tabs => here,
+                        _ if !in_tabs => (*target, self.panes[*target].tabs.len()),
+                        _ => slots.last().map_or((*target, 0), |&(pane, tab)| (pane, tab + 1)),
+                    };
                     let valid = *target != payload.pane
                         || (payload.tab.is_some() && (split.is_none() || self.panes[payload.pane].tabs.len() > 1));
                     if valid {
+                        let refused = split.is_some() && no_room;
                         let mut preview = *r;
                         if split.is_some() {
                             match edge {
@@ -1345,17 +1373,25 @@ impl App {
                                 _ => preview.min.y = r.center().y,
                             }
                         } else if in_tabs {
-                            let x = (r.min.x + 5.0 + at as f32 * w).min(r.max.x - 2.0);
+                            let x = (r.min.x + 5.0 + slot as f32 * w).min(r.max.x - 2.0);
                             // From the top of a tab to its bottom: see `tab_bar`, inside the panel's 1-point edge.
                             preview = Rect::from_min_max(pos2(x, r.min.y + 1.0 + 4.0), pos2(x + 2.0, r.min.y + 1.0 + TAB_H));
                         }
-                        ui.painter().rect_filled(preview, CornerRadius::ZERO, self.pal.accent.gamma_multiply(if in_tabs { 0.9 } else { 0.25 }));
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        let tint = if refused { hex("#ef7063").gamma_multiply(0.25) } else { self.pal.accent.gamma_multiply(if in_tabs { 0.9 } else { 0.25 }) };
+                        ui.painter().rect_filled(preview, CornerRadius::ZERO, tint);
+                        if refused {
+                            ui.painter().text(preview.center(), Align2::CENTER_CENTER, NO_ROOM_TO_SPLIT, FontId::proportional(self.st.font_size), self.pal.text);
+                        }
+                        ui.ctx().set_cursor_icon(if refused { egui::CursorIcon::NotAllowed } else { egui::CursorIcon::Grabbing });
                         if ui.input(|inp| inp.pointer.any_released()) {
-                            self.acts.push(match payload.tab {
-                                Some(tab) => Act::DockTab { source: payload.pane, tab, target: *target, at, split },
-                                None => Act::DockPanel { source: payload.pane, target: *target, at, split },
-                            });
+                            if refused {
+                                self.toast(ToastKind::Info, format!("{NO_ROOM_TO_SPLIT}. Make the window wider first"));
+                            } else {
+                                self.acts.push(match payload.tab {
+                                    Some(tab) => Act::DockTab { source: payload.pane, tab, target: place, at, split },
+                                    None => Act::DockPanel { source: payload.pane, target: place, at, split },
+                                });
+                            }
                             egui::DragAndDrop::clear_payload(ui.ctx());
                         }
                     }
@@ -1480,11 +1516,13 @@ impl App {
     fn tab_bar(&mut self, ui: &mut Ui, i: usize, r: Rect) {
         let pal = self.pal;
         let p = ui.painter_at(r);
-        let n = self.panes[i].tabs.len();
-        let w = ((r.width() - 60.0 - 80.0) / n as f32).clamp(12.0, 190.0);
+        let slots = self.tab_slots(i);
+        let w = tab_width(r.width(), slots.len());
         let mut x = r.min.x + 4.0;
         let font = FontId::proportional(self.st.font_size);
-        for t in 0..n {
+        let shown = i;
+        // From here to the end of the loop, `i` is the panel the tab really belongs to.
+        for (i, t) in slots {
             let tr = Rect::from_min_size(pos2(x, r.min.y + 4.0), vec2(w - 2.0, r.height() - 4.0));
             x += w;
             let id = ui.scope_id().with(("tab", i, t));
@@ -1495,8 +1533,8 @@ impl App {
             if resp.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             }
-            let selected = self.panes[i].active == t;
-            let look = crate::theme::tab_look(&pal, selected, self.active == i, resp.hovered());
+            let selected = i == shown && self.panes[i].active == t;
+            let look = crate::theme::tab_look(&pal, selected, self.active == shown, resp.hovered());
             let bg = look.fill;
             p.rect_filled(tr, CornerRadius::ZERO, bg);
             let path = self.panes[i].tabs[t].path.clone();
@@ -1552,7 +1590,7 @@ impl App {
                     ui.close();
                 }
                 if ui.button("Close other tabs").clicked() {
-                    for k in (0..n).rev().filter(|k| *k != t) {
+                    for k in (0..self.panes[i].tabs.len()).rev().filter(|k| *k != t) {
                         self.acts.push(Act::CloseTab(i, k));
                     }
                     ui.close();
@@ -1568,7 +1606,8 @@ impl App {
         }
         // Panel tools; closing belongs to each tab.
         let mut bx = r.max.x - 4.0;
-        let n_panels = self.panes.len();
+        // Panels stacked into one strip have no layout to move or flip.
+        let n_panels = if self.panels_stacked { 1 } else { self.panes.len() };
         // Carries the panel with all its tabs; it drops exactly where a tab would.
         if n_panels > 1 {
             let br = Rect::from_min_max(pos2(bx - 24.0, r.min.y + 5.0), pos2(bx, r.max.y - 3.0));
