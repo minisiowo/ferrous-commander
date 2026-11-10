@@ -281,11 +281,21 @@ struct Job {
 struct Slot {
     jobs: Mutex<VecDeque<Job>>,
     wake: Condvar,
+    /// The newest look at a model, for the preview window to collect without the file list.
+    look: Mutex<Option<(Key, egui::TextureHandle)>>,
 }
 
 impl Slot {
     fn replace(&self, jobs: Vec<Job>) {
         *self.jobs.lock().unwrap() = jobs.into();
+        self.wake.notify_one();
+    }
+
+    /// A newer look replaces an older one, but never a file waiting to be opened.
+    fn ask_look(&self, job: Job) {
+        let mut jobs = self.jobs.lock().unwrap();
+        if jobs.iter().any(|waiting| waiting.key.view.is_none()) { return; }
+        *jobs = VecDeque::from([job]);
         self.wake.notify_one();
     }
 
@@ -332,11 +342,24 @@ fn run_lane(slot: Arc<Slot>, results: mpsc::Sender<(Key, PreviewContent)>, start
             }
             None => load::load(&job.key.path, job.key.options()),
         };
-        if trace() {
-            eprintln!("[preview] {} loaded in {} ms", job.key.path.display(), started.elapsed().as_millis());
-        }
+        let round_trip = started.elapsed();
+        let times = helper::take_times();
+        let size = reply.1.as_ref().map(|p| p.size);
+        let converting = Instant::now();
         // Texture creation is thread safe, and this conversion is too slow for the interface.
         let content = content_of(reply, &job.ctx);
+        if trace() {
+            let parts = times.map_or(String::new(), |[all, turning, filling]| format!(", helper {} us, turning {turning} us, filling {filling} us", all));
+            eprintln!("[preview] {} loaded in {} us{parts}, texture {} us, picture {size:?}, look {:?}", job.key.path.display(), round_trip.as_micros(), converting.elapsed().as_micros(), job.key.view.map(|v| v.fine));
+        }
+        if job.key.view.is_some() {
+            // A failed look leaves the last good one on screen.
+            if let PreviewContent::Detail(texture) = content {
+                *slot.look.lock().unwrap() = Some((job.key, texture));
+                job.ctx.request_repaint_of(window::viewport());
+            }
+            continue;
+        }
         if results.send((job.key, content)).is_err() { return; }
         // Not the current viewport: the list is what takes the result and passes it on.
         job.ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -392,7 +415,7 @@ fn content_of((loaded, picture): Reply, ctx: &egui::Context) -> PreviewContent {
 }
 
 /// `FERROUS_PREVIEW_TRACE=1` prints how long previews take.
-fn trace() -> bool {
+pub fn trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("FERROUS_PREVIEW_TRACE").is_some())
 }
@@ -448,6 +471,11 @@ impl Preview {
     #[cfg(test)]
     pub(crate) fn remember(&mut self, key: Key, content: PreviewContent) {
         self.cache.insert(key, content);
+    }
+
+    /// The lane of the shown file, once it has one.
+    fn look_lane(&self) -> Option<Arc<Slot>> {
+        self.started[0].then(|| self.current.clone())
     }
 
     pub fn page_key(&self, page: u32) -> Option<Key> {
@@ -545,12 +573,6 @@ impl App {
     pub(crate) fn receive_preview(&mut self) {
         let preview = &mut self.preview;
         while let Ok((key, content)) = preview.rx.try_recv() {
-            if key.view.is_some() {
-                // A failed look leaves the last good one on screen.
-                let current = preview.key.as_ref().is_some_and(|k| k.path == key.path);
-                if let (true, PreviewContent::Detail(texture)) = (current, &content) { preview.detail = Some((texture.clone(), [0, 0, 65535, 65535])); }
-                continue;
-            }
             if let (Some(crop), PreviewContent::Detail(texture)) = (key.crop, &content) {
                 let current = preview.key.as_ref().is_some_and(|k| k.path == key.path && k.page == key.page);
                 if current { preview.detail = Some((texture.clone(), crop)); }
@@ -599,6 +621,20 @@ mod tests {
         assert!(!slot.superseded(&key("f999")));
         slot.jobs.lock().unwrap().clear();
         assert!(!slot.superseded(&key("f0")), "nothing else is waiting for the lane");
+    }
+
+    #[test]
+    fn a_look_replaces_a_look_but_not_a_file_being_opened() {
+        let ctx = egui::Context::default();
+        let slot = Slot::default();
+        let look = |turn| Job { key: Key { view: Some(ModelView { turn, tilt: 0, zoom: 100, pan: [0; 2], size: [9, 9], fit: 9, fine: false }), ..key("m") }, ctx: ctx.clone(), prefetch: false };
+        slot.ask_look(look(1));
+        slot.ask_look(look(2));
+        assert_eq!(slot.jobs.lock().unwrap().iter().map(|j| j.key.view.unwrap().turn).collect::<Vec<_>>(), [2]);
+        slot.replace(vec![job("next", &ctx)]);
+        slot.ask_look(look(3));
+        let jobs = slot.jobs.lock().unwrap();
+        assert!(jobs.len() == 1 && jobs[0].key.view.is_none(), "the file asked for still opens");
     }
 
     #[test]

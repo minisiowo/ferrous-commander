@@ -7,7 +7,7 @@
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use super::load::{self, Loaded, ModelView, Options, Picture, Reply};
@@ -105,13 +105,24 @@ struct Header<L, D> {
     size: Option<[u32; 2]>,
     #[serde(default)]
     delays: D,
+    /// Microseconds in the helper: all of it, turning the model, filling it in.
+    #[serde(default)]
+    times: Option<[u32; 3]>,
 }
 
-fn write_reply(to: &mut impl Write, (loaded, picture): &Reply) -> io::Result<()> {
+/// What the last reply said about its own timing. Only one job is out at a time.
+static LAST_TIMES: Mutex<Option<[u32; 3]>> = Mutex::new(None);
+
+pub fn take_times() -> Option<[u32; 3]> {
+    LAST_TIMES.lock().unwrap().take()
+}
+
+fn write_reply(to: &mut impl Write, (loaded, picture): &Reply, times: Option<[u32; 3]>) -> io::Result<()> {
     let header = serde_json::to_vec(&Header::<&Loaded, &[u32]> {
         loaded,
         size: picture.as_ref().map(|p| p.size),
         delays: picture.as_ref().map_or(&[], |p| &p.delays),
+        times,
     })?;
     to.write_all(&(header.len() as u32).to_le_bytes())?;
     to.write_all(&header)?;
@@ -123,6 +134,7 @@ fn read_reply(from: &mut impl Read) -> io::Result<Reply> {
     let len = read_u32(from)? as usize;
     if len > MAX_HEADER_BYTES { return Err(invalid("header too long")); }
     let header: Header<Loaded, Vec<u32>> = serde_json::from_slice(&read_bytes(from, len)?)?;
+    *LAST_TIMES.lock().unwrap() = header.times;
     let picture = match header.size {
         Some([w, h]) => {
             if w == 0 || h == 0 || w > MAX_SIDE_ACCEPTED || h > MAX_SIDE_ACCEPTED { return Err(invalid("bad picture size")); }
@@ -168,9 +180,12 @@ pub fn serve() {
     let (mut input, mut output) = (stdin.lock(), BufWriter::with_capacity(1 << 20, stdout.lock()));
     while let Ok((path, options)) = read_request(&mut input) {
         WORKING_SINCE.store(start.elapsed().as_secs() + 1, Ordering::Relaxed);
+        let working = Instant::now();
         let reply = load::load(&path, options);
+        let times = super::model::take_paint_times().map(|[turning, filling]| [working.elapsed().as_micros() as u32, turning, filling]);
         WORKING_SINCE.store(0, Ordering::Relaxed);
-        if write_reply(&mut output, &reply).is_err() { return; }
+        if write_reply(&mut output, &reply, times).is_err() { return; }
+        if options.view.is_some() && let (_, Some(picture)) = reply { super::model::recycle(picture.rgba); }
     }
 }
 
@@ -275,8 +290,85 @@ mod tests {
 
     fn frame(reply: &Reply) -> Vec<u8> {
         let mut bytes = Vec::new();
-        write_reply(&mut bytes, reply).unwrap();
+        write_reply(&mut bytes, reply, None).unwrap();
         bytes
+    }
+
+    /// A wavy ball, so that the triangles differ in size and some of them hide others.
+    fn write_ball(path: &Path, wanted: usize) -> usize {
+        use std::f32::consts::{PI, TAU};
+        let columns = ((wanted as f64).sqrt() as usize).max(4);
+        let rows = (wanted / (2 * columns)).max(2);
+        let at = |row: usize, column: usize| {
+            let (a, b) = (PI * row as f32 / rows as f32, TAU * column as f32 / columns as f32);
+            let reach = 40.0 * (1.0 + 0.08 * (7.0 * a).sin() * (11.0 * b).cos());
+            [reach * a.sin() * b.cos(), reach * a.sin() * b.sin(), reach * a.cos()]
+        };
+        let mut file = BufWriter::with_capacity(1 << 20, std::fs::File::create(path).unwrap());
+        file.write_all(&[0; 80]).unwrap();
+        file.write_all(&((2 * rows * columns) as u32).to_le_bytes()).unwrap();
+        for row in 0..rows {
+            for column in 0..columns {
+                for triangle in [[at(row, column), at(row + 1, column), at(row, column + 1)], [at(row + 1, column), at(row + 1, column + 1), at(row, column + 1)]] {
+                    file.write_all(&[0; 12]).unwrap();
+                    for number in triangle.iter().flatten() { file.write_all(&number.to_le_bytes()).unwrap(); }
+                    file.write_all(&[0; 2]).unwrap();
+                }
+            }
+        }
+        2 * rows * columns
+    }
+
+    fn middle_and_p95(mut values: Vec<f64>) -> (f64, f64) {
+        values.sort_by(f64::total_cmp);
+        (values[values.len() / 2], values[(values.len() * 95 / 100).min(values.len() - 1)])
+    }
+
+    /// Looks at the same models on any machine, through the real helper and its pipe:
+    /// `cargo build --release`, then with `FERROUS_HELPER_EXE=target/release/ferrous-commander`
+    /// `cargo test --release model_look_baseline -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs the release program, named by FERROUS_HELPER_EXE"]
+    fn model_look_baseline() {
+        let program = std::env::var_os("FERROUS_HELPER_EXE").expect("FERROUS_HELPER_EXE");
+        let sizes: Vec<usize> = std::env::var("FERROUS_LOOK_TRIANGLES").map_or(vec![100_000, 1_000_000, 4_000_000], |list| list.split(',').map(|n| n.parse().unwrap()).collect());
+        let root = load::scratch("look");
+        let no_second_helper = || Err(io::ErrorKind::NotFound.into());
+        let never_stale = || false;
+        for wanted in sizes {
+            let file = root.join(format!("ball_{wanted}.stl"));
+            let triangles = write_ball(&file, wanted);
+            let mut command = Command::new(&program);
+            command.arg(FLAG);
+            let mut running = Some(Helper::from_command(command).unwrap());
+            let started = Instant::now();
+            let first = ask(&mut running, no_second_helper, &file, Options { max_side: 2048, ..ANY }, Duration::from_secs(120), &never_stale).unwrap();
+            assert!(matches!(first.0, Loaded::Model(_)), "{:?}", first.0);
+            println!("{triangles} triangles: first picture {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+            for (name, zoom, fine, looks, size_asked, fit) in [("moving 100%", 100, false, 60, [1600, 900], 850), ("moving 400%", 400, false, 60, [1600, 900], 850), ("sharp 100%", 100, true, 10, [1600, 900], 850), ("moving win", 100, false, 60, [1076, 1076], 1050), ("sharp win", 100, true, 10, [1076, 1076], 1050)] {
+                let (mut round, mut helper, mut turning, mut filling, mut pipe) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                let mut size = [0, 0];
+                for look in 0..looks {
+                    let view = ModelView { turn: look * 30, tilt: (look % 20) * 15, zoom, pan: [0; 2], size: size_asked, fit, fine };
+                    let started = Instant::now();
+                    let reply = ask(&mut running, no_second_helper, &file, Options { max_side: 2048, view: Some(view), ..ANY }, Duration::from_secs(120), &never_stale).unwrap();
+                    let took = started.elapsed().as_secs_f64() * 1000.0;
+                    size = reply.1.as_ref().expect("a picture").size;
+                    let [all, turned, filled] = take_times().expect("the helper's own times").map(|us| us as f64 / 1000.0);
+                    round.push(took);
+                    helper.push(all);
+                    turning.push(turned);
+                    filling.push(filled);
+                    pipe.push(took - all);
+                }
+                let (middle, p95) = middle_and_p95(round);
+                let show = |values: Vec<f64>| middle_and_p95(values).0;
+                println!("  {name:12} {size:?}: {middle:7.1} ms median, {p95:7.1} ms p95; helper {:7.1}, turn {:7.1}, fill {:7.1}, pipe {:6.1}", show(helper), show(turning), show(filling), show(pipe));
+            }
+            drop(running);
+            std::fs::remove_file(&file).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

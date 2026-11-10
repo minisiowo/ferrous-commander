@@ -117,6 +117,7 @@ fn head(p: &Path) -> std::io::Result<Vec<u8>> {
 }
 
 pub fn load(p: &Path, options: Options) -> Reply {
+    if let Some(reply) = model::look_again(p, options) { return reply; }
     let md = match std::fs::metadata(p) {
         Ok(m) => m,
         Err(e) => return failed(fsx::friendly_err(&e)),

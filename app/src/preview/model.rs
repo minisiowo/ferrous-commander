@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -33,10 +33,22 @@ const TILT: f32 = 28.0;
 /// Stops short of looking straight down, where "up" stops meaning anything.
 pub(super) const TILT_OFFSETS: (f32, f32) = (-85.0 - TILT, 85.0 - TILT);
 pub(super) const MIN_MODEL_ZOOM: f32 = 0.25;
-/// Above this many triangles for each worker, a model is drawn at half size while it moves.
+/// Above this many triangles for each worker, a model starts moving at half size.
 const QUICK_LIMIT: usize = 250_000;
+/// Sizes a moving picture may be drawn at, and how long it may take.
+const MOVING_SCALES: [f32; 4] = [1.0, 0.75, 0.5, 0.33];
+const MOVING_TARGET_MICROS: f32 = 33_000.0;
+/// Good moving pictures in a row before trying a larger size again.
+const CALM_LOOKS: u32 = 5;
+/// Below this a model is cheap to draw and not worth a blurred picture.
+const ALWAYS_WHOLE: usize = 50_000;
+/// A model seen less than this long ago is not looked up on the disk again.
+const RECHECK_AFTER: Duration = Duration::from_secs(1);
 const MARGIN: f32 = 8.0;
 const MAX_WORKERS: usize = 8;
+/// Bands of the picture for each worker: whoever finishes early takes the next one, so
+/// the middle of a model does not hold up the others.
+const BANDS_PER_WORKER: usize = 3;
 
 const TOO_LARGE: &str = "This model is too large to preview";
 const NO_SHAPE: &str = "This file holds no model to show";
@@ -89,6 +101,7 @@ fn camera(turn: f32, tilt: f32) -> Camera {
 
 /// What every view of a model shares: the point it turns around, and how far it
 /// reaches from there in the first view, which sets its size on the screen.
+#[derive(Clone, Copy)]
 struct Framing {
     pivot: Point,
     reach: [f32; 2],
@@ -113,8 +126,9 @@ fn framing(triangles: &[Triangle]) -> Option<Framing> {
     (reach[0].max(reach[1]) > 0.0).then_some(Framing { pivot, reach })
 }
 
-fn shown(triangles: &[Triangle], options: Options) -> Reply {
-    let Some(framing) = framing(triangles) else { return failed(NO_SHAPE) };
+fn shown(model: &Model, options: Options) -> Reply {
+    let Some(framing) = model.framing else { return failed(NO_SHAPE) };
+    let triangles = &model.triangles[..];
     let side = options.max_side.min(MAX_RENDER_SIDE).max(32) as f32;
     let first_scale = (side / 2.0 - MARGIN) / framing.reach[0].max(framing.reach[1]);
     let first_size = framing.reach.map(|reach| (((reach * first_scale + MARGIN) * 2.0).ceil() as usize).max(32));
@@ -130,14 +144,63 @@ fn shown(triangles: &[Triangle], options: Options) -> Reply {
 
 fn look(triangles: &[Triangle], framing: &Framing, view: ModelView, side: f32, first_scale: f32, first_width: usize) -> Picture {
     let [width, height] = view.size.map(|v| v.clamp(16, 4096) as f32);
-    let quick = if !view.fine && triangles.len() > QUICK_LIMIT * workers() { 0.5 } else { 1.0 };
-    let shrink = (side / width.max(height)).min(1.0) * quick;
+    let moving = if view.fine { 1.0 } else { moving_scale(triangles.len()) };
+    let wanted = (side / width.max(height)).min(1.0) * moving;
+    let size = [(width * wanted).ceil() as usize, (height * wanted).ceil() as usize];
+    // The size is rounded up and the picture then fills the window, so the model is drawn
+    // for the rounded size. Otherwise it would change size as the moving scale changes.
+    let shrink = (size[0] as f32 / width).max(size[1] as f32 / height);
     let zoom = view.zoom.clamp(10, 6400) as f32 / 100.0;
     let scale = first_scale * view.fit.max(1) as f32 / first_width as f32 * zoom * shrink;
-    let size = [(width * shrink).ceil() as usize, (height * shrink).ceil() as usize];
     let centre = [size[0] as f32 / 2.0 + view.pan[0] as f32 * shrink, size[1] as f32 / 2.0 + view.pan[1] as f32 * shrink];
     let camera = camera(TURN - view.turn as f32 / 10.0, TILT + view.tilt as f32 / 10.0);
-    paint(triangles, framing, &camera, scale, centre, size, if view.fine { SAMPLES } else { 1 }, workers())
+    let picture = paint(triangles, framing, &camera, scale, centre, size, if view.fine { SAMPLES } else { 1 }, workers());
+    if !view.fine && let Some(times) = *PAINT_TIMES.lock().unwrap() {
+        if let Some(pace) = PACE.lock().unwrap().as_mut() { pace.learn(times.map(|t| t as f32)); }
+    }
+    picture
+}
+
+/// How large a moving picture of one model can be, learned from how long the last ones took.
+#[derive(Debug, PartialEq)]
+struct Pace {
+    triangles: usize,
+    step: usize,
+    calm: u32,
+}
+
+impl Pace {
+    fn new(triangles: usize, workers: usize) -> Pace {
+        Pace { triangles, step: if triangles > QUICK_LIMIT * workers { 2 } else { 0 }, calm: 0 }
+    }
+
+    /// Turning the triangles costs the same at any size; filling them in, by the area.
+    fn learn(&mut self, [turning, filling]: [f32; 2]) {
+        let at = MOVING_SCALES[self.step];
+        let cost = |step: usize| turning + filling * (MOVING_SCALES[step] / at).powi(2);
+        let enough = (self.step..MOVING_SCALES.len()).find(|&step| cost(step) <= MOVING_TARGET_MICROS).unwrap_or(MOVING_SCALES.len() - 1);
+        if enough > self.step {
+            self.step = enough;
+            self.calm = 0;
+        } else if self.step > 0 && cost(self.step - 1) <= MOVING_TARGET_MICROS {
+            self.calm += 1;
+            if self.calm >= CALM_LOOKS {
+                self.step -= 1;
+                self.calm = 0;
+            }
+        } else {
+            self.calm = 0;
+        }
+    }
+}
+
+static PACE: Mutex<Option<Pace>> = Mutex::new(None);
+
+fn moving_scale(triangles: usize) -> f32 {
+    if triangles < ALWAYS_WHOLE { return 1.0; }
+    let mut pace = PACE.lock().unwrap();
+    if pace.as_ref().is_none_or(|p| p.triangles != triangles) { *pace = Some(Pace::new(triangles, workers())); }
+    MOVING_SCALES[pace.as_ref().map_or(0, |p| p.step)]
 }
 
 /// A triangle in picture coordinates, facing one way, and known to touch some sample.
@@ -167,9 +230,12 @@ fn covered(low: f32, high: f32, limit: usize) -> Option<[u32; 2]> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn flatten(triangles: &[Triangle], pivot: Point, camera: &Camera, lights: [Point; 2], fine: f32, shift: [f32; 2], columns: usize, rows: usize) -> Vec<Flat> {
+fn flatten(part: &mut Part, triangles: &[Triangle], pivot: Point, camera: &Camera, lights: [Point; 2], fine: f32, shift: [f32; 2], columns: usize, rows: usize, [bands, band_samples]: [usize; 2]) {
     let Camera { right, up, to_camera } = *camera;
-    let mut flats = Vec::new();
+    let Part { flats, bins } = part;
+    flats.clear();
+    bins.resize_with(bands, Vec::new);
+    bins.iter_mut().for_each(Vec::clear);
     for triangle in triangles {
         let [a, mut b, mut c] = triangle.map(|p| {
             let from_pivot = minus(p, pivot);
@@ -190,20 +256,24 @@ fn flatten(triangles: &[Triangle], pivot: Point, camera: &Camera, lights: [Point
         if dot(normal, to_camera) < 0.0 { normal = normal.map(|v| -v); }
         let brightness = 0.30 + 0.60 * dot(normal, lights[0]).max(0.0) + 0.20 * dot(normal, lights[1]).max(0.0);
         let shade = ((brightness.min(1.0) * 255.0) as u8).max(1);
+        let index = flats.len() as u32;
         flats.push(Flat { a, b, c, inverse_area: 1.0 / area, shade, columns: touched_columns, rows: touched_rows });
+        for band in touched_rows[0] as usize / band_samples..=touched_rows[1] as usize / band_samples { bins[band].push(index); }
     }
-    flats
 }
 
-/// Fills the output rows starting at `first_row`, which `pixels` holds.
-fn fill_band(flats: &[Vec<Flat>], pixels: &mut [u8], first_row: usize, width: usize, samples: usize) {
+/// Fills the output rows of band number `band`, which `pixels` holds.
+#[allow(clippy::too_many_arguments)]
+fn fill_band(parts: &[Part], band: usize, pixels: &mut [u8], first_row: usize, width: usize, samples: usize, depth: &mut Vec<f32>, light: &mut Vec<u8>) {
     let band_rows = pixels.len() / (width * 4);
     let columns = width * samples;
     let (top, end) = ((first_row * samples) as u32, ((first_row + band_rows) * samples) as u32);
-    let mut depth = vec![f32::NEG_INFINITY; columns * (end - top) as usize];
-    let mut light = vec![0u8; depth.len()];
-    for flat in flats.iter().flatten() {
-        if flat.rows[1] < top || flat.rows[0] >= end { continue; }
+    depth.clear();
+    depth.resize(columns * (end - top) as usize, f32::NEG_INFINITY);
+    light.clear();
+    light.resize(depth.len(), 0);
+    // In the order of the file: where two faces are equally near, the first one stays.
+    for flat in parts.iter().flat_map(|part| part.bins[band].iter().map(|&index| &part.flats[index as usize])) {
         let Flat { a, b, c, inverse_area, shade, .. } = *flat;
         for y in flat.rows[0].max(top)..=flat.rows[1].min(end - 1) {
             let row_start = (y - top) as usize * columns;
@@ -246,21 +316,78 @@ fn paint(triangles: &[Triangle], framing: &Framing, camera: &Camera, scale: f32,
     let shift = centre.map(|v| v * samples as f32);
     let workers = workers.clamp(1, height.max(1));
     let pivot = framing.pivot;
-    let flats: Vec<Vec<Flat>> = std::thread::scope(|scope| {
-        let jobs: Vec<_> = triangles.chunks(triangles.len().div_ceil(workers).max(1))
-            .map(|part| scope.spawn(move || flatten(part, pivot, camera, lights, fine, shift, columns, rows)))
-            .collect();
-        jobs.into_iter().map(|job| job.join().unwrap()).collect()
-    });
-    let mut rgba = vec![0u8; width * height * 4];
-    let band_rows = height.div_ceil(workers).max(1);
+    let started = Instant::now();
+    let mut scratch = std::mem::take(&mut *SCRATCH.lock().unwrap());
+    let parts = triangles.chunks(triangles.len().div_ceil(workers).max(1));
+    scratch.parts.resize_with(parts.len(), Part::default);
+    let band_rows = height.div_ceil(workers * BANDS_PER_WORKER).max(1);
+    let layout = [height.div_ceil(band_rows), band_rows * samples];
     std::thread::scope(|scope| {
-        for (band, pixels) in rgba.chunks_mut(width * 4 * band_rows).enumerate() {
-            let flats = &flats;
-            scope.spawn(move || fill_band(flats, pixels, band * band_rows, width, samples));
+        for (triangles, part) in parts.zip(&mut scratch.parts) {
+            scope.spawn(move || flatten(part, triangles, pivot, camera, lights, fine, shift, columns, rows, layout));
         }
     });
+    let flattened = started.elapsed();
+    let mut rgba = std::mem::take(&mut scratch.rgba);
+    rgba.clear();
+    rgba.resize(width * height * 4, 0);
+    let bands = Mutex::new(rgba.chunks_mut(width * 4 * band_rows).enumerate());
+    scratch.buffers.resize_with(workers, Default::default);
+    std::thread::scope(|scope| {
+        let (parts, bands) = (&scratch.parts, &bands);
+        for (depth, light) in &mut scratch.buffers {
+            scope.spawn(move || loop {
+                let next = bands.lock().unwrap().next();
+                let Some((band, pixels)) = next else { return };
+                fill_band(parts, band, pixels, band * band_rows, width, samples, depth, light);
+            });
+        }
+    });
+    drop(bands);
+    *SCRATCH.lock().unwrap() = scratch;
+    *PAINT_TIMES.lock().unwrap() = Some([flattened.as_micros() as u32, (started.elapsed() - flattened).as_micros() as u32]);
     Picture { size: [width as u32, height as u32], delays: Vec::new(), rgba }
+}
+
+/// Microseconds the last picture spent on turning the triangles and on filling them in.
+static PAINT_TIMES: Mutex<Option<[u32; 2]>> = Mutex::new(None);
+
+pub(super) fn take_paint_times() -> Option<[u32; 2]> {
+    PAINT_TIMES.lock().unwrap().take()
+}
+
+/// Buffers kept between pictures of a model, which needs dozens of pictures a second.
+/// They grow to what was actually used, and parsing the next file starts by freeing them.
+#[derive(Default)]
+struct Scratch {
+    parts: Vec<Part>,
+    /// Depth and light samples, one pair for each worker.
+    buffers: Vec<(Vec<f32>, Vec<u8>)>,
+    rgba: Vec<u8>,
+}
+
+/// The triangles one worker turned, and which of them touch each band of the picture.
+#[derive(Default)]
+struct Part {
+    flats: Vec<Flat>,
+    bins: Vec<Vec<u32>>,
+}
+
+static SCRATCH: Mutex<Scratch> = Mutex::new(Scratch { parts: Vec::new(), buffers: Vec::new(), rgba: Vec::new() });
+
+/// Hands back the pixels of a picture already sent, for the next one to be drawn in.
+pub(super) fn recycle(rgba: Vec<u8>) {
+    SCRATCH.lock().unwrap().rgba = rgba;
+}
+
+fn free_scratch() {
+    *SCRATCH.lock().unwrap() = Scratch::default();
+}
+
+/// A model and what every view of it shares.
+struct Model {
+    triangles: Vec<Triangle>,
+    framing: Option<Framing>,
 }
 
 /// The models read last, newest at the end, so that each new look at one, or going
@@ -268,7 +395,9 @@ fn paint(triangles: &[Triangle], framing: &Framing, camera: &Camera, scale: f32,
 struct Held {
     file: PathBuf,
     stamp: (u64, Option<SystemTime>),
-    triangles: Arc<Vec<Triangle>>,
+    /// When the file was last found to be unchanged.
+    checked: Instant,
+    model: Arc<Model>,
 }
 
 static HELD: Mutex<Vec<Held>> = Mutex::new(Vec::new());
@@ -277,33 +406,49 @@ fn stamp(file: &Path) -> Option<(u64, Option<SystemTime>)> {
     std::fs::metadata(file).ok().map(|m| (m.len(), m.modified().ok()))
 }
 
-fn held(file: &Path) -> Option<Arc<Vec<Triangle>>> {
+fn held(file: &Path) -> Option<Arc<Model>> {
     let now = stamp(file);
     let mut all = HELD.lock().unwrap();
     let at = all.iter().position(|h| h.file == file)?;
-    let item = all.remove(at);
+    let mut item = all.remove(at);
     if Some(item.stamp) != now { return None; }
-    let triangles = item.triangles.clone();
+    item.checked = Instant::now();
+    let model = item.model.clone();
     all.push(item);
-    Some(triangles)
+    Some(model)
 }
 
-fn hold(file: &Path, triangles: Vec<Triangle>) -> Arc<Vec<Triangle>> {
-    let triangles = Arc::new(triangles);
+/// Another look at a model in memory and recently found unchanged. Moving a model asks
+/// for dozens of these, which should not each go to the disk and past its antivirus.
+pub(super) fn look_again(file: &Path, options: Options) -> Option<Reply> {
+    options.view?;
+    let model = {
+        let all = HELD.lock().unwrap();
+        let item = all.iter().find(|h| h.file == file)?;
+        if item.checked.elapsed() >= RECHECK_AFTER { return None; }
+        item.model.clone()
+    };
+    Some(shown(&model, options))
+}
+
+fn hold(file: &Path, triangles: Vec<Triangle>) -> Arc<Model> {
+    let framing = framing(&triangles);
+    let model = Arc::new(Model { triangles, framing });
     if let Some(stamp) = stamp(file) {
         let mut all = HELD.lock().unwrap();
         all.retain(|h| h.file != file);
-        all.push(Held { file: file.to_path_buf(), stamp, triangles: triangles.clone() });
-        let mut total: usize = all.iter().map(|h| h.triangles.len()).sum();
+        all.push(Held { file: file.to_path_buf(), stamp, checked: Instant::now(), model: model.clone() });
+        let mut total: usize = all.iter().map(|h| h.model.triangles.len()).sum();
         while all.len() > 1 && total > MAX_TRIANGLES {
-            total -= all.remove(0).triangles.len();
+            total -= all.remove(0).model.triangles.len();
         }
     }
-    triangles
+    model
 }
 
 pub fn stl(file: &Path, options: Options) -> Reply {
-    if let Some(triangles) = held(file) { return shown(&triangles, options); }
+    if let Some(model) = held(file) { return shown(&model, options); }
+    free_scratch();
     if too_large(file) { return failed(TOO_LARGE); }
     match read_stl(file) {
         Ok(triangles) => shown(&hold(file, triangles), options),
@@ -516,7 +661,8 @@ fn thumbnail(zip: &mut Zip, options: Options) -> Option<Reply> {
 }
 
 pub fn three_mf(file: &Path, options: Options) -> Reply {
-    if let Some(triangles) = held(file) { return shown(&triangles, options); }
+    if let Some(model) = held(file) { return shown(&model, options); }
+    free_scratch();
     if too_large(file) { return failed(TOO_LARGE); }
     let opened = std::fs::File::open(file).map_err(|e| fsx::friendly_err(&e))
         .and_then(|f| zip::ZipArchive::new(BufReader::new(f)).map_err(|_| "This 3MF file could not be read".to_string()));
@@ -620,9 +766,48 @@ mod tests {
         let huge = at(ModelView { size: [u16::MAX, u16::MAX], zoom: u16::MAX, pan: [i16::MIN, i16::MAX], ..view });
         assert!(huge.size[0] <= 256, "the helper keeps to its own limits");
         std::fs::remove_file(&file).unwrap();
-        let again = load(&file, Options { view: Some(view), ..whole(256) }).0;
-        assert!(matches!(again, Loaded::Error(_)), "a file that is gone is not shown from memory");
+        let again = |file: &Path| load(file, Options { view: Some(view), ..whole(256) }).0;
+        assert!(matches!(again(&file), Loaded::Detail), "moving a model does not go to the disk each time");
+        HELD.lock().unwrap().iter_mut().filter(|h| h.file == file).for_each(|h| h.checked = Instant::now() - RECHECK_AFTER);
+        assert!(matches!(again(&file), Loaded::Error(_)), "a file that is gone is not shown from memory for long");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_moving_model_gets_the_size_its_last_pictures_allow() {
+        const SLOW: f32 = MOVING_TARGET_MICROS * 4.0;
+        let mut pace = Pace::new(1_000_000, 8);
+        assert_eq!(pace.step, 0, "assumed to be fast until seen");
+        pace.learn([MOVING_TARGET_MICROS * 0.5, SLOW]);
+        assert_eq!(MOVING_SCALES[pace.step], 0.33, "slow pictures shrink at once");
+        for look in 0..CALM_LOOKS - 1 {
+            pace.learn([500.0, 500.0]);
+            assert_eq!(MOVING_SCALES[pace.step], 0.33, "look {look}: fast ones do not grow it yet");
+        }
+        pace.learn([500.0, 500.0]);
+        assert_eq!(MOVING_SCALES[pace.step], 0.5, "enough of them in a row grow it by one size");
+        pace.learn([MOVING_TARGET_MICROS * 2.0, 0.0]);
+        assert_eq!(MOVING_SCALES[pace.step], 0.33, "no size is enough, so the smallest");
+        assert_eq!(Pace::new(QUICK_LIMIT * 8 + 1, 8).step, 2, "a huge model starts small");
+    }
+
+    #[test]
+    fn a_rounded_moving_size_does_not_change_the_size_of_the_model() {
+        let triangles = ball().repeat(2);
+        assert!(triangles.len() >= ALWAYS_WHOLE);
+        let framing = framing(&triangles).unwrap();
+        let (first_scale, first_width) = (1.0, 300);
+        let model_width = |asked: [u16; 2], moving: bool| {
+            *PACE.lock().unwrap() = Some(Pace { triangles: triangles.len(), step: 3, calm: 0 });
+            let view = ModelView { turn: 0, tilt: 0, zoom: 100, pan: [0; 2], size: asked, fit: 300, fine: !moving };
+            let picture = look(&triangles, &framing, view, 1600.0, first_scale, first_width);
+            let [width, height] = picture.size.map(|v| v as usize);
+            let columns = (0..width).filter(|x| (0..height).any(|y| picture.rgba[(y * width + x) * 4 + 3] > 127)).count();
+            let fit = (asked[0] as f32 / width as f32).min(asked[1] as f32 / height as f32);
+            columns as f32 * fit
+        };
+        let (sharp, moving) = (model_width([401, 303], false), model_width([401, 303], true));
+        assert!((sharp - moving).abs() <= 8.0, "{sharp} and {moving}");
     }
 
     /// A ball of many facets, some big and some smaller than a pixel.

@@ -167,6 +167,19 @@ fn options(renderer: eframe::Renderer, place: settings::WindowPlace) -> eframe::
     }
 }
 
+/// A software renderer or the wrong graphics card is otherwise invisible.
+fn report_renderer(cc: &eframe::CreationContext) {
+    if let Some(gl) = &cc.gl {
+        use eframe::glow::HasContext;
+        // SAFETY: the context is current while the application is being created.
+        let name = unsafe { gl.get_parameter_string(eframe::glow::RENDERER) };
+        eprintln!("[renderer] OpenGL: {name}");
+    }
+    if let Some(state) = &cc.wgpu_render_state {
+        eprintln!("[renderer] wgpu: {:?}", state.adapter.get_info());
+    }
+}
+
 fn run(renderer: eframe::Renderer, shot: Option<PathBuf>, loaded: Option<(settings::Settings, Option<String>)>) -> eframe::Result {
     archive::detect_tools();
     let place = loaded.as_ref().map(|(settings, _)| settings.window).unwrap_or_default();
@@ -174,6 +187,7 @@ fn run(renderer: eframe::Renderer, shot: Option<PathBuf>, loaded: Option<(settin
         "Ferrous Commander",
         options(renderer, place),
         Box::new(move |cc| {
+            if preview::trace() { report_renderer(cc); }
             cc.egui_ctx.add_plugin(TextureLimit);
             #[cfg(windows)]
             cc.egui_ctx.add_plugin(ClipboardKeys::default());

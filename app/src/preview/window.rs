@@ -13,7 +13,7 @@ use super::text::{CLASS_COMMENT, CLASS_FUNCTION, CLASS_KEYWORD, CLASS_NUMBER, CL
 use super::load::ArchiveEntry;
 use super::load::ModelView;
 use super::model::{MIN_MODEL_ZOOM, TILT_OFFSETS};
-use super::{DocData, Key, PreviewContent, TableDoc, TextDoc};
+use super::{DocData, Job, Key, PreviewContent, Slot, TableDoc, TextDoc};
 use crate::app::{Act, App};
 use crate::chrome::{self, BAR_H, Icon};
 use crate::fsx::{self, Entry, Kind};
@@ -43,7 +43,7 @@ const HEX_ASCII_X: f32 = 520.0;
 /// Past the end of any preview, yet small enough to compute with.
 const SCROLL_TO_END: f32 = 1e9;
 
-fn viewport() -> ViewportId {
+pub(super) fn viewport() -> ViewportId {
     ViewportId::from_hash_of("ferrous_commander_preview")
 }
 
@@ -83,6 +83,10 @@ struct View {
     turn: f32,
     tilt: f32,
     sent_view: Option<ModelView>,
+    /// The newest picture of a 3D model seen from elsewhere than at first.
+    look: Option<egui::TextureHandle>,
+    /// For tracing: since when a look has been waiting.
+    look_waiting: Option<Instant>,
 }
 
 struct Shared {
@@ -102,6 +106,9 @@ struct Shared {
     commands: Vec<Cmd>,
     view: View,
     detail: Option<(egui::TextureHandle, [u16; 4])>,
+    /// Where looks at a 3D model are asked for and collected, and the file they belong to.
+    lane: Option<Arc<Slot>>,
+    model: Option<Key>,
 }
 
 pub struct Quick {
@@ -304,6 +311,8 @@ impl App {
                     commands: Vec::new(),
                     view: View { zoom: 1.0, ..Default::default() },
                     detail: None,
+                    lane: None,
+                    model: None,
                 })),
                 opened: Instant::now(),
                 sized: Instant::now(),
@@ -361,6 +370,8 @@ impl App {
             s.view = View { zoom: 1.0, wrap: s.view.wrap, source: s.view.source, ..Default::default() };
             changed = true;
         }
+        s.lane = self.preview.look_lane();
+        s.model = quick.shown.clone();
         if changed { ctx.request_repaint_of(viewport()); }
     }
 }
@@ -369,6 +380,28 @@ impl Shared {
     fn send(&mut self, command: Cmd, ctx: &egui::Context) {
         self.commands.push(command);
         ctx.request_repaint_of(ViewportId::ROOT);
+    }
+
+    /// Straight to the lane: going through the file list would redraw it for every look.
+    fn ask_look(&mut self, view: ModelView, ctx: &egui::Context) {
+        let (Some(lane), Some(model)) = (&self.lane, &self.model) else {
+            self.send(Cmd::Turn(view), ctx);
+            return;
+        };
+        let key = Key { view: Some(view), ..model.clone() };
+        lane.ask_look(Job { key, ctx: ctx.clone(), prefetch: false });
+    }
+
+    /// Takes the newest look at the shown model, if one has arrived.
+    fn collect_look(&mut self) {
+        if self.view.sent_view.is_none() { return; }
+        let (Some(lane), Some(model)) = (&self.lane, &self.model) else { return };
+        let Some((key, texture)) = lane.look.lock().unwrap().take() else { return };
+        if (Key { view: None, ..key }) != *model { return; }
+        self.view.look = Some(texture);
+        if let Some(waiting) = self.view.look_waiting.take() && super::trace() {
+            eprintln!("[look] shown after {} us", waiting.elapsed().as_micros());
+        }
     }
 }
 
@@ -594,7 +627,8 @@ fn model_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32
     let sent = s.view.sent_view;
     if sent.map(|view| ModelView { fine: false, ..view }) != Some(look) {
         if sent.is_some() || !resting {
-            s.send(Cmd::Turn(look), &ctx);
+            s.ask_look(look, &ctx);
+            s.view.look_waiting.get_or_insert_with(Instant::now);
             s.view.sent_view = Some(look);
             s.view.moved = Some(Instant::now());
             ctx.request_repaint_after(SHARPEN_AFTER);
@@ -604,13 +638,14 @@ fn model_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32
             ctx.request_repaint_after(SHARPEN_AFTER);
         } else {
             let fine = ModelView { fine: true, ..look };
-            s.send(Cmd::Turn(fine), &ctx);
+            s.ask_look(fine, &ctx);
             s.view.sent_view = Some(fine);
         }
     }
 
+    s.collect_look();
     let p = ui.painter_at(body);
-    if let Some((drawn, _)) = &s.detail {
+    if let Some(drawn) = &s.view.look {
         let size = vec2(drawn.size()[0] as f32, drawn.size()[1] as f32);
         let fit = (body.width() / size.x).min(body.height() / size.y);
         p.image(drawn.id(), Rect::from_center_size(body.center(), size * fit), unit_uv(), Color32::WHITE);
@@ -1023,7 +1058,7 @@ mod tests {
             size: String::new(), place: (1, 1), mebibytes: false,
             content: PreviewContent::Model(texture, [32, 32]),
             previous: None, switched: Instant::now() - Duration::from_secs(1), loading: None, commands: Vec::new(),
-            view: View { zoom: 1.0, ..Default::default() }, detail: None,
+            view: View { zoom: 1.0, ..Default::default() }, detail: None, lane: None, model: None,
         }
     }
 
