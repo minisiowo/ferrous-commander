@@ -29,6 +29,8 @@ const RECENT_PICKS_MAX: usize = 8;
 /// A pause in typing before the folders below the current one are searched.
 const DEEP_DELAY: Duration = Duration::from_millis(140);
 const DEEP_RESULTS_MAX: usize = 300;
+/// How often what the search has found joins the list while it runs, so rows do not shuffle on every find.
+const DEEP_REFRESH: Duration = Duration::from_millis(250);
 /// A folder larger than this is left to the search below it, which is limited.
 const HERE_MAX: usize = 20_000;
 
@@ -36,8 +38,45 @@ const HERE_MAX: usize = 20_000;
 struct Deep {
     needle: String,
     root: PathBuf,
-    run: ops::Search,
+    hidden: bool,
+    /// `None` once it has ended and `found` holds all of its results.
+    run: Option<ops::Search>,
     found: Vec<Entry>,
+    /// What the search before this one found that matches this text too. It stays listed until
+    /// this search ends, so that the list does not empty and fill again with every letter.
+    before: Vec<Entry>,
+    /// When `found` last took the search's results.
+    taken: Instant,
+}
+
+/// The words a search looks for, as `ops::search_within` splits them.
+fn search_words(needle: &str) -> Vec<String> {
+    needle.to_lowercase().split_whitespace().map(String::from).collect()
+}
+
+impl Deep {
+    /// Takes what the search has found since the last time, and notes its end.
+    fn take(&mut self) {
+        let Some(run) = &self.run else { return };
+        // Read before the results: once done, they are all there.
+        let done = run.done.load(std::sync::atomic::Ordering::Relaxed);
+        {
+            let results = run.results.lock().unwrap();
+            if results.len() > self.found.len() {
+                self.found.extend_from_slice(&results[self.found.len()..]);
+            }
+        }
+        self.taken = Instant::now();
+        if done {
+            self.before.clear();
+            self.run = None;
+        }
+    }
+
+    /// Whether `found` is everything below the root that matches the needle.
+    fn whole(&self) -> bool {
+        self.run.is_none() && self.found.len() < DEEP_RESULTS_MAX
+    }
 }
 
 /// An item as listed, with the characters of its title that matched what was typed.
@@ -53,7 +92,13 @@ pub struct PaletteUi {
     items: Vec<Item>,
     rows: Vec<Row>,
     /// What the items were gathered for; `None` gathers them again.
-    gathered: Option<(Mode, PathBuf, u64, usize)>,
+    gathered: Option<(Mode, PathBuf, u64)>,
+    /// The first items are those gathered; after them come the ones the search found.
+    gathered_len: usize,
+    /// The paths of the items gathered, which the search must not list again.
+    known: HashSet<PathBuf>,
+    /// How much of the search's results the items hold: found now, and kept from before.
+    deep_shown: (usize, usize),
     /// The text the rows were ranked for.
     ranked: Option<String>,
     deep: Option<Deep>,
@@ -75,6 +120,9 @@ impl PaletteUi {
             items: Vec::new(),
             rows: Vec::new(),
             gathered: None,
+            gathered_len: 0,
+            known: HashSet::new(),
+            deep_shown: (0, 0),
             ranked: None,
             deep: None,
             changed: Instant::now(),
@@ -102,7 +150,7 @@ impl PaletteUi {
 
     #[cfg(test)]
     pub fn searching(&self) -> bool {
-        self.deep.as_ref().is_some_and(|deep| !deep.run.done.load(std::sync::atomic::Ordering::Relaxed))
+        self.deep.as_ref().is_some_and(|deep| deep.run.is_some())
     }
 
     fn move_by(&mut self, by: isize, wrap: bool) {
@@ -121,20 +169,43 @@ impl PaletteUi {
             self.deep = None;
             return;
         }
-        if !self.deep.as_ref().is_some_and(|deep| deep.needle == needle && deep.root == root) {
+        if !self.deep.as_ref().is_some_and(|deep| deep.needle == needle && deep.root == root && deep.hidden == show_hidden) {
             // Until typing pauses, the last search keeps its results on screen.
             let waited = self.changed.elapsed();
             if waited < DEEP_DELAY {
                 ctx.request_repaint_after(DEEP_DELAY - waited);
             } else {
-                let run = ops::search_within(root.to_path_buf(), needle.to_string(), show_hidden, Some(DEEP_RESULTS_MAX), ctx.clone());
-                self.deep = Some(Deep { needle: needle.to_string(), root: root.to_path_buf(), run, found: Vec::new() });
+                let words = search_words(needle);
+                let mut old = self.deep.take().filter(|deep| deep.root == root && deep.hidden == show_hidden);
+                if let Some(old) = &mut old { old.take(); }
+                // Text that only narrows a search that ended needs no second walk of the disk:
+                // what it would find is among what was found.
+                let narrowed = old.as_ref().is_some_and(|old| {
+                    old.whole() && search_words(&old.needle).iter().all(|was| words.iter().any(|word| word.contains(was.as_str())))
+                });
+                // The same rule as the search's own, so nothing kept is what it would not find.
+                let mut seen = HashSet::new();
+                let kept: Vec<Entry> = old.map(|old| old.found.into_iter().chain(old.before)
+                        .filter(|e| words.iter().all(|word| e.lname().contains(word.as_str())) && seen.insert(e.path.clone()))
+                        .collect())
+                    .unwrap_or_default();
+                let (run, found, before) = if narrowed {
+                    (None, kept, Vec::new())
+                } else {
+                    let run = ops::search_within(root.to_path_buf(), needle.to_string(), show_hidden, Some(DEEP_RESULTS_MAX), ctx.clone());
+                    (Some(run), Vec::new(), kept)
+                };
+                self.deep = Some(Deep { needle: needle.to_string(), root: root.to_path_buf(), hidden: show_hidden, run, found, before, taken: Instant::now() });
             }
         }
-        if let Some(deep) = &mut self.deep {
-            let results = deep.run.results.lock().unwrap();
-            if results.len() > deep.found.len() {
-                deep.found.extend_from_slice(&results[deep.found.len()..]);
+        if let Some(deep) = &mut self.deep && let Some(run) = &deep.run {
+            let done = run.done.load(std::sync::atomic::Ordering::Relaxed);
+            let first = deep.found.is_empty() && deep.before.is_empty();
+            let waited = deep.taken.elapsed();
+            if done || first || waited >= DEEP_REFRESH {
+                deep.take();
+            } else {
+                ctx.request_repaint_after(DEEP_REFRESH - waited);
             }
         }
     }
@@ -161,6 +232,24 @@ fn offered(command: Command) -> bool {
         && (command != Command::Properties || cfg!(target_os = "linux"))
 }
 
+fn entry_item(e: &Entry, detail: String, badge: &str) -> Item {
+    let pick = if e.is_dir { Pick::Folder(e.path.clone()) } else { Pick::File(e.path.clone()) };
+    Item::new(e.name(), detail, badge, pick)
+}
+
+/// Adds what the search found to `items`, but for the paths in `known`.
+fn add_deep_items(deep: &Deep, known: &HashSet<PathBuf>, items: &mut Vec<Item>) {
+    let mut seen: HashSet<&Path> = HashSet::new();
+    for e in deep.found.iter().chain(&deep.before) {
+        if known.contains(&e.path) || !seen.insert(&e.path) { continue; }
+        // The deeper it lies, the less likely it is the one meant.
+        let inside = e.path.parent().and_then(|p| p.strip_prefix(&deep.root).ok());
+        let depth = inside.map_or(8, |p| p.components().count().min(8)) as i32;
+        let detail = inside.map_or_else(|| parent_text(&e.path), |p| p.display().to_string());
+        items.push(entry_item(e, detail, "").boost(-15 * depth));
+    }
+}
+
 fn parent_text(path: &Path) -> String {
     path.parent().map(|p| p.display().to_string()).unwrap_or_default()
 }
@@ -175,7 +264,8 @@ impl App {
         self.st.recent_folders.iter().chain(&self.st.history)
     }
 
-    fn place_items(&self, deep: Option<&Deep>) -> Vec<Item> {
+    /// The places known without searching, and their paths.
+    fn place_items(&self) -> (Vec<Item>, HashSet<PathBuf>) {
         let i = self.active;
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut items = Vec::new();
@@ -200,25 +290,12 @@ impl App {
         for path in &self.cloud {
             add(Item::new(fsx::display_name(path), parent_text(path), "cloud", Pick::Folder(path.clone())).boost(40), path);
         }
-        let entry_item = |e: &Entry, detail: String, badge: &str| {
-            let pick = if e.is_dir { Pick::Folder(e.path.clone()) } else { Pick::File(e.path.clone()) };
-            Item::new(e.name(), detail, badge, pick)
-        };
         if let Some(entries) = self.pane_entries(i).filter(|entries| entries.len() <= HERE_MAX) {
             for e in entries.iter().filter(|e| self.st.show_hidden || !e.hidden) {
                 add(entry_item(e, String::new(), "here").boost(60), &e.path);
             }
         }
-        if let Some(deep) = deep {
-            for e in &deep.found {
-                // The deeper it lies, the less likely it is the one meant.
-                let inside = e.path.parent().and_then(|p| p.strip_prefix(&deep.root).ok());
-                let depth = inside.map_or(8, |p| p.components().count().min(8)) as i32;
-                let detail = inside.map_or_else(|| parent_text(&e.path), |p| p.display().to_string());
-                add(entry_item(e, detail, "").boost(-15 * depth), &e.path);
-            }
-        }
-        items
+        (items, seen)
     }
 
     fn command_items(&self) -> Vec<Item> {
@@ -293,15 +370,25 @@ impl App {
         let here = self.panes[self.active].path().to_path_buf();
         palette.search_below(mode, needle, &here, self.st.show_hidden, ctx);
         let listing = self.cache.get(&here).map_or(0, |l| l.generation);
-        let key = (mode, here, listing, palette.deep.as_ref().map_or(0, |deep| deep.found.len()));
-        let gathered = palette.gathered.as_ref() == Some(&key);
+        let key = (mode, here, listing);
+        let mut gathered = palette.gathered.as_ref() == Some(&key);
         if !gathered {
-            palette.items = match mode {
-                Mode::Places => self.place_items(palette.deep.as_ref()),
-                Mode::Commands => self.command_items(),
-                Mode::History => self.history_items(),
+            (palette.items, palette.known) = match mode {
+                Mode::Places => self.place_items(),
+                Mode::Commands => (self.command_items(), HashSet::new()),
+                Mode::History => (self.history_items(), HashSet::new()),
             };
+            palette.gathered_len = palette.items.len();
+            palette.deep_shown = (0, 0);
             palette.gathered = Some(key);
+        }
+        // Only what the search found is made again as it finds more: the folder can be large.
+        let deep_now = palette.deep.as_ref().map_or((0, 0), |deep| (deep.found.len(), deep.before.len()));
+        if palette.deep_shown != deep_now {
+            palette.items.truncate(palette.gathered_len);
+            if let Some(deep) = &palette.deep { add_deep_items(deep, &palette.known, &mut palette.items); }
+            palette.deep_shown = deep_now;
+            gathered = false;
         }
         let typed = palette.ranked.as_deref() != Some(query.as_str());
         if gathered && !typed { return; }
@@ -315,8 +402,10 @@ impl App {
             let item = Item::new(needle, "", "path", Pick::Typed(needle.to_string()));
             rows.insert(0, Row { item, title: Vec::new() });
         }
+        let was = palette.selected;
         palette.selected = kept.and_then(|pick| rows.iter().position(|row| row.item.pick == pick)).unwrap_or(0);
-        palette.reveal = true;
+        // Results that only arrive leave the list where the wheel put it.
+        if typed || palette.selected != was { palette.reveal = true; }
         palette.rows = rows;
         palette.ranked = Some(query);
     }
@@ -421,9 +510,14 @@ impl App {
                             for n in 0..palette.rows.len() {
                                 let (r, response) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
                                 let selected = n == palette.selected;
+                                // At once: an animation would trail behind a held arrow key and fast typing.
+                                if selected && std::mem::take(&mut palette.reveal) {
+                                    ui.scroll_to_rect_animation(r, None, egui::style::ScrollAnimation::none());
+                                }
+                                // The rows scrolled out of sight cost their text's layout for nothing.
+                                if !ui.is_rect_visible(r) { continue; }
                                 if selected {
                                     ui.painter().rect_filled(r, CornerRadius::ZERO, pal.selection());
-                                    if std::mem::take(&mut palette.reveal) { ui.scroll_to_rect(r, None); }
                                 } else if response.hovered() {
                                     ui.painter().rect_filled(r, CornerRadius::ZERO, pal.hover);
                                 }
@@ -540,7 +634,7 @@ impl App {
             None => "",
         };
         let small = FontId::proportional(11.0);
-        let searching = palette.deep.as_ref().is_some_and(|deep| !deep.run.done.load(std::sync::atomic::Ordering::Relaxed));
+        let searching = palette.deep.as_ref().is_some_and(|deep| deep.run.is_some());
         let next = format!("{}Tab {} · Esc close", if searching { "Searching… · " } else { "" }, palette.mode().next(false).label().to_lowercase());
         let drawn = p.text(pos2(r.max.x - 12.0, r.center().y), Align2::RIGHT_CENTER, next, small.clone(), pal.text_weak);
         let hint = fit_text(&p, hint, &small, drawn.min.x - r.min.x - 28.0);

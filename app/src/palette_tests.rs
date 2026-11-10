@@ -189,6 +189,63 @@ fn the_palette_finds_files_below_the_folder_and_shows_them_in_place() {
 }
 
 #[test]
+fn erasing_letters_keeps_the_files_found_on_screen_while_the_search_starts_again() {
+    let (ctx, mut app, root) = palette_app("palette_erase");
+    for name in ["daniel-a.txt", "daniel-b.txt"] {
+        std::fs::write(root.join("dir05").join("inner").join(name), b"x").unwrap();
+    }
+    alt_p(&ctx, &mut app);
+    word(&ctx, &mut app, "daniel");
+    wait_for_palette(&ctx, &mut app, "daniel-a.txt");
+    wait_for_palette(&ctx, &mut app, "daniel-b.txt");
+    // From "daniel" down to "da": each shorter text still matches both files.
+    for _ in 0..4 {
+        key(&ctx, &mut app, Key::Backspace, Modifiers::NONE);
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        while std::time::Instant::now() < until {
+            frame(&ctx, &mut app, vec![], Modifiers::NONE);
+            let titles = palette(&app).titles();
+            assert!(titles.contains(&"daniel-a.txt") && titles.contains(&"daniel-b.txt"),
+                "for {:?} the list lost a file: {titles:?}", palette(&app).query);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    assert_eq!(palette(&app).query, "da");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn text_that_narrows_an_ended_search_is_answered_without_searching_again() {
+    let (ctx, mut app, root) = palette_app("palette_narrow");
+    for name in ["quarterly report.txt", "quartz.txt"] {
+        std::fs::write(root.join("dir05").join("inner").join(name), b"x").unwrap();
+    }
+    alt_p(&ctx, &mut app);
+    word(&ctx, &mut app, "quart");
+    wait_for_palette(&ctx, &mut app, "quartz.txt");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while palette(&app).searching() {
+        assert!(std::time::Instant::now() < deadline, "the search never ended");
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    word(&ctx, &mut app, "erly");
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(400);
+    while std::time::Instant::now() < until {
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        assert!(!palette(&app).searching(), "the disk is not walked again");
+        assert!(palette(&app).titles().contains(&"quarterly report.txt"), "{:?}", palette(&app).titles());
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(palette(&app).titles(), ["quarterly report.txt"]);
+    // Erasing widens the text, which only the disk can answer.
+    for _ in 0..6 { key(&ctx, &mut app, Key::Backspace, Modifiers::NONE); }
+    assert_eq!(palette(&app).query, "qua");
+    wait_for_palette(&ctx, &mut app, "quartz.txt");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn the_palette_goes_to_a_typed_path_and_its_shortcut_can_be_changed() {
     use crate::keymap::{Command, Layer, parse_keys};
     let (ctx, mut app, root) = palette_app("palette_path");
