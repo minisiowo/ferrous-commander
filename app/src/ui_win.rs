@@ -63,6 +63,7 @@ impl App {
                     if *wrong { ui.label(RichText::new("Wrong password. Try again.").color(hex("#ef7063"))); }
                 }
                 let secret = matches!(d, Dialog::Password { .. });
+                let is_location = matches!(d, Dialog::AddLocation { .. });
                 let (name, focus) = match &mut d {
                     Dialog::AddLocation { name, focus, .. }
                     | Dialog::RenameFavorite { name, focus, .. }
@@ -73,7 +74,12 @@ impl App {
                     | Dialog::Compress { name, focus, .. }
                     | Dialog::Password { name, focus, .. } => (name, focus),
                 };
-                let resp = ui.add(egui::TextEdit::singleline(name).hint_text(hint).password(secret).desired_width(f32::INFINITY));
+                let resp = if is_location {
+                    let (id, font) = (ui.make_persistent_id("location_path"), egui::TextStyle::Body.resolve(ui.style()));
+                    self.path_field(ui, id, name, font, |edit| edit.hint_text(hint).desired_width(f32::INFINITY)).0.response.response
+                } else {
+                    ui.add(egui::TextEdit::singleline(name).hint_text(hint).password(secret).desired_width(f32::INFINITY))
+                };
                 if *focus {
                     resp.request_focus();
                     *focus = false;

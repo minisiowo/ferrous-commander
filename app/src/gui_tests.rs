@@ -2556,6 +2556,41 @@ fn your_own_command_picks_a_folder_and_where_it_opens() {
 }
 
 #[test]
+fn the_other_path_fields_complete_folders_as_the_path_bar_does() {
+    use crate::keymap::Layer;
+    use crate::ui_keys::{Capture, Subject};
+    use crate::app::Dialog;
+    let (ctx, mut app, root) = neovim_app("fields_complete");
+    let sep = std::path::MAIN_SEPARATOR;
+    let typed = format!("{}{sep}dir0", root.display());
+    let done = format!("{typed}0{sep}");
+
+    // The folder of a command of one's own.
+    recording(&mut app, Layer::Neovim, Capture::folder(String::new()));
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    let field = painted_at(&ctx, &mut app, "/path/to/folder", screen());
+    click(&ctx, &mut app, field, Modifiers::NONE);
+    frame(&ctx, &mut app, vec![Event::Text(typed.clone())], Modifiers::NONE);
+    wait_for_text(&ctx, &mut app, &format!("0{sep}"));
+    key(&ctx, &mut app, Key::Tab, Modifiers::NONE);
+    match &app.shortcuts.as_ref().unwrap().capture.as_ref().unwrap().subject {
+        Subject::Folder(form) => assert_eq!(form.path, done),
+        _ => panic!("not a folder form"),
+    }
+    app.shortcuts = None;
+
+    // The path of a location added to the sidebar.
+    app.dialog = Some(Dialog::AddLocation { group: 0, name: typed, focus: true });
+    wait_for_text(&ctx, &mut app, &format!("0{sep}"));
+    key(&ctx, &mut app, Key::ArrowRight, Modifiers::NONE);
+    match &app.dialog {
+        Some(Dialog::AddLocation { name, .. }) => assert_eq!(*name, done),
+        _ => panic!("the dialog closed"),
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn a_command_can_be_changed_without_clashing_with_itself() {
     use crate::keymap::{FolderKey, Layer, Target, parse_keys};
     let (ctx, mut app, root) = neovim_app("change");

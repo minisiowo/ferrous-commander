@@ -217,7 +217,8 @@ impl App {
                 ui.label(RichText::new("Your command").strong());
                 ui.horizontal(|ui| {
                     ui.label("Folder");
-                    ui.add(TextEdit::singleline(&mut form.path).hint_text("/path/to/folder").desired_width(340.0));
+                    let (id, font) = (ui.make_persistent_id("shortcut_folder"), egui::TextStyle::Body.resolve(ui.style()));
+                    self.path_field(ui, id, &mut form.path, font, |edit| edit.hint_text("/path/to/folder").desired_width(340.0));
                     if ui.add_enabled(!is_computer(&active), Button::new("Use active panel")).clicked() {
                         form.path = active.display().to_string();
                     }

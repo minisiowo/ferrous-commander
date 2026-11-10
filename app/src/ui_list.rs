@@ -216,34 +216,12 @@ impl App {
                     state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(start), CCursor::new(end))));
                     egui::TextEdit::store_state(ui.ctx(), id, state);
                 }
-                self.accept_path_completion(ui, id, &mut text);
                 let font = FontId::proportional(12.0);
-                let output = egui::TextEdit::singleline(&mut text)
-                    .id(id)
-                    .font(font.clone())
-                    .frame(in_place_frame(ui, CRUMB_TEXT_LEFT))
-                    .align(Align2::LEFT_CENTER)
-                    .desired_width(field_r.width())
-                    .hint_text(RichText::new("Path").font(font.clone()))
-                    .lock_focus(true)
-                    .show(ui);
-                let completion = if cursor_at_end(output.cursor_range, &text) {
-                    self.path_completion(&text)
-                } else {
-                    None
-                };
-                if let Some(completion) = &completion {
-                    let rest: String = completion.chars().skip(text.chars().count()).collect();
-                    // `text_clip_rect` ends where the typed text does.
-                    let field = output.response.response.rect.shrink2(vec2(4.0, 0.0));
-                    ui.painter_at(field).text(
-                        output.galley_pos + vec2(output.galley.rect.right(), 0.0),
-                        Align2::LEFT_TOP,
-                        rest,
-                        font,
-                        pal.text_weak,
-                    );
-                }
+                let hint = RichText::new("Path").font(font.clone());
+                let frame = in_place_frame(ui, CRUMB_TEXT_LEFT);
+                let (output, completion) = self.path_field(ui, id, &mut text, font, |edit| {
+                    edit.frame(frame).align(Align2::LEFT_CENTER).desired_width(field_r.width()).hint_text(hint).lock_focus(true)
+                });
                 let resp = &output.response.response;
                 if !resp.has_focus() && !resp.lost_focus() {
                     resp.request_focus();
@@ -387,6 +365,39 @@ impl App {
                     });
                 });
         });
+    }
+
+    /// A field for a folder's path. After the typed text it offers, more quietly, the first
+    /// folder that fits, which Tab or Right takes. Returns the field and what it offered.
+    pub(crate) fn path_field(
+        &mut self,
+        ui: &mut Ui,
+        id: egui::Id,
+        text: &mut String,
+        font: FontId,
+        look: impl for<'t> FnOnce(egui::TextEdit<'t>) -> egui::TextEdit<'t>,
+    ) -> (egui::text_edit::TextEditOutput, Option<String>) {
+        self.accept_path_completion(ui, id, text);
+        let output = look(egui::TextEdit::singleline(text).id(id).font(font.clone())).show(ui);
+        let field = &output.response.response;
+        let completion = if (field.has_focus() || field.lost_focus()) && cursor_at_end(output.cursor_range, text) {
+            self.path_completion(text)
+        } else {
+            None
+        };
+        if let Some(completion) = &completion {
+            let rest: String = completion.chars().skip(text.chars().count()).collect();
+            // `text_clip_rect` ends where the typed text does.
+            let field = output.response.response.rect.shrink2(vec2(4.0, 0.0));
+            ui.painter_at(field).text(
+                output.galley_pos + vec2(output.galley.rect.right(), 0.0),
+                Align2::LEFT_TOP,
+                rest,
+                font,
+                self.pal.text_weak,
+            );
+        }
+        (output, completion)
     }
 
     /// Tab or Right takes the suggested folder, before the text field can react to the key.
