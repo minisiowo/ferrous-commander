@@ -34,6 +34,7 @@ mod ui_keys;
 mod ui_list;
 mod ui_palette;
 mod ui_win;
+mod ui_search;
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
@@ -192,6 +193,7 @@ fn run(renderer: eframe::Renderer, shot: Option<PathBuf>, loaded: Option<(settin
             cc.egui_ctx.add_plugin(TextureLimit);
             #[cfg(windows)]
             cc.egui_ctx.add_plugin(ClipboardKeys::default());
+            if shot.is_some() { cc.egui_ctx.set_embed_viewports(true); }
             fonts(&cc.egui_ctx);
             Ok(Box::new(Shell {
                 app: app::App::with_settings(shot, loaded),

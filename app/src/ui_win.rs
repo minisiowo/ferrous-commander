@@ -2,16 +2,14 @@
 
 use std::sync::atomic::Ordering;
 
-use egui::{Align2, FontId, Frame, Key, Margin, Rect, RichText, Sense, Stroke, pos2, vec2};
+use egui::{Align2, Frame, Key, Margin, Rect, RichText, Sense, Stroke, pos2, vec2};
 
 use crate::app::{Act, App, Dialog, DragPaths, DropTarget, Notice, ToastKind, is_computer};
 use crate::chrome::{self, Icon, Panel};
 use crate::fsx;
 use crate::keymap::Command;
-use crate::icons;
 use crate::settings::Layout;
 use crate::theme::{ThemeName, hex};
-use crate::ui::fit_text;
 
 fn settings_section(ui: &mut egui::Ui, title: &str, accent: egui::Color32) {
     ui.add_space(10.0);
@@ -337,78 +335,6 @@ impl App {
         } else if !closed && !cancel {
             if chooser.loading { ctx.request_repaint_after(std::time::Duration::from_millis(100)); }
             self.app_chooser = Some(chooser);
-        }
-    }
-
-    pub fn search_window(&mut self, ctx: &egui::Context) {
-        let Some(mut s) = self.search.take() else { return };
-        let pal = self.pal;
-        let i = self.active;
-        let show_hidden = self.st.show_hidden;
-        let root = s.root.display().to_string();
-        let closed = Panel::new("Search", pal, Icon::Glyph("🔍", None)).info(&root).fit_screen(ctx, vec2(560.0, 440.0), vec2(420.0, 240.0)).show(ctx, |ui| chrome::body(ui, |ui| {
-            ui.set_min_height(ui.available_height());
-            ui.horizontal(|ui| {
-                let resp = ui.add(egui::TextEdit::singleline(&mut s.query).hint_text("Names").desired_width(300.0));
-                if s.focus {
-                    resp.request_focus();
-                    s.focus = false;
-                }
-                let enter = resp.lost_focus() && ui.input(|inp| inp.key_pressed(Key::Enter));
-                let running = s.run.as_ref().is_some_and(|r| !r.done.load(Ordering::Relaxed));
-                if running {
-                    if ui.button("Stop").clicked()
-                        && let Some(r) = &s.run {
-                            r.cancel.store(true, Ordering::Relaxed);
-                        }
-                    ui.spinner();
-                } else if (ui.button("Search").clicked() || enter) && !s.query.trim().is_empty() {
-                    s.run = Some(crate::ops::search(s.root.clone(), s.query.clone(), show_hidden, ui.ctx().clone()));
-                }
-            });
-            ui.separator();
-            let Some(run) = &s.run else {
-                ui.label(RichText::new("Type part of a name and press Enter. All words must match.").color(pal.text_weak));
-                return;
-            };
-            let found = run.results.lock().unwrap().len();
-            let scanned = run.scanned.load(Ordering::Relaxed);
-            let msg = format!("{found} found   ·   {scanned} items scanned");
-            ui.label(RichText::new(msg).color(pal.text_weak).size(11.0));
-            let rh = self.row_h() + 4.0;
-            let font = FontId::proportional(self.st.font_size);
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, rh, found, |ui, range| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                // Only what is visible: a spinner keeps these frames coming during a search.
-                let visible = run.results.lock().unwrap()[range].to_vec();
-                for e in &visible {
-                    let (rr, resp) = ui.allocate_exact_size(vec2(ui.available_width(), rh), Sense::click());
-                    let p = ui.painter();
-                    if resp.hovered() {
-                        p.rect_filled(rr, pal.corner(), pal.hover);
-                    }
-                    let ir = Rect::from_min_size(pos2(rr.min.x + 4.0, rr.center().y - 8.0), vec2(16.0, 16.0));
-                    icons::entry(p, ir, e.kind, e.ext(), pal.dark, false);
-                    let name = fit_text(p, e.name(), &font, rr.width() * 0.45);
-                    let ng = p.text(pos2(ir.max.x + 8.0, rr.center().y), Align2::LEFT_CENTER, name, font.clone(), pal.text);
-                    let parent = e.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
-                    let small = FontId::proportional(11.0);
-                    let pt = fit_text(p, &parent, &small, rr.max.x - ng.max.x - 20.0);
-                    p.text(pos2(ng.max.x + 12.0, rr.center().y), Align2::LEFT_CENTER, pt, small, pal.text_weak);
-                    if resp.clicked()
-                        && let Some(par) = e.path.parent() {
-                            self.acts.push(Act::NavigateSelect(i, par.to_path_buf(), e.path.clone()));
-                        }
-                    if resp.double_clicked() {
-                        self.acts.push(Act::Open(i, e.path.clone()));
-                    }
-                }
-            });
-        }));
-        if !closed {
-            self.search = Some(s);
-        } else if let Some(r) = &s.run {
-            r.cancel.store(true, Ordering::Relaxed);
         }
     }
 

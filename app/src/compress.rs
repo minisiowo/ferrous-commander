@@ -50,12 +50,8 @@ pub fn suggested_name(sources: &[PathBuf], folder: &Path) -> String {
 }
 
 /// Drops items already inside another selected folder, which the tree view allows.
-pub fn outermost(mut sources: Vec<PathBuf>) -> Vec<PathBuf> {
-    sources.sort();
-    sources.dedup();
-    let all = sources.clone();
-    sources.retain(|item| !all.iter().any(|other| other != item && item.starts_with(other)));
-    sources
+pub fn outermost(sources: Vec<PathBuf>) -> Vec<PathBuf> {
+    crate::fsx::outermost_paths(sources)
 }
 
 pub struct Packed {

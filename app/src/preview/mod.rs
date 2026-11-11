@@ -498,10 +498,9 @@ impl Preview {
     }
 }
 
-impl App {
-    /// Starts loading in this very frame, instead of waiting for the next one to happen.
-    pub fn want_preview(&mut self, mut key: Option<Key>, ctx: &egui::Context) {
-        let preview = &mut self.preview;
+impl Preview {
+    pub(crate) fn want(&mut self, mut key: Option<Key>, ctx: &egui::Context) {
+        let preview = self;
         // The listing knows files, not pages: the page belongs to the file on show.
         match &mut key {
             Some(k) if preview.path.as_ref() == Some(&k.path) => k.page = preview.page,
@@ -524,6 +523,41 @@ impl App {
         }
         preview.content = PreviewContent::Loading;
         preview.send(0, vec![Job { key, ctx: ctx.clone(), prefetch: false }]);
+    }
+
+    pub(crate) fn receive(&mut self) {
+        let preview = self;
+        while let Ok((key, content)) = preview.rx.try_recv() {
+            if let (Some(crop), PreviewContent::Detail(texture)) = (key.crop, &content) {
+                let current = preview.key.as_ref().is_some_and(|k| k.path == key.path && k.page == key.page);
+                if current { preview.detail = Some((texture.clone(), crop)); }
+                continue;
+            }
+            if key.page == media::FILM_PAGE && matches!(content, PreviewContent::Info(..)) {
+                // Stands in for the single frame, here and for later visits.
+                let still = Key { page: 0, ..key };
+                preview.cache.insert(still.clone(), content.clone());
+                if preview.key.as_ref() == Some(&still) {
+                    preview.content = content;
+                    preview.revision += 1;
+                }
+                continue;
+            }
+            if content.remembered() { preview.cache.insert(key.clone(), content.clone()); }
+            if preview.key.as_ref() == Some(&key) {
+                if trace() && let Some(asked) = preview.asked {
+                    eprintln!("[preview] {} ready after {} ms", key.path.display(), asked.elapsed().as_millis());
+                }
+                preview.content = content;
+            }
+        }
+    }
+}
+
+impl App {
+    /// Starts loading in this very frame, instead of waiting for the next one to happen.
+    pub fn want_preview(&mut self, key: Option<Key>, ctx: &egui::Context) {
+        self.preview.want(key, ctx);
     }
 
     /// Once the selection rests on a video, starts on its moving preview.
@@ -572,31 +606,7 @@ impl App {
     }
 
     pub(crate) fn receive_preview(&mut self) {
-        let preview = &mut self.preview;
-        while let Ok((key, content)) = preview.rx.try_recv() {
-            if let (Some(crop), PreviewContent::Detail(texture)) = (key.crop, &content) {
-                let current = preview.key.as_ref().is_some_and(|k| k.path == key.path && k.page == key.page);
-                if current { preview.detail = Some((texture.clone(), crop)); }
-                continue;
-            }
-            if key.page == media::FILM_PAGE && matches!(content, PreviewContent::Info(..)) {
-                // Stands in for the single frame, here and for later visits.
-                let still = Key { page: 0, ..key };
-                preview.cache.insert(still.clone(), content.clone());
-                if preview.key.as_ref() == Some(&still) {
-                    preview.content = content;
-                    preview.revision += 1;
-                }
-                continue;
-            }
-            if content.remembered() { preview.cache.insert(key.clone(), content.clone()); }
-            if preview.key.as_ref() == Some(&key) {
-                if trace() && let Some(asked) = preview.asked {
-                    eprintln!("[preview] {} ready after {} ms", key.path.display(), asked.elapsed().as_millis());
-                }
-                preview.content = content;
-            }
-        }
+        self.preview.receive();
     }
 }
 

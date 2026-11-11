@@ -44,6 +44,7 @@ struct Deep {
     generation: u64,
     /// When the disk was last searched; narrowing must not renew this timestamp.
     completed: Instant,
+    complete: bool,
     /// `None` once it has ended and `found` holds all of its results.
     run: Option<ops::Search>,
     found: Vec<Entry>,
@@ -64,7 +65,7 @@ impl Deep {
     fn take(&mut self) {
         let Some(run) = &self.run else { return };
         // Read before the results: once done, they are all there.
-        let done = run.done.load(std::sync::atomic::Ordering::Relaxed);
+        let done = run.done.load(std::sync::atomic::Ordering::Acquire);
         {
             let results = run.results.lock().unwrap();
             if results.len() > self.found.len() {
@@ -73,6 +74,9 @@ impl Deep {
         }
         self.taken = Instant::now();
         if done {
+            let progress = run.progress.lock().unwrap();
+            self.complete = progress.outcome == crate::search::Outcome::Complete && progress.skipped == 0;
+            drop(progress);
             self.completed = Instant::now();
             self.before.clear();
             self.run = None;
@@ -81,7 +85,7 @@ impl Deep {
 
     /// Whether `found` is everything below the root that matches the needle.
     fn whole(&self) -> bool {
-        self.run.is_none() && self.found.len() < DEEP_RESULTS_MAX
+        self.complete && self.run.is_none() && self.found.len() < DEEP_RESULTS_MAX
     }
 }
 
@@ -202,7 +206,7 @@ impl PaletteUi {
                     let run = ops::search_within(root.to_path_buf(), needle.to_string(), show_hidden, Some(DEEP_RESULTS_MAX), ctx.clone());
                     (Some(run), Vec::new(), kept)
                 };
-                self.deep = Some(Deep { needle: needle.to_string(), root: root.to_path_buf(), hidden: show_hidden, generation, completed, run, found, before, taken: Instant::now() });
+                self.deep = Some(Deep { needle: needle.to_string(), root: root.to_path_buf(), hidden: show_hidden, generation, completed, complete: narrowed, run, found, before, taken: Instant::now() });
             }
         }
         if let Some(deep) = &mut self.deep && let Some(run) = &deep.run {
@@ -748,6 +752,17 @@ mod tests {
             assert!(Instant::now() < deadline, "search did not finish");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn failed_walks_are_not_reused_as_complete_results() {
+        let root = std::env::temp_dir().join(format!("fc_missing_search_{}", std::process::id()));
+        let ctx = egui::Context::default();
+        let mut palette = PaletteUi::new(Mode::Places);
+        finish(&mut palette, &root, "re", 1, &ctx);
+        assert!(!palette.deep.as_ref().unwrap().whole());
+        finish(&mut palette, &root, "rep", 1, &ctx);
+        assert!(!palette.deep.as_ref().unwrap().whole());
     }
 
     #[test]

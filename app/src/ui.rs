@@ -414,7 +414,7 @@ impl App {
         // Before anything returns, so that a release is never missed.
         keymap::drop_held_pastes(&mut events, &mut self.paste_held);
         let away = events.iter().any(|e| matches!(e, egui::Event::WindowFocused(false)));
-        let busy = self.dialog.is_some() || !self.notices.is_empty() || ctx.text_edit_focused() || self.recording_shortcut() || self.palette.is_some();
+        let busy = ctx.any_popup_open() || self.search.as_ref().is_some_and(|s| s.owns_keyboard(ctx)) || self.dialog.is_some() || !self.notices.is_empty() || ctx.text_edit_focused() || self.recording_shortcut() || self.palette.is_some();
         if away || busy {
             self.matcher.clear();
         }

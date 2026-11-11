@@ -88,6 +88,24 @@ No administrator rights are needed for the per-user install, which is also avail
 </td></tr>
 </table>
 
+### File search
+
+**Ctrl+F** opens a search workspace. Choose a folder, include subfolders or hidden
+items, and match names with words, wildcard masks (`*.mp3;*.flac`) or a regular
+expression. **More filters** adds size ranges (`10 MB`, `1 GiB`), modification dates
+and excluded folder names or masks. An empty name searches by the other filters.
+
+Sort results by clicking column headings. Ctrl-click and Shift-click select multiple
+items; Ctrl+A selects all results collected so far. The result list supports Copy,
+Cut, Copy to, Move to, Trash with confirmation, and an independent preview. **Show
+in folder** locates the focused result in the file manager; double-click or Enter
+opens it. Arrow keys, Page Up/Down and Home/End move through results.
+
+**New search** keeps the current results in a separate search tab. Searches can be
+stopped without losing partial results. The status reports unreadable locations
+and result limits, so a partial search is distinguishable from a complete one.
+Closing a tab or the search window cancels its running searches.
+
 These are the defaults. Every shortcut can be changed, including key sequences such as `g h`, in **Settings → Customize shortcuts…**, where **Neovim-style keys** can also be turned on. See the [full reference](docs/DETAILS.md#keyboard-shortcuts).
 
 **With the mouse:** drag to move, <kbd>Ctrl</kbd>+drag to copy, drag on empty space to select with a rectangle. Drag a tab to a panel's edge to split it, and double-click a divider to even out the panels.

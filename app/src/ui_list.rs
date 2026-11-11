@@ -1272,10 +1272,14 @@ impl App {
     }
 
     pub fn preview_box(&mut self, ui: &mut Ui, r: Rect, e: Option<&Entry>) {
+        self.preview_content_box(ui, r, e, &self.preview);
+    }
+
+    pub(crate) fn preview_content_box(&self, ui: &mut Ui, r: Rect, e: Option<&Entry>, preview: &crate::preview::Preview) {
         let pal = self.pal;
         let p = ui.painter_at(r);
-        let current = e.is_some_and(|e| self.preview.path.as_ref() == Some(&e.path));
-        match (&self.preview.content, current) {
+        let current = e.is_some_and(|e| preview.path.as_ref() == Some(&e.path));
+        match (&preview.content, current) {
             (PreviewContent::Image(tex, ..) | PreviewContent::Model(tex, _) | PreviewContent::Page { texture: tex, .. }, true) => {
                 let s = tex.size_vec2();
                 let scale = (r.width() / s.x).min(r.height() / s.y).min(1.0);

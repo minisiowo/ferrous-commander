@@ -194,6 +194,26 @@ Several words must all match, in the name or in the folder shown beside it.
 | Tab / Shift+Tab | Next, previous list, keeping what was typed |
 | Esc, or the shortcut that opened it | Close |
 
+## File search
+
+Ctrl+F opens independent search tabs with an editable scope. Names support all-word
+matching, semicolon-separated wildcard masks and regular expressions. Filters cover
+file categories, inclusive byte-size bounds, local modification dates (the final
+calendar day is included), hidden items, recursion and folder exclusions. Linked
+folders are listed but not traversed. Date and pattern errors preserve old results.
+
+Results arrive incrementally in a sortable, virtualized table. Ctrl/Shift-click and
+Ctrl+A select result paths independently of the file pane. Copy/cut use the normal
+clipboard; direct transfers use the existing file-operation workers, and Trash asks
+for confirmation. Selecting both a parent and its descendants operates on the parent
+once. Show in folder navigates without discarding the search. Preview has a separate
+loader; inactive previews release their resources.
+
+Each tab retains at most 50,000 results (10,000 by default); reaching the selected
+limit marks the search as partial. Cancellation retains collected results. Failed
+reads are counted and the first 100 errors can be inspected. The quick palette uses
+the same walker with its smaller result limit. No permanent index is created.
+
 ## Working with files and panels
 
 Programs on removable drives and network locations ask before they run. Added drives and

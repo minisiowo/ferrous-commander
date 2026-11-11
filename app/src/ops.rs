@@ -534,7 +534,9 @@ fn move_by_copy(src: &Path, dest_dir: &Path, cancel: &AtomicBool) -> Result<Path
 
 // ---------- search ----------
 
-pub use crate::search::{Search, search, search_within};
+pub use crate::search::{Search, search_within};
+#[cfg(test)]
+pub use crate::search::search;
 
 #[cfg(all(test, any(windows, target_os = "linux")))]
 #[path = "chaos_tests.rs"]

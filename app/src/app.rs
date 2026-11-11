@@ -278,12 +278,7 @@ pub enum Notice {
     Problems { title: String, lines: Vec<String> },
 }
 
-pub struct SearchUi {
-    pub query: String,
-    pub root: PathBuf,
-    pub run: Option<ops::Search>,
-    pub focus: bool,
-}
+pub use crate::ui_search::SearchUi;
 
 /// Paths dragged between panes, tabs, folders and favourites.
 #[derive(Clone)]
@@ -591,6 +586,9 @@ impl App {
                 }
             p.tabs = tabs;
         }
+        let search = if !persist && std::env::var("FC_SHOT").unwrap_or_default().split(',').any(|look| look == "search") {
+            Some(SearchUi::screenshot(panes[0].path().to_path_buf(), st.show_hidden))
+        } else { None };
         let accent = hex(&st.accent);
         let tiles = st.tiles.clone().unwrap_or(Tile::Leaf(0)).sanitize(n);
         // A bounded queue and a few workers: slow network paths never block rendering
@@ -722,7 +720,7 @@ impl App {
             preview_window: false,
             quick: None,
             preview_closed: None,
-            search: None,
+            search,
             palette,
             settings_open: false,
             shot: shot.map(|file| ShotState {
@@ -1793,6 +1791,33 @@ impl App {
 
     // ---------------------------------------------------------------- jobs
 
+    pub(crate) fn copy_paths_to_clipboard(&mut self, sel: Vec<PathBuf>, cut: bool, _ctx: &egui::Context) {
+        if sel.is_empty() {
+            return;
+        }
+        #[cfg(windows)]
+        if let Err(e) = crate::file_transfer::write(&sel, cut) {
+            self.toast(ToastKind::Error, e);
+            return;
+        }
+        #[cfg(not(windows))]
+        _ctx.copy_text(
+            sel.iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        self.toast(
+            ToastKind::Info,
+            if cut {
+                "Selection cut to Clipboard"
+            } else {
+                "Selection copied to Clipboard"
+            },
+        );
+        self.clip = Some((sel.into(), cut));
+    }
+
     pub fn start_job(
         &mut self,
         kind: OpKind,
@@ -2006,30 +2031,7 @@ impl App {
             Act::Copy(i) | Act::Cut(i) => {
                 let cut = matches!(a, Act::Cut(_));
                 let sel = self.selection(i);
-                if sel.is_empty() {
-                    return;
-                }
-                #[cfg(windows)]
-                if let Err(e) = crate::file_transfer::write(&sel, cut) {
-                    self.toast(ToastKind::Error, e);
-                    return;
-                }
-                #[cfg(not(windows))]
-                ctx.copy_text(
-                    sel.iter()
-                        .map(|p| p.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
-                self.toast(
-                    ToastKind::Info,
-                    if cut {
-                        "Selection cut to Clipboard"
-                    } else {
-                        "Selection copied to Clipboard"
-                    },
-                );
-                self.clip = Some((sel.into(), cut));
+                self.copy_paths_to_clipboard(sel, cut, ctx);
             }
             Act::Paste(i, into) => {
                 let dest = into.unwrap_or_else(|| self.panes[i].path().to_path_buf());
@@ -2355,12 +2357,11 @@ impl App {
                 } else {
                     root
                 };
-                self.search = Some(SearchUi {
-                    query: String::new(),
-                    root,
-                    run: None,
-                    focus: true,
-                });
+                if let Some(search) = &mut self.search {
+                    search.add_tab(root, self.st.show_hidden);
+                } else {
+                    self.search = Some(SearchUi::new(root, self.st.show_hidden));
+                }
             }
         }
     }

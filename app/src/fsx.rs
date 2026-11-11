@@ -273,6 +273,17 @@ pub fn read_dir(dir: &Path) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
+/// Selected parents already include their children. Sorted paths make descendants
+/// contiguous, avoiding a quadratic scan of a large search/tree selection.
+pub fn outermost_paths(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.sort();
+    let mut kept: Vec<PathBuf> = Vec::with_capacity(paths.len());
+    for path in paths {
+        if kept.last().is_none_or(|parent| !path.starts_with(parent)) { kept.push(path); }
+    }
+    kept
+}
+
 pub fn friendly_err(e: &std::io::Error) -> String {
     match e.kind() {
         std::io::ErrorKind::PermissionDenied => "No access".into(),
