@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use egui::text::{CCursor, CCursorRange, CharIndex, LayoutJob, TextFormat, TextWrapping};
-use egui::{Align2, Color32, CornerRadius, Event, FontId, Frame, Key, Margin, Rect, Sense, Stroke, TextEdit, pos2, vec2};
+use egui::{Align2, Color32, CornerRadius, Event, FontId, Frame, Key, Margin, Rect, Sense, TextEdit, pos2, vec2};
 
 use crate::app::{Act, App, is_computer};
 use crate::fsx::{self, Entry, SortBy};
@@ -479,7 +479,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.painter().with_clip_rect(screen).rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(if pal.dark { 90 } else { 50 }));
                 Frame::NONE.fill(pal.content_fill()).corner_radius(pal.corner_large())
-                    .stroke(Stroke::new(1.0, pal.border)).shadow(ctx.global_style().visuals.popup_shadow)
+                    .stroke(pal.outline()).shadow(ctx.global_style().visuals.popup_shadow)
                     .show(ui, |ui| {
                         ui.set_width(width);
                         ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
@@ -511,10 +511,12 @@ impl App {
                         self.palette_rows(&mut palette, ui.ctx());
                         let line = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover()).0;
                         ui.painter().rect_filled(line, CornerRadius::ZERO, pal.border);
+                        let gutter = ui.spacing().scroll.allocated_width().max(6.0);
+                        let list_width = width - gutter;
                         egui::ScrollArea::vertical().max_height(row_h * ROWS_SHOWN as f32).show(ui, |ui| {
-                            ui.set_width(width);
+                            ui.set_width(list_width);
                             for n in 0..palette.rows.len() {
-                                let (r, response) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
+                                let (r, response) = ui.allocate_exact_size(vec2(list_width, row_h), Sense::click());
                                 let selected = n == palette.selected;
                                 // At once: an animation would trail behind a held arrow key and fast typing.
                                 if selected && std::mem::take(&mut palette.reveal) {
@@ -522,8 +524,8 @@ impl App {
                                 }
                                 // The rows scrolled out of sight cost their text's layout for nothing.
                                 if !ui.is_rect_visible(r) { continue; }
-                                // A rounded row stands clear of the edges, whose corners it would cross.
-                                let lit = if pal.round { r.shrink2(vec2(4.0, 0.0)) } else { r };
+                                // Match the scrollbar gutter on the left, with or without rounded corners.
+                                let lit = Rect::from_min_max(r.min + vec2(gutter, 0.0), r.max);
                                 if selected {
                                     ui.painter().rect_filled(lit, pal.corner(), pal.selection());
                                 } else if response.hovered() {
@@ -536,7 +538,7 @@ impl App {
                                 }
                             }
                             if palette.rows.is_empty() {
-                                let (r, _) = ui.allocate_exact_size(vec2(width, row_h), Sense::hover());
+                                let (r, _) = ui.allocate_exact_size(vec2(list_width, row_h), Sense::hover());
                                 let text = if palette::split(&palette.query).1.is_empty() { "Nothing here yet" } else { "Nothing matches" };
                                 ui.painter().text(pos2(r.min.x + 38.0, r.center().y), Align2::LEFT_CENTER, text, FontId::proportional(self.st.font_size), pal.text_weak);
                             }
