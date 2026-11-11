@@ -33,6 +33,23 @@ const REOPEN_PAUSE: Duration = Duration::from_millis(300);
 const SIZE_LOCK: Duration = Duration::from_millis(520);
 /// The smallest window a preview opens at: room for the control bar and a card.
 const MIN_OPEN: Vec2 = vec2(480.0, 320.0);
+const CONTROL_H: f32 = 36.0;
+const CONTROL_MARGIN: f32 = 12.0;
+const MUSIC_GAP: f32 = 12.0;
+const CONTENT_GAP: f32 = 20.0;
+const INFO_ROW_H: f32 = 24.0;
+const INFO_PADDING: f32 = 28.0;
+const INFO_PICTURE_GAP: f32 = 24.0;
+
+/// The same footer budget sizes the window and keeps its metadata clear of controls.
+fn info_footer_height(music: bool) -> f32 {
+    CONTROL_MARGIN + CONTROL_H + CONTENT_GAP + if music { MUSIC_GAP + sound::TRANSPORT_H } else { 0.0 }
+}
+
+fn navigation_rect(body: Rect, width: f32) -> Rect {
+    Rect::from_center_size(pos2(body.center().x, body.max.y - CONTROL_MARGIN - CONTROL_H / 2.0), vec2(width, CONTROL_H))
+}
+
 const MAX_ZOOM: f32 = 32.0;
 /// Degrees a 3D model turns for each point the pointer moves.
 const TURN_PER_POINT: f32 = 0.4;
@@ -162,7 +179,7 @@ fn page_body(orig: [u32; 2], largest: Vec2) -> Vec2 {
 }
 
 /// The window that suits `content`, no larger than `largest`.
-fn fitting_size(ctx: &egui::Context, content: &PreviewContent, largest: Vec2) -> Vec2 {
+fn fitting_size(ctx: &egui::Context, content: &PreviewContent, largest: Vec2, music: bool) -> Vec2 {
     const SCROLLBAR: f32 = 10.0;
     let mono = FontId::monospace(13.0);
     let (char_w, line_h) = ctx.fonts_mut(|f| (f.glyph_width(&mono, '0'), f.row_height(&mono)));
@@ -192,7 +209,7 @@ fn fitting_size(ctx: &egui::Context, content: &PreviewContent, largest: Vec2) ->
         PreviewContent::Archive(entries, ..) => vec2(READING_WIDTH, (entries.len() + 1) as f32 * list_step + SCROLLBAR),
         PreviewContent::Info(rows, cover, _) => {
             let picture = cover.as_ref().map_or(Vec2::splat(96.0), |(_, size)| picture_body(*size, ctx.pixels_per_point()) - Vec2::splat(24.0));
-            vec2(picture.x.max(504.0) + 56.0, picture.y + 24.0 + rows.len() as f32 * 24.0 + 56.0 + sound::TRANSPORT_H + 80.0)
+            vec2(picture.x.max(504.0) + 56.0, picture.y + INFO_PICTURE_GAP + rows.len() as f32 * INFO_ROW_H + INFO_PADDING * 2.0 + info_footer_height(music))
         }
         // Laid out only once shown, so its length is not known yet: a page to read.
         PreviewContent::Doc(_) => vec2(READING_WIDTH + 64.0, largest.y),
@@ -277,7 +294,7 @@ impl App {
         if !quick.fitted && !matches!(self.preview.content, PreviewContent::Loading | PreviewContent::None) {
             quick.fitted = true;
             quick.sized = Instant::now();
-            let size = fitting_size(ctx, &self.preview.content, quick.size);
+            let size = fitting_size(ctx, &self.preview.content, quick.size, sound::playable(e.kind, e.ext()));
             if let Some(position) = &mut quick.position { *position += (quick.size - size) / 2.0; }
             quick.size = size;
         }
@@ -524,7 +541,8 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
     }
     // Keep music controls above the navigation overlay even in a short window.
     let music = sound::playable(s.kind, &s.ext).then(|| music_strip(body));
-    let content_body = music.map_or(body, |strip| Rect::from_min_max(body.min, pos2(body.max.x, strip.min.y - 20.0)));
+    let footer = if music.is_some() || matches!(s.content, PreviewContent::Info(..)) { info_footer_height(music.is_some()) } else { 0.0 };
+    let content_body = Rect::from_min_max(body.min, pos2(body.max.x, body.max.y - footer));
     let mut child = ui.new_child(UiBuilder::new().max_rect(content_body));
     child.set_clip_rect(content_body);
     child.multiply_opacity(t);
@@ -551,7 +569,7 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
         PreviewContent::Archive(entries, total, trimmed) => archive_view(&mut child, s, entries, *total, *trimmed, content_body),
         PreviewContent::Info(rows, cover, _) => {
             let picture = cover.as_ref().map(|(frames, size)| (playing_frame(s, &ctx, frames), *size));
-            info_view(&child, s, rows, picture, content_body);
+            info_view(&mut child, s, rows, picture, content_body);
         }
         PreviewContent::Folder { folders, files, size } => {
             let text = format!("{folders} folders, {files} files\n{}", fsx::fmt_size(*size, s.mebibytes));
@@ -1009,25 +1027,41 @@ fn archive_view(ui: &mut Ui, s: &mut Shared, entries: &[ArchiveEntry], total: u6
     s.view.offset = output.state.clamped_offset().y;
 }
 
-fn info_view(ui: &Ui, s: &Shared, rows: &[(String, String)], cover: Option<(&egui::TextureHandle, [u32; 2])>, body: Rect) {
+fn info_view(ui: &mut Ui, s: &mut Shared, rows: &[(String, String)], cover: Option<(&egui::TextureHandle, [u32; 2])>, body: Rect) {
+    let picture_min = if cover.is_some() { 64.0 } else { 96.0 };
+    let minimum = picture_min + INFO_PICTURE_GAP + rows.len() as f32 * INFO_ROW_H + INFO_PADDING * 2.0;
+    if minimum <= body.height() {
+        info_contents(ui, s, rows, cover, body);
+        return;
+    }
+    let output = egui::ScrollArea::vertical().id_salt("preview_info")
+        .auto_shrink([false, false]).vertical_scroll_offset(s.view.offset)
+        .show(ui, |ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), minimum), Sense::hover());
+            info_contents(ui, s, rows, cover, r);
+        });
+    s.view.offset = output.state.clamped_offset().y;
+}
+
+fn info_contents(ui: &Ui, s: &Shared, rows: &[(String, String)], cover: Option<(&egui::TextureHandle, [u32; 2])>, body: Rect) {
     let pal = s.pal;
     let p = ui.painter_at(body);
-    let (row_h, table_h) = (24.0, rows.len() as f32 * 24.0);
-    let area = body.shrink(28.0);
-    let picture_h = (area.height() - table_h - 24.0).max(64.0);
+    let (row_h, table_h) = (INFO_ROW_H, rows.len() as f32 * INFO_ROW_H);
+    let area = body.shrink(INFO_PADDING);
+    let picture_h = (area.height() - table_h - INFO_PICTURE_GAP).max(64.0);
     let top = if let Some((tex, size)) = cover {
         let aspect = size[0].max(1) as f32 / size[1].max(1) as f32;
         let h = picture_h.min(area.width() / aspect);
-        let total = h + 24.0 + table_h;
+        let total = h + INFO_PICTURE_GAP + table_h;
         let at = body.center().y - total / 2.0;
         p.image(tex.id(), Rect::from_center_size(pos2(body.center().x, at + h / 2.0), vec2(h * aspect, h)), unit_uv(), Color32::WHITE);
-        at + h + 24.0
+        at + h + INFO_PICTURE_GAP
     } else {
         let side = 96.0;
-        let total = side + 24.0 + table_h;
+        let total = side + INFO_PICTURE_GAP + table_h;
         let at = body.center().y - total / 2.0;
         icons::entry(&p, Rect::from_center_size(pos2(body.center().x, at + side / 2.0), Vec2::splat(side)), s.kind, &s.ext, pal.dark, true);
-        at + side + 24.0
+        at + side + INFO_PICTURE_GAP
     };
     let font = FontId::proportional(13.0);
     let middle = body.center().x;
@@ -1070,7 +1104,7 @@ fn hex_view(ui: &mut Ui, s: &mut Shared, bytes: &[u8], total: u64, body: Rect) {
 
 fn music_strip(body: Rect) -> Rect {
     Rect::from_center_size(
-        pos2(body.center().x, body.max.y - 60.0 - sound::TRANSPORT_H / 2.0),
+        pos2(body.center().x, navigation_rect(body, 0.0).min.y - MUSIC_GAP - sound::TRANSPORT_H / 2.0),
         vec2((body.width() - 40.0).clamp(sound::TRANSPORT_H, 420.0), sound::TRANSPORT_H),
     )
 }
@@ -1082,7 +1116,7 @@ fn control_bar(ui: &mut Ui, s: &mut Shared, body: Rect, ctx: &egui::Context, ima
     if opacity <= 0.0 { return; }
     let pal = s.pal;
     let width = 170.0 + if image { 130.0 } else { 0.0 } + if pages.is_some() { 110.0 } else { 0.0 };
-    let r = Rect::from_center_size(pos2(body.center().x, body.max.y - 30.0), vec2(width, 36.0));
+    let r = navigation_rect(body, width);
     let mut bar = ui.new_child(UiBuilder::new().max_rect(r).layout(egui::Layout::left_to_right(egui::Align::Center)));
     bar.multiply_opacity(opacity);
     bar.painter().rect_filled(r, pal.corner_large(), blend(pal.raised, pal.window, 0.2));
@@ -1198,7 +1232,7 @@ mod tests {
         let fit = |content: &PreviewContent| {
             let ctx = egui::Context::default();
             let mut size = Vec2::ZERO;
-            let mut out = ctx.run_ui(Default::default(), |ui| size = fitting_size(ui.ctx(), content, largest));
+            let mut out = ctx.run_ui(Default::default(), |ui| size = fitting_size(ui.ctx(), content, largest, false));
             out.textures_delta.clear();
             size
         };
@@ -1270,6 +1304,43 @@ mod tests {
     }
 
     #[test]
+    fn info_windows_only_reserve_music_controls_for_audio() {
+        let ctx = egui::Context::default();
+        let content = PreviewContent::Info(Arc::new(vec![("Tag".into(), "Value".into()); 6]), None, false);
+        let mut sizes = [Vec2::ZERO; 2];
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            for (i, music) in [false, true].into_iter().enumerate() {
+                sizes[i] = fitting_size(ui.ctx(), &content, vec2(1400.0, 900.0), music);
+            }
+        });
+        out.textures_delta.clear();
+        assert_eq!(sizes[1] - sizes[0], vec2(0.0, sound::TRANSPORT_H + MUSIC_GAP));
+    }
+
+    #[test]
+    fn audio_metadata_scrolls_in_a_small_window_without_moving_controls() {
+        use egui::{Event, MouseWheelUnit, Modifiers, RawInput};
+        let ctx = egui::Context::default();
+        let mut s = music_on_screen(&ctx);
+        s.content = PreviewContent::Info(Arc::new((0..12).map(|i| (format!("Tag{i}"), "Value".into())).collect()), None, false);
+        let full = Rect::from_min_size(Pos2::ZERO, vec2(320.0, 240.0));
+        let mut last_visible = false;
+        for i in 0..12 {
+            let events = if i == 2 {
+                vec![Event::PointerMoved(pos2(160.0, 80.0)), Event::MouseWheel { unit: MouseWheelUnit::Point, delta: vec2(0.0, -1000.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE, source: egui::MouseWheelSource::Wheel }]
+            } else { vec![] };
+            let mut out = ctx.run_ui(RawInput { screen_rect: Some(full), events, ..Default::default() }, |ui| draw(ui, &mut s, ViewportClass::Deferred));
+            out.textures_delta.clear();
+            last_visible |= out.shapes.iter().any(|shape| match &shape.shape {
+                egui::Shape::Text(t) if t.galley.job.text == "Tag11" => shape.clip_rect.intersects(t.galley.rect.translate(t.pos.to_vec2())),
+                _ => false,
+            });
+        }
+        assert!(s.view.offset > 0.0 && last_visible, "the last metadata row must be reachable");
+        assert!(s.commands.is_empty(), "scrolling metadata does not seek or navigate");
+    }
+
+    #[test]
     fn music_controls_stay_visible_and_clickable_above_navigation() {
         use egui::{Event, Modifiers, PointerButton, RawInput};
         for size in [vec2(320.0, 240.0), vec2(560.0, 420.0), vec2(800.0, 600.0)] {
@@ -1278,7 +1349,7 @@ mod tests {
             let full = Rect::from_min_size(Pos2::ZERO, size);
             let body = Rect::from_min_max(pos2(0.0, BAR_H), full.max);
             let strip = music_strip(body);
-            let navigation = Rect::from_center_size(pos2(body.center().x, body.max.y - 30.0), vec2(170.0, 36.0));
+            let navigation = navigation_rect(body, 170.0);
             assert!(body.contains_rect(strip) && !strip.intersects(navigation));
             let at = strip.left_center() + vec2(sound::TRANSPORT_H / 2.0, 0.0);
             let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
