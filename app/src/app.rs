@@ -437,7 +437,7 @@ pub struct App {
     last_save: Instant,
     last_evict: Instant,
     watched_generation: u64,
-    applied: Option<(ThemeName, String, u32, Option<crate::omarchy::Colors>, bool, bool)>,
+    applied: Option<(ThemeName, String, u32, Option<crate::omarchy::Colors>, bool, bool, bool)>,
     /// The desktop's material is showing behind the main window right now.
     pub see_through: bool,
     /// This Windows has no such material to show.
@@ -448,6 +448,8 @@ pub struct App {
     persist: bool,
     generation: u64,
     pub drop_zones: Vec<(egui::Rect, DropTarget)>,
+    /// The tabs drawn this frame: the panel whose strip shows the tab, the panel and tab it is, and where.
+    pub tab_rects: Vec<(usize, usize, usize, egui::Rect)>,
     /// The window is too small for the layout, so one panel shows and lists every tab.
     pub panels_stacked: bool,
     /// The room the panels had in the last frame.
@@ -508,6 +510,7 @@ impl App {
             let look = std::env::var("FC_SHOT").unwrap_or_default();
             // The same picture on every system, whatever its default.
             st.rounded = look.contains("round");
+            st.outlines = !look.contains("plain");
             if look.contains("columns") {
                 st.layout = Layout::Columns;
             }
@@ -724,6 +727,7 @@ impl App {
             persist,
             generation: 1,
             drop_zones: Vec::new(),
+            tab_rects: Vec::new(),
             panels_stacked: false,
             panels_area: egui::Vec2::ZERO,
             acts: Vec::new(),
@@ -851,6 +855,7 @@ impl App {
             self.omarchy_colors,
             self.see_through,
             self.st.rounded,
+            self.st.outlines,
         );
         if self.applied.as_ref() != Some(&key) {
             self.pal = match self.omarchy_colors {
@@ -859,6 +864,7 @@ impl App {
             };
             self.pal.glass = self.see_through;
             self.pal.round = self.st.rounded;
+            self.pal.outlined = self.st.outlines;
             self.pal.apply(ctx);
             let fs = self.st.font_size;
             ctx.global_style_mut(|s| {
@@ -879,6 +885,7 @@ impl App {
             self.applied = Some(key);
         }
         self.drop_zones.clear();
+        self.tab_rects.clear();
         #[cfg(windows)]
         {
             let sequence = crate::file_transfer::sequence();

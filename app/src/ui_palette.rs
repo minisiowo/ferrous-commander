@@ -332,6 +332,7 @@ impl App {
             (Setting::Mebibytes, "Sizes in MiB, as in Windows Explorer", Some(st.mebibytes)),
             (Setting::HistoryCard, "History in the sidebar", Some(st.show_history)),
             (Setting::Rounded, "Rounded corners", Some(st.rounded)),
+            (Setting::Outlines, "Outlines around panels and cards", Some(st.outlines)),
             (Setting::NeovimKeys, "Neovim-style keys", Some(st.vim_keys)),
             (Setting::WhichKey, "Hints for the next key of a sequence", Some(st.which_key)),
             (Setting::FontLarger, "Larger text", None),
@@ -698,6 +699,7 @@ impl App {
                     Setting::WhichKey => st.which_key = !st.which_key,
                     Setting::HistoryCard => st.show_history = !st.show_history,
                     Setting::Rounded => st.rounded = !st.rounded,
+                    Setting::Outlines => st.outlines = !st.outlines,
                     Setting::FontLarger => st.font_size = (st.font_size + 1.0).min(18.0),
                     Setting::FontSmaller => st.font_size = (st.font_size - 1.0).max(10.0),
                     Setting::OpenSettings => {

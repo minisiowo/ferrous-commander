@@ -76,6 +76,8 @@ pub struct Palette {
     pub glass: bool,
     /// Corners are rounded instead of square.
     pub round: bool,
+    /// Blocks have a thin line around them.
+    pub outlined: bool,
 }
 
 /// `radius` on the two upper corners only: a tab, or the bar at the top of a window.
@@ -117,9 +119,11 @@ impl Palette {
             // Omarchy shows until its colours are read, or when it is not there any more.
             ThemeName::Dark | ThemeName::Omarchy => Palette {
                 dark: true,
-                window: hex("#202020"),
+                // Darkest behind, so that every block stands out from it: the panel in use
+                // most, the others less, as in the themes made from two colours.
+                window: hex("#161616"),
                 panel: hex("#202020"),
-                inactive: hex("#181818"),
+                inactive: hex("#1B1B1B"),
                 card: hex("#242424"),
                 raised: hex("#2E2E2E"),
                 border: hex("#151515"),
@@ -132,6 +136,7 @@ impl Palette {
                 accent,
                 glass: false,
                 round: false,
+                outlined: true,
             },
             ThemeName::TokyoNight => preset(true, "#1a1b26", "#a9b1d6", "#7aa2f7"),
             ThemeName::Gruvbox => preset(true, "#282828", "#d4be98", "#7daea3"),
@@ -180,6 +185,12 @@ impl Palette {
         }
     }
 
+    /// The thin line around every block: a panel, a card of the sidebar. A theme whose
+    /// background is nearly black leaves no room for shades to tell its blocks apart.
+    pub fn outline(&self) -> Stroke {
+        if self.outlined { Stroke::new(1.0, blend(self.panel, self.text, 0.12)) } else { Stroke::NONE }
+    }
+
     /// The corners of small things: buttons, fields, highlights, the rows of a card.
     pub fn corner(&self) -> CornerRadius {
         CornerRadius::same(if self.round { 4 } else { 0 })
@@ -188,6 +199,14 @@ impl Palette {
     /// The corners of thin bars, which a larger radius would turn into dots.
     pub fn corner_small(&self) -> CornerRadius {
         CornerRadius::same(if self.round { 2 } else { 0 })
+    }
+
+    /// The corners of something that lies `gap` inside the edge of a surface and follows
+    /// its corner. With any other radius the two curves come closer at the corner than
+    /// along the sides.
+    pub fn corner_within(&self, gap: f32) -> CornerRadius {
+        let outer = f32::from(self.corner_large().nw);
+        CornerRadius::same((outer - gap).max(0.0).round() as u8)
     }
 
     /// The corners of surfaces: windows, menus, cards.
@@ -364,6 +383,8 @@ mod tests {
             assert_eq!((v.widgets.inactive.corner_radius, v.widgets.hovered.corner_radius), (small, small));
             assert_eq!((v.window_corner_radius, v.menu_corner_radius), (large, large));
         }
+        assert!(square.outlined && square.outline().width == 1.0, "blocks are outlined unless turned off");
+        assert_eq!(Palette { outlined: false, ..square }.outline(), Stroke::NONE);
         assert_eq!(top(round.corner_large()), CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 });
         assert_eq!(bottom(inside(round.corner_large())), CornerRadius { nw: 0, ne: 0, sw: 7, se: 7 });
     }

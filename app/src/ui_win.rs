@@ -495,6 +495,9 @@ impl App {
                     ui.selectable_value(&mut self.st.rounded, true, "Rounded");
                 });
                 ui.end_row();
+                ui.label("Outlines");
+                ui.checkbox(&mut self.st.outlines, "A thin line around panels and sidebar cards");
+                ui.end_row();
                 #[cfg(windows)]
                 {
                     ui.label("Window");

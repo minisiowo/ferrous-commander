@@ -76,7 +76,7 @@ pub fn split(text: &str) -> (Mode, &str) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Setting {
     Extensions, AgeColors, Mebibytes, FoldersOnTop, Sidebar, PreviewPane, Tree, ColumnsLayout,
-    NeovimKeys, WhichKey, HistoryCard, Rounded, FontLarger, FontSmaller,
+    NeovimKeys, WhichKey, HistoryCard, Rounded, Outlines, FontLarger, FontSmaller,
     OpenSettings, OpenShortcuts, ConfigFolder,
 }
 

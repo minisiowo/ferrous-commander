@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Frame, Key, Margin, Modifiers, Rect, RichText, Sense,
+    Align2, Color32, FontId, Frame, Key, Margin, Modifiers, Rect, RichText, Sense,
     Stroke, Ui, UiBuilder, pos2, vec2,
 };
 
@@ -16,21 +16,18 @@ use crate::theme::{Palette, ThemeName, blend, hex};
 
 // ---- sizes ----
 pub const SIDEBAR_W: f32 = crate::defaults::SIDEBAR_WIDTH;
-/// The space around every sidebar card: above and below it, and beside the file panels.
+/// The space around every block, square or round: the sidebar's cards and the file panels,
+/// between one another and from the window's edges.
 const SIDEBAR_GAP: i8 = 8;
 /// The part of that space beside the file panels which belongs to them.
 const PANELS_LEFT: i8 = 2;
 /// The row of tools at the sidebar's foot: seven buttons 26 wide, 2 apart. It cannot narrow.
 const SIDEBAR_TOOLS_W: f32 = 7.0 * 26.0 + 6.0 * 2.0;
 
-fn sidebar_left(round: bool) -> i8 {
-    if round { SIDEBAR_GAP } else { 6 }
-}
-
 /// The narrowest the sidebar goes: its tools and the room around them. Asking egui for
 /// less would let the edge be dragged further than the sidebar can follow.
-pub(crate) fn sidebar_min(round: bool) -> f32 {
-    SIDEBAR_TOOLS_W + f32::from(sidebar_left(round) + SIDEBAR_GAP - PANELS_LEFT)
+pub(crate) fn sidebar_min() -> f32 {
+    SIDEBAR_TOOLS_W + f32::from(SIDEBAR_GAP + SIDEBAR_GAP - PANELS_LEFT)
 }
 pub const TOOLBAR_H: f32 = 36.0;
 pub const DETAILS_H: f32 = crate::defaults::DETAILS_HEIGHT;
@@ -208,16 +205,12 @@ pub fn card<R>(
     pal: &Palette,
     add: impl FnOnce(&mut Ui) -> R,
 ) -> egui::InnerResponse<R> {
-    let stroke = if pal.card == pal.window {
-        Stroke::new(1.0, pal.border)
-    } else {
-        Stroke::NONE
-    };
     Frame::NONE
         .fill(pal.surface(pal.card))
         .corner_radius(pal.corner_large())
         .inner_margin(Margin::symmetric(8, 6))
-        .stroke(stroke)
+        // Without outlines a card the colour of the window would still be lost in it.
+        .stroke(if !pal.outlined && pal.card == pal.window { Stroke::new(1.0, pal.border) } else { pal.outline() })
         .show(ui, add)
 }
 
@@ -315,14 +308,47 @@ fn highlight_drop_row(ui: &Ui, row: Rect, color: Color32) {
 
 const NO_ROOM_TO_SPLIT: &str = "Not enough room to split";
 
-/// How wide each tab is in a strip of this width holding `tabs` tabs.
-fn tab_width(strip: f32, tabs: usize) -> f32 {
-    ((strip - 60.0 - 80.0) / tabs as f32).clamp(12.0, 190.0)
+/// A tab is no wider than this, however long its name.
+const TAB_MAX: f32 = 190.0;
+/// A short name still leaves a tab wide enough to hit and to tell from its close button.
+const TAB_MIN: f32 = 84.0;
+/// What a tab holds beside its name: the folder, the close button, the room around them
+/// and the gap to the next tab.
+const TAB_AROUND: f32 = 54.0;
+
+/// How wide each tab is in a strip of this width: as wide as its name `wanted`, within
+/// limits. In a strip too short for them all, the widest give way first.
+pub(crate) fn tab_widths(strip: f32, wanted: &[f32]) -> Vec<f32> {
+    let room = (strip - 60.0 - 80.0).max(0.0);
+    let natural: Vec<f32> = wanted.iter().map(|w| (w + TAB_AROUND).ceil().clamp(TAB_MIN, TAB_MAX)).collect();
+    let fits = |cap: f32| natural.iter().map(|w| w.min(cap)).sum::<f32>() <= room;
+    if fits(TAB_MAX) { return natural; }
+    // The widest cap under which they fit, but never so narrow that a tab is lost.
+    let (mut low, mut high) = (12.0, TAB_MAX);
+    for _ in 0..16 {
+        let middle = (low + high) / 2.0;
+        if fits(middle) { low = middle; } else { high = middle; }
+    }
+    natural.iter().map(|w| w.min(low.floor())).collect()
+}
+
+fn tab_name(path: &Path) -> String {
+    if is_computer(path) { "This PC".to_string() } else { fsx::display_name(path) }
 }
 
 impl App {
     /// Every tab the strip of panel `i` lists, as panel and tab. With the panels stacked
     /// that is all of them, in the order of the layout.
+    /// How wide the tabs in `slots` are in a strip of this width. See `tab_widths`.
+    fn tab_widths(&self, ui: &Ui, slots: &[(usize, usize)], strip: f32) -> Vec<f32> {
+        let font = FontId::proportional(self.st.font_size);
+        let wanted: Vec<f32> = slots.iter().map(|&(pane, tab)| {
+            let name = tab_name(&self.panes[pane].tabs[tab].path);
+            ui.painter().layout_no_wrap(name, font.clone(), Color32::WHITE).size().x
+        }).collect();
+        tab_widths(strip, &wanted)
+    }
+
     pub fn tab_slots(&self, i: usize) -> Vec<(usize, usize)> {
         let mut panels = Vec::new();
         if self.panels_stacked { self.tiles.leaves(&mut panels); }
@@ -338,19 +364,19 @@ impl App {
         self.keyboard(&ctx);
         let pal = self.pal;
 
-        // Round blocks float: the same gap lies around them as between the sidebar's cards.
-        let around = if pal.round { SIDEBAR_GAP } else { 0 };
-        let panels_left = if pal.round && !self.st.show_sidebar { SIDEBAR_GAP } else { PANELS_LEFT };
+        // The same gap lies around the blocks as between the sidebar's cards.
+        let around = SIDEBAR_GAP;
+        let panels_left = if self.st.show_sidebar { PANELS_LEFT } else { SIDEBAR_GAP };
         if self.st.show_sidebar {
             egui::Panel::left("sidebar")
                 .resizable(true)
                 .default_size(SIDEBAR_W)
-                .size_range(sidebar_min(pal.round)..=420.0)
+                .size_range(sidebar_min()..=420.0)
                 .show_separator_line(false)
                 .frame(Frame::NONE.fill(pal.backdrop()).inner_margin(Margin {
-                    left: sidebar_left(pal.round),
+                    left: SIDEBAR_GAP,
                     right: SIDEBAR_GAP - panels_left,
-                    // Level with the file panels, which start at the very top when square.
+                    // Level with the file panels.
                     top: around,
                     bottom: 0,
                 }))
@@ -1301,11 +1327,7 @@ impl App {
     /// a double-click on a divider makes both sides equal.
     fn browsers(&mut self, ui: &mut Ui) {
         let full = ui.max_rect();
-        // The lines between the panels. On glass the gaps themselves are the lines.
-        // Round panels stand apart like the sidebar's cards, with no lines between them.
-        if !self.pal.glass && !self.pal.round {
-            ui.painter().rect_filled(full, CornerRadius::ZERO, self.pal.border);
-        }
+        // The panels stand apart like the sidebar's cards, with no lines between them.
         let mut rects = Vec::new();
         let mut divs = Vec::new();
         self.panels_area = full.size();
@@ -1317,13 +1339,11 @@ impl App {
         } else {
             self.tiles
                 .layout(full, &mut rects, &mut divs, &mut Vec::new());
-            if self.pal.round {
-                // Each panel after the first leaves the rest of a card's gap before it.
-                let lead = f32::from(SIDEBAR_GAP) - crate::tiles::GAP;
-                for (_, r) in &mut rects {
-                    if r.min.x > full.min.x + 0.5 { r.min.x += lead; }
-                    if r.min.y > full.min.y + 0.5 { r.min.y += lead; }
-                }
+            // Each panel after the first leaves the rest of a card's gap before it.
+            let lead = f32::from(SIDEBAR_GAP) - crate::tiles::GAP;
+            for (_, r) in &mut rects {
+                if r.min.x > full.min.x + 0.5 { r.min.x += lead; }
+                if r.min.y > full.min.y + 0.5 { r.min.y += lead; }
             }
         }
         for (i, r) in rects.clone() {
@@ -1331,10 +1351,12 @@ impl App {
                 self.pane(ui, i, r);
             }
         }
-        // After the panels, so that a one-point line can be grabbed a little beside it too.
+        // The whole gap between two panels moves the split, and the split follows the gap's middle.
+        let gap = f32::from(SIDEBAR_GAP);
         for d in &divs {
             let id = ui.scope_id().with(("divider", &d.path));
-            let resp = ui.interact(d.rect.expand(2.0), id, Sense::click_and_drag());
+            let between = Rect::from_min_size(d.rect.min, if d.vertical { vec2(d.rect.width(), gap) } else { vec2(gap, d.rect.height()) });
+            let resp = ui.interact(between, id, Sense::click_and_drag());
             let icon = if d.vertical {
                 egui::CursorIcon::ResizeVertical
             } else {
@@ -1342,18 +1364,20 @@ impl App {
             };
             if resp.hovered() || resp.dragged() {
                 ui.ctx().set_cursor_icon(icon);
+                let line = if d.vertical { vec2(between.width(), 2.0) } else { vec2(2.0, between.height()) };
                 ui.painter().rect_filled(
-                    d.rect.expand(1.0),
-                    CornerRadius::ZERO,
+                    Rect::from_center_size(between.center(), line),
+                    self.pal.corner_small(),
                     blend(self.pal.border, self.pal.accent, 0.6),
                 );
             }
             if resp.dragged()
                 && let Some(pos) = resp.interact_pointer_pos() {
+                    // The split is the gap's first point, half a gap before the pointer.
                     let ratio = if d.vertical {
-                        (pos.y - d.area.min.y) / d.area.height().max(1.0)
+                        (pos.y - gap / 2.0 - d.area.min.y) / d.area.height().max(1.0)
                     } else {
-                        (pos.x - d.area.min.x) / d.area.width().max(1.0)
+                        (pos.x - gap / 2.0 - d.area.min.x) / d.area.width().max(1.0)
                     };
                     self.tiles.set_ratio(&d.path, ratio);
                 }
@@ -1374,9 +1398,11 @@ impl App {
                     let edge = (0..4).min_by(|a, b| distances[*a].total_cmp(&distances[*b])).unwrap();
                     let split = (!in_tabs && distances[edge] < 0.25).then_some((edge >= 2, edge == 0 || edge == 2));
                     let slots = self.tab_slots(*target);
-                    let w = tab_width(r.width() - 2.0, slots.len());
+                    // The tabs of this strip as they were just drawn, each with the gap after it.
+                    let drawn: Vec<Rect> = self.tab_rects.iter().filter(|(strip, ..)| strip == target).map(|(.., rect)| *rect).collect();
+                    // Past the middle of a tab means after it.
                     let slot = if in_tabs {
-                        ((pos.x - r.min.x - 5.0 + w / 2.0) / w).floor().max(0.0) as usize
+                        drawn.iter().take_while(|tab| pos.x > tab.center().x).count()
                     } else { slots.len() }.min(slots.len());
                     // Dropped on the list it joins the panel in view; on the strip, its neighbours.
                     let (place, at) = match slots.get(slot) {
@@ -1406,7 +1432,10 @@ impl App {
                                 _ => preview.min.y = r.center().y,
                             }
                         } else if in_tabs {
-                            let x = (r.min.x + 5.0 + slot as f32 * w).min(r.max.x - 2.0);
+                            let x = match drawn.get(slot) {
+                                Some(tab) => tab.min.x,
+                                None => drawn.last().map_or(r.min.x + 5.0, |tab| tab.max.x + 2.0),
+                            }.min(r.max.x - 2.0);
                             // From the top of a tab to its bottom: see `tab_bar`, inside the panel's 1-point edge.
                             preview = Rect::from_min_max(pos2(x, r.min.y + 1.0 + 4.0), pos2(x + 2.0, r.min.y + 1.0 + TAB_H));
                         }
@@ -1495,6 +1524,7 @@ impl App {
             pal.panel
         };
         painter.rect_filled(rect, pal.corner_large(), pal.surface(fill));
+        painter.rect_stroke(rect, pal.corner_large(), pal.outline(), egui::StrokeKind::Inside);
         let mut r = rect.shrink(1.0);
         // Reserve the summary before any controls, even in a very short tile.
         let status = take_bottom(&mut r, STATUS_H);
@@ -1551,14 +1581,19 @@ impl App {
         let pal = self.pal;
         let p = ui.painter_at(r);
         let slots = self.tab_slots(i);
-        let w = tab_width(r.width(), slots.len());
-        let mut x = r.min.x + 4.0;
+        let widths = self.tab_widths(ui, &slots, r.width());
+        // A tab lies this far inside the panel's edge, at the left and above: 4 here and the
+        // 1 by which the panel's content is inset.
+        const TAB_INSET: f32 = 4.0;
+        let corner = pal.corner_within(TAB_INSET + 1.0);
+        let mut x = r.min.x + TAB_INSET;
         let font = FontId::proportional(self.st.font_size);
         let shown = i;
         // From here to the end of the loop, `i` is the panel the tab really belongs to.
-        for (i, t) in slots {
-            let tr = Rect::from_min_size(pos2(x, r.min.y + 4.0), vec2(w - 2.0, r.height() - 4.0));
+        for ((i, t), w) in slots.into_iter().zip(widths) {
+            let tr = Rect::from_min_size(pos2(x, r.min.y + TAB_INSET), vec2(w - 2.0, r.height() - TAB_INSET));
             x += w;
+            self.tab_rects.push((shown, i, t, tr));
             let id = ui.scope_id().with(("tab", i, t));
             let resp = ui.interact(tr, id, Sense::click_and_drag());
             if resp.drag_started() {
@@ -1570,7 +1605,7 @@ impl App {
             let selected = i == shown && self.panes[i].active == t;
             let look = crate::theme::tab_look(&pal, selected, self.active == shown, resp.hovered());
             let bg = look.fill;
-            p.rect_filled(tr, pal.corner(), bg);
+            p.rect_filled(tr, corner, bg);
             let path = self.panes[i].tabs[t].path.clone();
             let ir =
                 Rect::from_min_size(pos2(tr.min.x + 8.0, tr.center().y - 7.0), vec2(14.0, 14.0));
@@ -1579,11 +1614,7 @@ impl App {
             } else {
                 icons::folder(&p, ir, self.folder_color(&path));
             }
-            let name = if is_computer(&path) {
-                "This PC".to_string()
-            } else {
-                fsx::display_name(&path)
-            };
+            let name = tab_name(&path);
             let show_x = true;
             let tw = tr.width() - 32.0 - if show_x { 18.0 } else { 0.0 };
             p.text(

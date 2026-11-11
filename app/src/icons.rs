@@ -226,9 +226,11 @@ pub fn glyph(p: &Painter, r: Rect, name: &str, c: Color32) {
             }
         }
         "tree" => {
-            let x = b.min.x + 2.0;
+            // From the trunk at the left edge to the squares that end at the right one, so
+            // that what is drawn has its middle where the button has.
+            let (x, far) = (b.min.x + 0.5, b.max.x - 1.5);
             p.line_segment([pos2(x, b.min.y), pos2(x, b.max.y - 1.0)], s);
-            for (y, end) in [(b.min.y + 1.0, b.max.x - 3.0), (b.center().y, b.max.x), (b.max.y - 1.0, b.max.x)] {
+            for (y, end) in [(b.min.y + 1.0, far - 3.0), (b.center().y, far), (b.max.y - 1.0, far)] {
                 p.line_segment([pos2(x, y), pos2(end, y)], s);
                 p.rect_filled(Rect::from_center_size(pos2(end, y), vec2(3.0, 3.0)), CornerRadius::ZERO, c);
             }

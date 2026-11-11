@@ -93,6 +93,7 @@ impl Colors {
             accent,
             glass: false,
             round: false,
+            outlined: true,
         };
         // Selections are tinted with the accent. Some themes use the text colour as
         // accent, which would hide the text, so mute it until it reads.

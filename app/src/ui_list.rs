@@ -650,6 +650,10 @@ impl App {
                         Sense::click_and_drag(),
                     );
                     let selected = self.panes[i].selected.contains(&e.path);
+                    // Asked here: the listing is out of the cache while its rows are drawn.
+                    let chosen = |row: Option<usize>| row.and_then(|row| self.panes[i].view.get(row))
+                        .is_some_and(|&k| self.panes[i].selected.contains(&listing.entries[k].path));
+                    let joined = (selected && chosen(row.checked_sub(1)), selected && chosen(Some(row + 1)));
                     self.paint_row(
                         ui,
                         i,
@@ -659,6 +663,7 @@ impl App {
                         row,
                         &cols,
                         selected,
+                        joined,
                         is_active,
                         dragging,
                         cut.as_deref().unwrap_or_default(),
@@ -845,6 +850,8 @@ impl App {
         row: usize,
         cols: &[(Col, &'static str, f32, bool)],
         selected: bool,
+        // Whether the row above and the row below are selected along with this one.
+        joined: (bool, bool),
         is_active: bool,
         dragging: bool,
         cut: &[PathBuf],
@@ -872,8 +879,7 @@ impl App {
         let corner = if striped || !pal.round {
             CornerRadius::ZERO
         } else {
-            let joins = |row: Option<usize>| selected && row.and_then(|row| self.entry_at(i, row)).is_some_and(|e| self.panes[i].selected.contains(&e.path));
-            let (above, below) = (joins(row.checked_sub(1)), joins(Some(row + 1)));
+            let (above, below) = joined;
             let mut corner = pal.corner();
             if above { corner = crate::theme::bottom(corner); }
             if below { corner = crate::theme::top(corner); }

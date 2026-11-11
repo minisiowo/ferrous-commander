@@ -839,7 +839,8 @@ fn tabs_split_merge_reorder_and_cancel() {
     assert_eq!(app.panes[0].tabs.len(), 2);
     assert_eq!(app.panes[0].tabs[1].back, vec![home.join("previous")]);
     let a = rect(&app, 0);
-    drag_tab(&ctx, &mut app, pos2(a.min.x + 240.0, a.min.y + 16.0), pos2(a.min.x + 5.0, a.min.y + 16.0));
+    let second = tab_rect(&app, 0, 1);
+    drag_tab(&ctx, &mut app, second.center() - vec2(10.0, 0.0), pos2(a.min.x + 5.0, a.min.y + 16.0));
     assert_eq!(app.panes[0].tabs[0].back, vec![home.join("previous")], "tab strip reorders actual tabs");
     drag_tab(&ctx, &mut app, pos2(a.min.x + 50.0, a.min.y + 16.0), pos2(10.0, 10.0));
     assert_eq!(app.panes.len(), 2, "drop outside workspace cancels");
@@ -969,20 +970,22 @@ fn tab_close_buttons_remove_tabs_and_their_last_panel() {
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
     let pane = app.pane_rects.iter().find(|(k, _)| *k == 0).unwrap().1;
     // Close the inactive tab directly, without first selecting it.
-    let w = ((pane.width() - 2.0 - 140.0) / 2.0).clamp(12.0, 190.0);
-    let x = pos2(pane.min.x + 5.0 + 2.0 * w - 14.0, pane.min.y + 1.0 + (TAB_H + 4.0) / 2.0);
+    let close = |app: &App, slot| pos2(tab_rect(app, 0, slot).max.x - 12.0, tab_rect(app, 0, slot).center().y);
+    let x = close(&app, 1);
+    assert!((x.y - (pane.min.y + 1.0 + (TAB_H + 4.0) / 2.0)).abs() < 0.01);
     click(&ctx, &mut app, x, Modifiers::NONE);
     assert_eq!(app.panes[0].tabs.len(), 1);
     assert_eq!(app.panes.len(), 2);
-    let pane = app.pane_rects.iter().find(|(k, _)| *k == 0).unwrap().1;
-    let w = (pane.width() - 2.0 - 140.0).clamp(12.0, 190.0);
-    click(&ctx, &mut app, pos2(pane.min.x + 5.0 + w - 14.0, x.y), Modifiers::NONE);
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    let first = close(&app, 0);
+    click(&ctx, &mut app, first, Modifiers::NONE);
     assert_eq!(app.panes.len(), 1, "closing the last tab removes its panel");
     assert_eq!(app.active, 0);
     assert_eq!(app.panes[0].tabs.len(), 1);
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
-    let pane = app.pane_rects[0].1;
-    let pos = pos2(pane.min.x + 5.0 + 190.0 - 14.0, x.y);
+    let strip = app.pane_rects[0].0;
+    let only = app.tab_rects.iter().find(|(shown, ..)| *shown == strip).unwrap().3;
+    let pos = pos2(only.max.x - 12.0, only.center().y);
     frame(&ctx, &mut app, vec![Event::PointerMoved(pos), Event::PointerButton {
         pos, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE,
     }], Modifiers::NONE);
@@ -1782,6 +1785,11 @@ fn wait_for_text(ctx: &egui::Context, app: &mut App, wanted: &str) {
         assert!(std::time::Instant::now() < deadline, "{wanted} was never painted");
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+}
+
+/// Where the strip of panel `strip` drew its tab at `slot`.
+fn tab_rect(app: &App, strip: usize, slot: usize) -> Rect {
+    app.tab_rects.iter().filter(|(shown, ..)| *shown == strip).nth(slot).unwrap_or_else(|| panic!("no tab {slot} in the strip of panel {strip}")).3
 }
 
 /// egui lets a field keep Tab only once it has held the focus for a frame.
@@ -2702,11 +2710,12 @@ fn narrow_app(tag: &str) -> (egui::Context, App) {
     (ctx, app)
 }
 
-/// The middle of the strip's tab at `slot`, in a 600-wide window holding `tabs` tabs.
+/// The strip's tab at `slot`, clear of its close button, in a 600-wide window holding `tabs` tabs.
 fn narrow_tab(app: &App, slot: usize, tabs: usize) -> Pos2 {
-    let r = app.pane_rects[0].1;
-    let w = ((r.width() - 2.0 - 140.0) / tabs as f32).clamp(12.0, 190.0);
-    pos2(r.min.x + 5.0 + (slot as f32 + 0.5) * w - 10.0, r.min.y + 16.0)
+    let strip = app.pane_rects[0].0;
+    let drawn: Vec<Rect> = app.tab_rects.iter().filter(|(shown, ..)| *shown == strip).map(|(.., r)| *r).collect();
+    assert_eq!(drawn.len(), tabs);
+    drawn[slot].center() - vec2(10.0, 0.0)
 }
 
 fn narrow_drag(ctx: &egui::Context, app: &mut App, start: Pos2, end: Pos2) -> bool {
@@ -2814,8 +2823,8 @@ fn the_sidebar_stops_at_its_limits_while_dragged_and_stays_there() {
     for round in [false, true] {
         app.st.rounded = round;
         for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
-        // From the sidebar's own edge to where the panels begin.
-        let gap = if round { 10.0 } else { 2.0 };
+        // From the sidebar's own edge to where the panels begin: the gap between them.
+        let gap = 10.0;
         for far in [900.0, 20.0] {
             let before = app.panels_area.x;
             let edge = at(1200.0 - before - gap);
@@ -2834,7 +2843,22 @@ fn the_sidebar_stops_at_its_limits_while_dragged_and_stays_there() {
             assert_eq!(cards_right(&ctx, &mut app) + 6.0, sidebar, "round {round}, let go at {far}");
         }
         let sidebar = 1200.0 - app.panels_area.x - gap;
-        assert_eq!(sidebar, crate::ui::sidebar_min(round), "round {round}: as narrow as egui was told it may be");
+        assert_eq!(sidebar, crate::ui::sidebar_min(), "round {round}: as narrow as egui was told it may be");
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tabs_are_as_wide_as_their_names_within_limits_and_the_widest_give_way_first() {
+    use crate::ui::tab_widths;
+    // Room for all: each takes what its name needs, a short one not less than the least.
+    assert_eq!(tab_widths(1000.0, &[20.0, 60.0, 500.0]), [84.0, 114.0, 190.0]);
+    // 300 of room for 388: only the wide ones narrow, to the same width.
+    let tight = tab_widths(440.0, &[20.0, 60.0, 500.0]);
+    assert_eq!(tight[0], 84.0, "the short tab keeps its width");
+    assert_eq!(tight[1], tight[2]);
+    assert!(tight.iter().sum::<f32>() <= 300.0 && tight.iter().sum::<f32>() > 296.0, "{tight:?}");
+    // No room at all still leaves something of every tab.
+    assert_eq!(tab_widths(100.0, &[20.0, 60.0]), [12.0, 12.0]);
+    assert!(tab_widths(500.0, &[]).is_empty());
 }

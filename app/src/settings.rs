@@ -141,6 +141,8 @@ pub struct Settings {
     pub window_effect: bool,
     /// Buttons, cards, menus and windows have rounded corners instead of square ones.
     pub rounded: bool,
+    /// A thin line around every panel and every card of the sidebar.
+    pub outlines: bool,
 }
 
 impl Default for Settings {
@@ -180,6 +182,7 @@ impl Default for Settings {
             window: WindowPlace::default(),
             window_effect: false,
             rounded: crate::defaults::ROUNDED_CORNERS,
+            outlines: true,
         }
     }
 }
