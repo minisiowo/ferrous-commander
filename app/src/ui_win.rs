@@ -9,7 +9,7 @@ use crate::chrome::{self, Icon, Panel};
 use crate::fsx;
 use crate::keymap::Command;
 use crate::settings::Layout;
-use crate::theme::{ThemeName, hex};
+use crate::theme::hex;
 
 fn settings_section(ui: &mut egui::Ui, title: &str, accent: egui::Color32) {
     ui.add_space(10.0);
@@ -371,16 +371,29 @@ impl App {
             ui.add_space(4.0);
             egui::Grid::new("settings_grid").num_columns(2).spacing(vec2(16.0, 8.0)).show(ui, |ui| {
                 ui.label("Theme");
-                ui.horizontal_wrapped(|ui| {
-                    for t in ThemeName::choices() {
-                        ui.selectable_value(&mut self.st.theme, t, t.label());
-                    }
+                ui.vertical(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for (t, label) in self.theme_choices() {
+                            ui.selectable_value(&mut self.st.theme, t, label);
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("+ New theme").on_hover_text("Start a theme of your own from a copy of this one").clicked() {
+                            self.new_theme();
+                        }
+                        if self.st.theme.custom().is_some() && ui.button("Edit").clicked() {
+                            self.edit_theme();
+                        }
+                        if self.themes_dir.is_some() && ui.button("Open themes folder").clicked() {
+                            self.show_themes_folder();
+                        }
+                    });
                 });
                 ui.end_row();
                 ui.label("Accent color");
                 ui.horizontal(|ui| {
                     if self.st.theme.has_own_accent() {
-                        ui.weak(format!("Follows the {} theme", self.st.theme.label()));
+                        ui.weak(format!("Follows the {} theme", self.theme_label(&self.st.theme)));
                         return;
                     }
                     let mut c = hex(&self.st.accent);

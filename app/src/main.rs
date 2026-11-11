@@ -28,6 +28,7 @@ mod preview;
 mod defaults;
 mod settings;
 mod theme;
+mod user_theme;
 mod tiles;
 mod ui;
 mod ui_keys;
@@ -35,6 +36,7 @@ mod ui_list;
 mod ui_palette;
 mod ui_win;
 mod ui_search;
+mod ui_theme;
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]

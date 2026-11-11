@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::fsx::Sorting;
-use crate::theme::ThemeName;
+use crate::theme::ThemeId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub enum Layout {
@@ -109,7 +109,7 @@ pub(crate) struct ListingOptions {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub theme: ThemeName,
+    pub theme: ThemeId,
     pub accent: String,
     pub layout: Layout,
     pub dual: bool,
@@ -162,7 +162,7 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            theme: ThemeName::Dark,
+            theme: ThemeId::default(),
             accent: crate::defaults::ACCENT_RGB.into(),
             layout: Layout::Standard,
             tree_files: false,
@@ -362,32 +362,16 @@ impl Settings {
     }
 
     fn save_to(&self, f: &std::path::Path) -> std::io::Result<()> {
-        if let Some(dir) = f.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let s = crate::lua_config::encode(&serde_json::to_value(self.storable())?);
-        // Per-process name: two running windows must not write one temporary file.
-        let tmp = f.with_extension(format!("lua.{}.tmp", std::process::id()));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
         // Visited folders, tags and favorites are nobody else's business.
-        #[cfg(unix)]
-        { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
-        let written = options.open(&tmp).and_then(|mut file| {
-            use std::io::Write;
-            file.write_all(s.as_bytes())?;
-            // On disk before the rename, or a power cut can leave an empty settings file.
-            file.sync_all()
-        });
-        let result = written.and_then(|()| std::fs::rename(&tmp, f));
-        if result.is_err() { let _ = std::fs::remove_file(&tmp); }
-        result
+        crate::fsx::write_atomic(f, s.as_bytes(), true)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::ThemeName;
 
     #[test]
     fn a_folder_with_a_raw_name_does_not_stop_settings_from_saving() {
@@ -473,10 +457,12 @@ mod tests {
         let s = Settings::from_lua("-- preferences\nreturn { --[[ note ]] font_size = 14; show_hidden = true, theme = 'Nord', favorites = {}, }").unwrap();
         assert_eq!(s.font_size, 14.0);
         assert!(s.show_hidden && s.show_sidebar && s.favorites.is_empty());
-        assert_eq!(s.theme, ThemeName::TokyoNight);
-        for (old, new) in [("Midnight", ThemeName::TokyoNight), ("Light", ThemeName::CatppuccinLatte)] {
+        assert_eq!(s.theme, ThemeName::TokyoNight.into());
+        for (old, new) in [("Midnight", ThemeName::TokyoNight.into()), ("Light", ThemeName::CatppuccinLatte.into()), ("Gruvbox", ThemeName::Gruvbox.into()), ("custom:moj", ThemeId::Custom("moj".into()))] {
             let s = Settings::from_lua(&format!("return {{ theme = '{old}', favorites = {{}}, }}")).unwrap();
             assert_eq!(s.theme, new, "{old}");
+            let round = Settings::from_lua(&crate::lua_config::encode(&serde_json::to_value(&s).unwrap())).unwrap();
+            assert_eq!(round.theme, new, "{old} after saving");
         }
         for bad in ["return {", "return { dual = 'yes' }", "return {}; os.execute('x')", "while true do end", "return { font_size = 1 + 2 }"] {
             assert!(Settings::from_lua(bad).is_err(), "{bad}");

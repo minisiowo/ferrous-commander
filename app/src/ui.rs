@@ -12,7 +12,7 @@ use crate::app::{Act, App, CrumbDrag, Dialog, DragPaths, DropTarget, FavDrag, To
 use crate::fsx;
 use crate::icons;
 use crate::settings::{Layout, SidebarSection};
-use crate::theme::{Palette, ThemeName, blend, hex};
+use crate::theme::{Palette, blend, hex};
 
 // ---- sizes ----
 pub const SIDEBAR_W: f32 = crate::defaults::SIDEBAR_WIDTH;
@@ -399,6 +399,7 @@ impl App {
         self.search_window(&ctx);
         self.settings_window(&ctx);
         self.shortcuts_window(&ctx);
+        self.theme_editor_window(&ctx);
         self.palette_ui(&ctx);
         self.overlays(&ctx);
         self.which_key(&ctx);
@@ -788,15 +789,14 @@ impl App {
                     {
                         self.settings_open = !self.settings_open;
                     }
-                    if icon_button(ui, "◑", "Switch theme", false, &pal).clicked() {
-                        let themes = ThemeName::choices();
-                        let k = themes
-                            .iter()
-                            .position(|t| *t == self.st.theme)
-                            .unwrap_or(0);
-                        self.st.theme = themes[(k + 1) % themes.len()];
-                        self.mark_dirty();
-                    }
+                    let menu_id = ui.scope_id().with("theme_menu");
+                    let open = egui::Popup::is_id_open(ui.ctx(), menu_id);
+                    let button = icon_button(ui, "◑", "Theme", open, &pal);
+                    egui::Popup::menu(&button)
+                        .id(menu_id)
+                        .align(egui::RectAlign::TOP_START)
+                        .gap(4.0)
+                        .show(|ui| self.theme_menu(ui));
                     let cols = self.st.layout == Layout::Columns;
                     if icon_button(
                         ui,
@@ -1619,7 +1619,7 @@ impl App {
             let show_x = true;
             let tw = tr.width() - 32.0 - if show_x { 18.0 } else { 0.0 };
             p.text(
-                pos2(ir.max.x + 6.0, tr.center().y),
+                pos2(ir.max.x + 6.0, icons::text_level(&p, ir.center().y, font.clone())),
                 Align2::LEFT_CENTER,
                 fit_text(&p, &name, &font, tw),
                 font.clone(),

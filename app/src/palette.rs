@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::fsx::SortBy;
 use crate::keymap::Command;
-use crate::theme::ThemeName;
+use crate::theme::ThemeId;
 
 /// What the palette searches in. The first character of the field's text chooses it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -78,6 +78,7 @@ pub enum Setting {
     Extensions, AgeColors, Mebibytes, FoldersOnTop, Sidebar, PreviewPane, Tree, ColumnsLayout,
     NeovimKeys, WhichKey, HistoryCard, Rounded, Outlines, FontLarger, FontSmaller,
     OpenSettings, OpenShortcuts, ConfigFolder,
+    NewTheme, EditTheme, ImportTheme, ThemesFolder,
 }
 
 /// What choosing an item does.
@@ -89,7 +90,7 @@ pub enum Pick {
     Typed(String),
     Command(Command),
     Setting(Setting),
-    Theme(ThemeName),
+    Theme(ThemeId),
     Sort(SortBy),
 }
 
@@ -99,7 +100,7 @@ impl Pick {
         Some(match self {
             Pick::Command(command) => command.info().id.to_string(),
             Pick::Setting(setting) => format!("setting:{setting:?}"),
-            Pick::Theme(theme) => format!("theme:{theme:?}"),
+            Pick::Theme(theme) => format!("theme:{}", theme.key()),
             Pick::Sort(by) => format!("sort:{by:?}"),
             Pick::Folder(_) | Pick::File(_) | Pick::Typed(_) => return None,
         })
@@ -246,6 +247,7 @@ pub fn rank(items: &[Item], text: &str, limit: usize) -> Vec<Hit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::ThemeName;
 
     fn folder(name: &str, parent: &str) -> Item {
         Item::new(name, parent, "", Pick::Folder(PathBuf::from(parent).join(name)))
@@ -329,7 +331,8 @@ mod tests {
     fn recent_ids_exist_only_for_commands_and_settings() {
         assert_eq!(Pick::Command(Command::NewTab).id().as_deref(), Some("new_tab"));
         assert_eq!(Pick::Setting(Setting::Sidebar).id().as_deref(), Some("setting:Sidebar"));
-        assert_eq!(Pick::Theme(ThemeName::Gruvbox).id().as_deref(), Some("theme:Gruvbox"));
+        assert_eq!(Pick::Theme(ThemeName::Gruvbox.into()).id().as_deref(), Some("theme:Gruvbox"));
+        assert_eq!(Pick::Theme(ThemeId::Custom("x".into())).id().as_deref(), Some("theme:custom:x"));
         assert_eq!(Pick::Folder("/a".into()).id(), None);
     }
 }

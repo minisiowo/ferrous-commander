@@ -15,7 +15,7 @@ use crate::keymap::{COMMANDS, Chord, Command, Group, Layer, Matcher, Outcome, Ta
 use crate::ops;
 use crate::palette::{self, Item, Mode, Pick, Setting};
 use crate::settings::Layout;
-use crate::theme::{ThemeName, blend};
+use crate::theme::blend;
 use crate::ui::fit_text;
 
 /// How many results are listed. More than this is a reason to type another letter.
@@ -351,14 +351,21 @@ impl App {
             (Setting::OpenSettings, "Open settings", None),
             (Setting::OpenShortcuts, "Customize shortcuts", None),
             (Setting::ConfigFolder, "Open configuration folder", None),
+            (Setting::NewTheme, "New theme from the current one", None),
+            (Setting::EditTheme, "Edit current theme", None),
+            (Setting::ThemesFolder, "Open themes folder", None),
         ];
         for (setting, title, state) in settings {
             let mut item = Item::new(title, "Settings", "", Pick::Setting(setting));
             item.state = state;
             items.push(item);
         }
-        for theme in ThemeName::choices() {
-            items.push(Item::new(format!("Theme: {}", theme.label()), "Settings", "", Pick::Theme(theme)).state(st.theme == theme));
+        if self.selected_theme_file().is_some() {
+            items.push(Item::new("Import selected file as a theme", "Settings", "", Pick::Setting(Setting::ImportTheme)));
+        }
+        for (theme, label) in self.theme_choices() {
+            let chosen = st.theme == theme;
+            items.push(Item::new(format!("Theme: {label}"), "Settings", "", Pick::Theme(theme)).state(chosen));
         }
         // What was used last comes first, and wins among equal matches.
         let place = |item: &Item| item.pick.id().and_then(|id| st.palette_recent.iter().position(|r| *r == id));
@@ -729,6 +736,17 @@ impl App {
                         self.save();
                         let saved = self.st.save_result();
                         self.show_configuration_folder(saved);
+                        stays = false;
+                    }
+                    Setting::NewTheme | Setting::EditTheme | Setting::ImportTheme | Setting::ThemesFolder => {
+                        match setting {
+                            Setting::NewTheme => self.new_theme(),
+                            Setting::EditTheme => self.edit_theme(),
+                            Setting::ImportTheme => {
+                                if let Some(file) = self.selected_theme_file() { self.import_theme(&file); }
+                            }
+                            _ => self.show_themes_folder(),
+                        }
                         stays = false;
                     }
                 }

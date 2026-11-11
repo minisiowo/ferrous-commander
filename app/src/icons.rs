@@ -40,6 +40,12 @@ pub fn capital_drop(p: &Painter, font: FontId) -> f32 {
     ink(&galley).center().y - galley.rect.center().y
 }
 
+/// Where to anchor a line of text with `Align2::*_CENTER` so that it looks level with a
+/// symbol centred at `middle`: its capitals, not its line, are centred there.
+pub fn text_level(p: &Painter, middle: f32, font: FontId) -> f32 {
+    middle - capital_drop(p, font)
+}
+
 /// A symbol from the fonts, centred on its shape rather than on its line of text.
 pub fn symbol(p: &Painter, center: Pos2, text: &str, font: FontId, color: Color32) {
     let (origin, galley) = centred(p, center, text, font, color);
@@ -54,8 +60,11 @@ pub fn face(p: &Painter, r: Rect, face: &str, size: f32, color: Color32) {
     }
 }
 
-/// A diagonal cross reaching `half` from its middle.
+/// A diagonal cross reaching `half` from its middle. The middle is moved onto the middle
+/// of a pixel, as for the plus sign: between two pixel rows the cross would come out one
+/// row taller than the plus and the capitals beside it, and half a row higher.
 pub fn cross(p: &Painter, center: Pos2, half: f32, stroke: Stroke) {
+    let center = center.round_to_pixel_center(p.pixels_per_point());
     let (down, up) = (vec2(half, half), vec2(half, -half));
     p.line_segment([center - down, center + down], stroke);
     p.line_segment([center - up, center + up], stroke);

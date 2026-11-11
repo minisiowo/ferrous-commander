@@ -11,7 +11,8 @@ use crate::fsx::{self, Entry, Sorting};
 use crate::ops::{self, Job, OpKind};
 use crate::preview::Preview;
 use crate::settings::{FavGroup, Layout, PaneSession, Settings};
-use crate::theme::{Palette, ThemeName, hex};
+use crate::theme::{Palette, ThemeId, ThemeName, hex};
+use crate::user_theme::UserTheme;
 use crate::tiles::Tile;
 
 /// Forgetting old listings and renewing the watch list need no doing on every frame.
@@ -343,6 +344,8 @@ pub enum Act {
         copy: bool,
     },
     TagPaths(Vec<PathBuf>, Option<u8>),
+    /// Keep a copy of a theme file among the person's own themes.
+    ImportTheme(PathBuf),
     AddFavorite(usize, PathBuf),
     RemoveFavorite(usize, usize),
     MoveFavorite { from: usize, index: usize, to: usize, at: usize },
@@ -375,7 +378,9 @@ pub struct ShotState {
 /// The appearance last applied to egui; each option has one explicit place in the key.
 #[derive(PartialEq)]
 struct AppliedTheme {
-    theme: ThemeName,
+    theme: ThemeId,
+    /// The person's own theme on show: the one chosen, or the one being edited.
+    custom: Option<UserTheme>,
     accent: String,
     font_size: u32,
     desktop_colors: Option<crate::omarchy::Colors>,
@@ -455,6 +460,17 @@ pub struct App {
     pub effect_unavailable: bool,
     omarchy_watch: Option<crate::omarchy::Watch>,
     omarchy_colors: Option<crate::omarchy::Colors>,
+    /// The person's own themes, by name.
+    pub user_themes: Vec<UserTheme>,
+    /// Where they are kept; none when nothing is read or saved.
+    pub themes_dir: Option<PathBuf>,
+    /// The themes folder, followed for files added, changed or deleted outside the app.
+    pub(crate) themes_watch: Option<crate::omarchy::Watch<(Vec<UserTheme>, Vec<String>)>>,
+    pub theme_editor: Option<crate::ui_theme::ThemeEditor>,
+    /// The own theme whose file was missing, already reported.
+    pub(crate) theme_warned: Option<String>,
+    /// Theme files already reported as unreadable.
+    pub(crate) theme_problems_told: Vec<String>,
     persist: bool,
     generation: u64,
     pub drop_zones: Vec<(egui::Rect, DropTarget)>,
@@ -512,11 +528,12 @@ impl App {
         let persist = loaded.is_some();
         let (mut st, load_problem) = loaded.unwrap_or_else(|| (Settings::default(), None));
         let mut palette = None;
+        let mut shown_windows = (false, false);
         if !persist {
             // A clean, deterministic first-start picture: start in the home folder.
             st.panes = Vec::new();
             st.tiles = None;
-            // For checking other looks: FC_SHOT=columns,light,dual,gruvbox,palette,commands,round
+            // For checking other looks: FC_SHOT=columns,light,dual,gruvbox,palette,commands,round,settings,themeeditor
             let look = std::env::var("FC_SHOT").unwrap_or_default();
             // The same picture on every system, whatever its default.
             st.rounded = look.contains("round");
@@ -526,19 +543,19 @@ impl App {
             }
             st.tree_files = look.contains("tree");
             if look.contains("light") {
-                st.theme = ThemeName::CatppuccinLatte;
+                st.theme = ThemeName::CatppuccinLatte.into();
             }
             if look.contains("gruvbox") {
-                st.theme = ThemeName::Gruvbox;
+                st.theme = ThemeName::Gruvbox.into();
             }
             if look.contains("rose") {
-                st.theme = ThemeName::RosePine;
+                st.theme = ThemeName::RosePine.into();
             }
             if look.contains("tokyo") {
-                st.theme = ThemeName::TokyoNight;
+                st.theme = ThemeName::TokyoNight.into();
             }
             if look.contains("omarchy") {
-                st.theme = ThemeName::Omarchy;
+                st.theme = ThemeName::Omarchy.into();
             }
             if look.contains("single") {
                 st.dual = false;
@@ -547,6 +564,8 @@ impl App {
                 st.show_columns = true;
                 st.show_preview = true;
             }
+            // FC_SHOT=settings or themeeditor opens that window.
+            shown_windows = (look.contains("settings"), look.contains("themeeditor"));
             if look.contains("palette") {
                 let mode = if look.contains("commands") { crate::palette::Mode::Commands } else { crate::palette::Mode::Places };
                 let mut shown = crate::ui_palette::PaletteUi::new(mode);
@@ -672,13 +691,13 @@ impl App {
                 }
             });
         }
-        App {
+        let mut app = App {
             folder_tx,
             wake,
             watch,
             folder_rx,
             folder_pending: HashMap::new(),
-            pal: Palette::get(st.theme, accent),
+            pal: Palette::get(st.theme.builtin().unwrap_or_default(), accent),
             keys: crate::keymap::Keymap::new(&st.keymap),
             matcher: Default::default(),
             shortcuts: None,
@@ -739,6 +758,12 @@ impl App {
             effect_unavailable: false,
             omarchy_watch: None,
             omarchy_colors: None,
+            user_themes: Vec::new(),
+            themes_dir: if persist { crate::user_theme::themes_dir() } else { None },
+            themes_watch: None,
+            theme_editor: None,
+            theme_warned: None,
+            theme_problems_told: Vec::new(),
             persist,
             generation: 1,
             drop_zones: Vec::new(),
@@ -747,7 +772,13 @@ impl App {
             panels_area: egui::Vec2::ZERO,
             acts: Vec::new(),
             col_hl: HashMap::new(),
+        };
+        app.reload_user_themes();
+        app.settings_open = shown_windows.0;
+        if shown_windows.1 {
+            app.new_theme();
         }
+        app
     }
 
     pub fn mark_dirty(&mut self) {
@@ -852,7 +883,8 @@ impl App {
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         self.frame += 1;
         self.wake.get_or_init(|| ctx.clone());
-        if self.st.theme == ThemeName::Omarchy {
+        self.follow_user_themes(ctx);
+        if self.st.theme == ThemeName::Omarchy.into() {
             if self.omarchy_watch.is_none() {
                 self.omarchy_watch = crate::omarchy::Watch::start(ctx);
             }
@@ -863,8 +895,13 @@ impl App {
             self.omarchy_watch = None;
             self.omarchy_colors = None;
         }
+        let custom = match &self.theme_editor {
+            Some(editor) => Some(editor.draft.clone()),
+            None => self.chosen_user_theme(),
+        };
         let key = AppliedTheme {
-            theme: self.st.theme,
+            theme: self.st.theme.clone(),
+            custom,
             accent: self.st.accent.clone(),
             font_size: self.st.font_size.to_bits(),
             desktop_colors: self.omarchy_colors,
@@ -873,9 +910,12 @@ impl App {
             outlines: self.st.outlines,
         };
         if self.applied.as_ref() != Some(&key) {
-            self.pal = match self.omarchy_colors {
-                Some(colors) => colors.palette(),
-                None => Palette::get(self.st.theme, hex(&self.st.accent)),
+            self.pal = match (&key.custom, self.omarchy_colors) {
+                // What is being edited shows at once, whatever theme is chosen.
+                (Some(theme), _) if self.theme_editor.is_some() => theme.palette(),
+                (_, Some(colors)) => colors.palette(),
+                (Some(theme), None) => theme.palette(),
+                (None, None) => Palette::get(self.st.theme.builtin().unwrap_or_default(), hex(&self.st.accent)),
             };
             self.pal.glass = self.see_through;
             self.pal.round = self.st.rounded;
@@ -2235,6 +2275,7 @@ impl App {
                     ctx,
                 );
             }
+            Act::ImportTheme(file) => self.import_theme(&file),
             Act::TagPaths(paths, tag) => {
                 for p in paths {
                     let k = p.to_string_lossy().to_string();
@@ -2474,7 +2515,7 @@ mod performance_tests {
         write("#101010", "#ff0000");
         let ctx = egui::Context::default();
         let mut app = App::new(Some(PathBuf::from("unused.png")));
-        app.st.theme = ThemeName::Omarchy;
+        app.st.theme = ThemeName::Omarchy.into();
         app.omarchy_watch = Some(crate::omarchy::Watch::of(file.clone(), Duration::from_millis(10), ctx.clone()));
         app.begin_frame(&ctx);
         assert_eq!(app.pal.panel, hex("#101010"));
@@ -2490,11 +2531,84 @@ mod performance_tests {
         }
         assert_eq!(app.pal.accent, hex("#007700"));
 
-        app.st.theme = ThemeName::Dark;
+        app.st.theme = ThemeName::Dark.into();
         app.begin_frame(&ctx);
         assert_eq!(app.pal.panel, Palette::get(ThemeName::Dark, app.pal.accent).panel);
         assert_eq!(app.pal.accent, hex(&app.st.accent), "the saved accent comes back");
         assert!(app.omarchy_watch.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_theme_starts_as_an_exact_copy_of_the_one_in_use() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(PathBuf::from("unused.png")));
+        for name in [ThemeName::Dark, ThemeName::Gruvbox] {
+            app.theme_editor = None;
+            app.st.theme = name.into();
+            app.begin_frame(&ctx);
+            let before = app.pal;
+            app.new_theme();
+            let draft = &app.theme_editor.as_ref().unwrap().draft;
+            assert_eq!(draft.name, format!("{} copy", name.label()));
+            app.begin_frame(&ctx);
+            assert_eq!(app.pal, before, "{}: the copy looks the same", name.label());
+        }
+    }
+
+    #[test]
+    fn an_own_theme_paints_the_window_and_the_editor_shows_its_draft() {
+        let dir = std::env::temp_dir().join(format!("fc-own-theme-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let theme = UserTheme::parse("mine", "name = \"Mine\"\nbackground = \"#103010\"\nforeground = \"#f0f0f0\"\naccent = \"#ff8800\"\n").unwrap();
+        crate::user_theme::save_in(&dir, &theme).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(Some(PathBuf::from("unused.png")));
+        app.themes_dir = Some(dir.clone());
+        app.reload_user_themes();
+        assert!(app.theme_choices().contains(&(ThemeId::Custom("mine".into()), "Mine".into())));
+        app.st.theme = ThemeId::Custom("mine".into());
+        app.begin_frame(&ctx);
+        assert_eq!(app.pal.panel, hex("#103010"));
+
+        app.edit_theme();
+        app.theme_editor.as_mut().unwrap().draft.colors.background = hex("#301010");
+        app.begin_frame(&ctx);
+        assert_eq!(app.pal.panel, hex("#301010"), "the draft shows while it is edited");
+        app.theme_editor = None;
+        app.begin_frame(&ctx);
+        assert_eq!(app.pal.panel, hex("#103010"), "closing without saving brings the theme back");
+
+        // Changed outside the app, the file is followed.
+        crate::user_theme::save_in(&dir, &UserTheme { colors: crate::omarchy::Colors { background: hex("#202060"), ..theme.colors }, ..theme.clone() }).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while app.pal.panel != hex("#202060") {
+            assert!(Instant::now() < until, "the change made outside did not show");
+            std::thread::sleep(Duration::from_millis(20));
+            app.begin_frame(&ctx);
+        }
+
+        // A theme added outside the app shows in the list, and a deleted one leaves it.
+        crate::user_theme::save_in(&dir, &UserTheme { slug: "other".into(), name: "Other".into(), ..theme.clone() }).unwrap();
+        let listed = |app: &App, slug: &str| app.theme_choices().iter().any(|(id, _)| id.custom() == Some(slug));
+        let until = Instant::now() + Duration::from_secs(10);
+        while !listed(&app, "other") {
+            assert!(Instant::now() < until, "a theme added outside did not show");
+            std::thread::sleep(Duration::from_millis(20));
+            app.begin_frame(&ctx);
+        }
+        std::fs::remove_file(crate::user_theme::file_in(&dir, "mine")).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while listed(&app, "mine") {
+            assert!(Instant::now() < until, "a theme deleted outside stayed in the list");
+            std::thread::sleep(Duration::from_millis(20));
+            app.begin_frame(&ctx);
+        }
+        assert!(listed(&app, "other"));
+        assert_eq!(app.pal.panel, Palette::get(ThemeName::Dark, app.pal.accent).panel, "a missing theme falls back to Dark");
+        assert_eq!(app.toasts.iter().filter(|t| t.text.contains("missing")).count(), 1);
+        app.begin_frame(&ctx);
+        assert_eq!(app.toasts.iter().filter(|t| t.text.contains("missing")).count(), 1, "reported once");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

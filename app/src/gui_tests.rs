@@ -2909,3 +2909,63 @@ fn tabs_are_as_wide_as_their_names_within_limits_and_the_widest_give_way_first()
     assert_eq!(tab_widths(100.0, &[20.0, 60.0]), [12.0, 12.0]);
     assert!(tab_widths(500.0, &[]).is_empty());
 }
+
+/// Every symbol written into the windows' text has a glyph in the bundled font, so
+/// none shows as an empty box. Only text in quotes on one line is looked at.
+#[test]
+fn every_symbol_in_window_text_has_a_glyph() {
+    let sources = [
+        ("ui_theme.rs", include_str!("ui_theme.rs")),
+        ("ui_win.rs", include_str!("ui_win.rs")),
+        ("ui_palette.rs", include_str!("ui_palette.rs")),
+        ("ui_list.rs", include_str!("ui_list.rs")),
+        ("ui_keys.rs", include_str!("ui_keys.rs")),
+    ];
+    let ctx = egui::Context::default();
+    crate::fonts(&ctx);
+    let mut out = ctx.run_ui(RawInput::default(), |ui| {
+        let font = egui::FontId::proportional(14.0);
+        let mut missing = Vec::new();
+        for (file, text) in sources {
+            for (n, line) in text.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or_default();
+                for (k, quoted) in code.split('"').enumerate() {
+                    if k % 2 == 0 {
+                        continue;
+                    }
+                    for c in quoted.chars().filter(|c| !c.is_ascii()) {
+                        if !ui.fonts_mut(|f| f.has_glyphs(&font, &c.to_string())) {
+                            missing.push(format!("{file}:{}: {c} (U+{:04X})", n + 1, c as u32));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "no glyph for:\n{}", missing.join("\n"));
+    });
+    out.textures_delta.clear();
+}
+
+/// The toolbar's theme button opens a list of every theme; choosing one uses it and
+/// closes the list.
+#[test]
+fn the_theme_button_lists_the_themes_to_choose_from() {
+    use crate::theme::{ThemeId, ThemeName};
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(std::env::temp_dir().join("unused-theme-menu.png")));
+    app.st.theme = ThemeName::Dark.into();
+    app.user_themes = vec![crate::user_theme::UserTheme::parse(
+        "mine",
+        "name = \"Mine\"\nbackground = \"#103010\"\nforeground = \"#f0f0f0\"\naccent = \"#ff8800\"\n",
+    )
+    .unwrap()];
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    click_text(&ctx, &mut app, "◑");
+    assert_eq!(app.st.theme, ThemeName::Dark.into(), "opening the list changes nothing");
+    click_text(&ctx, &mut app, "Gruvbox");
+    assert_eq!(app.st.theme, ThemeName::Gruvbox.into());
+    assert!(!egui::Popup::is_any_open(&ctx), "the list closes after a choice");
+    click_text(&ctx, &mut app, "◑");
+    click_text(&ctx, &mut app, "Mine");
+    assert_eq!(app.st.theme, ThemeId::Custom("mine".into()), "own themes are in the list too");
+}

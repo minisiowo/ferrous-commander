@@ -617,6 +617,38 @@ pub fn unique_os_name(dir: &Path, name: &std::ffi::OsStr, is_dir: bool) -> PathB
     unreachable!()
 }
 
+/// Writes `bytes` to `file` all at once: readers see the old contents or the new, never
+/// half of them. Missing folders are made. `private` keeps it from other users on Unix.
+pub fn write_atomic(file: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // Per-process name: two running windows must not write one temporary file.
+    let mut tmp_name = file.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = file.with_file_name(tmp_name);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let written = options.open(&tmp).and_then(|mut out| {
+        use std::io::Write;
+        out.write_all(bytes)?;
+        // On disk before the rename, or a power cut can leave an empty file.
+        out.sync_all()
+    });
+    let result = written.and_then(|()| std::fs::rename(&tmp, file));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 pub fn valid_name(name: &str) -> bool {
     let bad: &[char] = if cfg!(windows) { &['\\', '/', ':', '*', '?', '"', '<', '>', '|'] } else { &['/'] };
     if name.is_empty() || name.contains('\0') || name.contains(bad) || name == "." || name == ".." { return false; }

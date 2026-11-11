@@ -1120,6 +1120,9 @@ impl App {
         } else {
             act(ui, "Open", Act::Open(i, e.path.clone()), &mut acts);
         }
+        if !e.is_dir && crate::ui_theme::is_theme_file(&e.path) {
+            act(ui, "Import as theme", Act::ImportTheme(e.path.clone()), &mut acts);
+        }
         if !e.is_dir {
             let apps = open_with_apps(&e.path, ui.ctx());
             ui.menu_button("Open with", |ui| {

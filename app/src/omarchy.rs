@@ -5,14 +5,14 @@
 
 use crate::theme::{Palette, blend, contrast, hex};
 use egui::Color32;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 /// A desktop theme change shows up in the window within this time.
-const POLL: Duration = Duration::from_secs(1);
+pub(crate) const POLL: Duration = Duration::from_secs(1);
 
 /// `omarchy-theme-set` writes under `$HOME/.local/state`, whatever `XDG_STATE_HOME` says.
 fn colors_file() -> Option<PathBuf> {
@@ -23,9 +23,21 @@ pub fn available() -> bool {
     cfg!(target_os = "linux") && colors_file().is_some_and(|f| f.is_file())
 }
 
-fn color(text: &str) -> Option<Color32> {
+/// `#rrggbb`, and nothing else: the files can come from anywhere.
+pub(crate) fn color(text: &str) -> Option<Color32> {
     let digits = text.strip_prefix('#')?;
     (digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_hexdigit())).then(|| hex(digits))
+}
+
+/// The value of a flat `key = "value"` line, as `colors.toml` has them.
+pub(crate) fn toml_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once('=')?;
+        if name.trim() != key {
+            return None;
+        }
+        value.trim().strip_prefix('"')?.split('"').next()
+    })
 }
 
 /// The colours every Omarchy theme has, also ones written before `colors.toml`
@@ -42,15 +54,7 @@ impl Colors {
     /// Reads the flat `key = "value"` lines of `colors.toml`. A theme can come
     /// from a git repository, so anything unexpected means no colours, not a crash.
     pub fn parse(text: &str) -> Option<Colors> {
-        let value = |key: &str| {
-            text.lines().find_map(|line| {
-                let (name, value) = line.split_once('=')?;
-                if name.trim() != key {
-                    return None;
-                }
-                value.trim().strip_prefix('"')?.split('"').next()
-            })
-        };
+        let value = |key: &str| toml_value(text, key);
         let background = color(value("background")?)?;
         let foreground = color(value("foreground")?)?;
         let accent = ["accent", "blue", "color4"]
@@ -107,24 +111,47 @@ impl Colors {
     }
 }
 
-/// Hands over the colours now and after every change, until dropped.
-pub struct Watch {
-    colors: Receiver<Colors>,
+/// Hands over what a file says now and after every change, until dropped.
+pub struct Watch<T = Colors> {
+    colors: Receiver<T>,
     stop: Arc<AtomicBool>,
 }
 
-impl Watch {
+impl Watch<Colors> {
     pub fn start(ctx: &egui::Context) -> Option<Watch> {
         Some(Watch::of(colors_file()?, POLL, ctx.clone()))
     }
 
     pub(crate) fn of(file: PathBuf, poll: Duration, ctx: egui::Context) -> Watch {
+        Watch::parsed(file, poll, ctx, Colors::parse)
+    }
+}
+
+impl<T: Send + 'static> Watch<T> {
+    /// A file that does not parse is skipped: the last good contents stay.
+    pub(crate) fn parsed(
+        file: PathBuf,
+        poll: Duration,
+        ctx: egui::Context,
+        parse: impl Fn(&str) -> Option<T> + Send + 'static,
+    ) -> Watch<T> {
+        // The file is missing for a moment during a switch; the old colours stay.
+        Watch::polling(poll, ctx, move || std::fs::read_to_string(&file).ok(), move |text: &String| parse(text))
+    }
+
+    /// Calls `read` every `poll` and hands over what `parse` makes of it each time it
+    /// differs from the last reading. Nothing read, or nothing parsed, changes nothing.
+    pub(crate) fn polling<S: PartialEq + Send + 'static>(
+        poll: Duration,
+        ctx: egui::Context,
+        read: impl Fn() -> Option<S> + Send + 'static,
+        parse: impl Fn(&S) -> Option<T> + Send + 'static,
+    ) -> Watch<T> {
         let (tx, colors) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
-        let read = |file: &Path| std::fs::read_to_string(file).ok();
-        // Read before returning, so the first frame already has the colours.
-        let mut seen = read(&file);
-        if let Some(c) = seen.as_deref().and_then(Colors::parse) {
+        // Read before returning, so the first frame already has the result.
+        let mut seen = read();
+        if let Some(c) = seen.as_ref().and_then(&parse) {
             let _ = tx.send(c);
         }
         let stopped = stop.clone();
@@ -134,28 +161,27 @@ impl Watch {
                 if stopped.load(Ordering::Relaxed) {
                     return;
                 }
-                // The file is missing for a moment during a switch; keep the old colours.
-                let Some(text) = read(&file) else { continue };
-                if seen.as_ref() == Some(&text) {
+                let Some(now) = read() else { continue };
+                if seen.as_ref() == Some(&now) {
                     continue;
                 }
-                if let Some(c) = Colors::parse(&text)
+                if let Some(c) = parse(&now)
                     && tx.send(c).is_ok()
                 {
                     ctx.request_repaint();
                 }
-                seen = Some(text);
+                seen = Some(now);
             }
         });
         Watch { colors, stop }
     }
 
-    pub fn latest(&self) -> Option<Colors> {
+    pub fn latest(&self) -> Option<T> {
         self.colors.try_iter().last()
     }
 }
 
-impl Drop for Watch {
+impl<T> Drop for Watch<T> {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
     }

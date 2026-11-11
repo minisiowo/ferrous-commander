@@ -703,7 +703,7 @@ impl App {
                 };
                 let left = r.left() + 25.0;
                 painter.text(
-                    pos2(left, r.center().y),
+                    pos2(left, icons::text_level(&painter, mark.center().y, font.clone())),
                     Align2::LEFT_CENTER,
                     fit_text(&painter, &title, &font, text_right - left),
                     font.clone(),

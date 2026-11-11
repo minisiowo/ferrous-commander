@@ -1,6 +1,7 @@
 //! Colour themes. Dark is the default;
 //! the others use the colours of Omarchy's themes of the same name;
-//! Omarchy follows the desktop theme (see omarchy.rs).
+//! Omarchy follows the desktop theme (see omarchy.rs). The person's own themes
+//! are files (see user_theme.rs).
 
 use crate::omarchy::Colors;
 use egui::{Color32, CornerRadius, Stroke, Visuals};
@@ -51,7 +52,76 @@ impl ThemeName {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+/// The theme in use: one built in, or one of the person's own by the name of its file.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ThemeId {
+    Builtin(ThemeName),
+    Custom(String),
+}
+
+impl Default for ThemeId {
+    fn default() -> Self {
+        ThemeId::Builtin(ThemeName::default())
+    }
+}
+
+impl From<ThemeName> for ThemeId {
+    fn from(name: ThemeName) -> Self {
+        ThemeId::Builtin(name)
+    }
+}
+
+const CUSTOM_PREFIX: &str = "custom:";
+
+impl ThemeId {
+    /// Built-in themes keep the names saved before own themes existed.
+    pub fn key(&self) -> String {
+        match self {
+            ThemeId::Builtin(name) => format!("{name:?}"),
+            ThemeId::Custom(slug) => format!("{CUSTOM_PREFIX}{slug}"),
+        }
+    }
+
+    pub fn builtin(&self) -> Option<ThemeName> {
+        match self {
+            ThemeId::Builtin(name) => Some(*name),
+            ThemeId::Custom(_) => None,
+        }
+    }
+
+    pub fn custom(&self) -> Option<&str> {
+        match self {
+            ThemeId::Builtin(_) => None,
+            ThemeId::Custom(slug) => Some(slug),
+        }
+    }
+
+    /// Only Dark uses the chosen accent colour; the others bring their own.
+    pub fn has_own_accent(&self) -> bool {
+        self.builtin().is_none_or(ThemeName::has_own_accent)
+    }
+}
+
+impl Serialize for ThemeId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.key())
+    }
+}
+
+impl<'de> Deserialize<'de> for ThemeId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::IntoDeserializer;
+        let text = String::deserialize(d)?;
+        if let Some(slug) = text.strip_prefix(CUSTOM_PREFIX) {
+            return Ok(ThemeId::Custom(slug.to_string()));
+        }
+        let name: Result<ThemeName, serde::de::value::Error> = ThemeName::deserialize(text.as_str().into_deserializer());
+        // A theme that is gone must not make the whole settings file unreadable.
+        Ok(ThemeId::Builtin(name.unwrap_or_default()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     pub dark: bool,
     /// Window background behind the panels.
@@ -267,6 +337,34 @@ impl Palette {
     }
 }
 
+/// What makes a palette hard to use, in words for the person making a theme.
+/// Empty when everything reads. The tests hold every built-in theme to this.
+pub fn readability_issues(pal: &Palette) -> Vec<&'static str> {
+    let mut issues = Vec::new();
+    let mut check = |ok: bool, issue| {
+        if !ok {
+            issues.push(issue);
+        }
+    };
+    check(contrast(pal.text, pal.panel) >= 4.5, "Text is hard to read on the panels");
+    check(contrast(pal.text, pal.row_odd) >= 4.5, "Text is hard to read on every second row");
+    let in_use = tab_look(pal, true, true, false);
+    let other = tab_look(pal, true, false, false);
+    check(contrast(in_use.fill, other.fill) > 1.2, "The panel in use does not stand out from the others");
+    let tabs = [in_use, other, tab_look(pal, false, true, false), tab_look(pal, false, false, true)];
+    check(tabs.iter().all(|look| contrast(look.text, look.fill) >= 4.5), "Tab names are hard to read");
+    check(
+        [pal.selection(), pal.cursor(false)].iter().all(|&fill| contrast(pal.text, fill) >= 4.5),
+        "Selected rows are hard to read",
+    );
+    // One row at a time, on the strongest tint, which soft themes cannot keep at 4.5.
+    check(contrast(pal.text, pal.cursor(true)) >= 4.0, "The keyboard cursor on a selected row is hard to read");
+    check(contrast(pal.cursor(false), pal.panel) > 1.15, "The keyboard cursor is hard to see");
+    // Small print in a window; soft themes cannot keep 4.5 here either.
+    check(contrast(pal.text_weak, pal.content_fill()) >= 4.0, "Small print in windows is hard to read");
+    issues
+}
+
 pub const ANIMATION_MS: f32 = crate::defaults::ANIMATION_MS;
 
 pub fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -329,27 +427,35 @@ pub const TAGS: [(&str, &str); 7] = [
 mod tests {
     use super::*;
 
-    fn assert_tabs_work(name: &str, pal: &Palette) {
-        let in_use = tab_look(pal, true, true, false);
-        let other = tab_look(pal, true, false, false);
-        assert_eq!(in_use.fill, pal.selection(), "{name}");
-        assert!(contrast(in_use.fill, other.fill) > 1.2, "{name}: panels must differ at a glance");
-        for look in [in_use, other, tab_look(pal, false, true, false), tab_look(pal, false, false, true)] {
-            assert!(contrast(look.text, look.fill) >= 4.5, "{name}: unreadable tab {look:?}");
-        }
-    }
-
-    fn assert_rows_work(name: &str, pal: &Palette) {
-        for fill in [pal.selection(), pal.cursor(false)] {
-            assert!(contrast(pal.text, fill) >= 4.5, "{name}: unreadable row on {fill:?}");
-        }
-        // One row at a time, on the strongest tint, which soft themes cannot keep at 4.5.
-        assert!(contrast(pal.text, pal.cursor(true)) >= 4.0, "{name}: unreadable cursor on a selected row");
-        assert!(contrast(pal.cursor(false), pal.panel) > 1.15, "{name}: keyboard cursor is hard to see");
+    fn assert_readable(name: &str, pal: &Palette) {
+        assert_eq!(tab_look(pal, true, true, false).fill, pal.selection(), "{name}");
         assert_ne!(pal.cursor(false), pal.hover, "{name}");
         assert_ne!(pal.cursor(true), pal.selection(), "{name}");
-        // Small print in a window; soft themes cannot keep 4.5 here either.
-        assert!(contrast(pal.text_weak, pal.content_fill()) >= 4.0, "{name}: unreadable small print in a window");
+        assert_eq!(readability_issues(pal), Vec::<&str>::new(), "{name}");
+    }
+
+    #[test]
+    fn an_unreadable_palette_is_named_as_such() {
+        let good = Palette::get(ThemeName::Gruvbox, Color32::WHITE);
+        let bad = Palette { text: good.panel, ..good };
+        assert!(readability_issues(&bad).contains(&"Text is hard to read on the panels"));
+        let flat = Palette { inactive: good.panel, raised: good.panel, accent: good.panel, ..good };
+        assert!(!readability_issues(&flat).is_empty());
+    }
+
+    #[test]
+    fn theme_ids_keep_the_saved_names_and_survive_a_missing_theme() {
+        let read = |text: &str| serde_json::from_value::<ThemeId>(serde_json::Value::String(text.into())).unwrap();
+        assert_eq!(read("Gruvbox"), ThemeId::Builtin(ThemeName::Gruvbox));
+        assert_eq!(read("Nord"), ThemeId::Builtin(ThemeName::TokyoNight));
+        assert_eq!(read("Light"), ThemeId::Builtin(ThemeName::CatppuccinLatte));
+        assert_eq!(read("Removed"), ThemeId::default());
+        assert_eq!(read("custom:my-night"), ThemeId::Custom("my-night".into()));
+        for id in [ThemeId::Builtin(ThemeName::RosePine), ThemeId::Custom("zz".into())] {
+            assert_eq!(read(serde_json::to_value(&id).unwrap().as_str().unwrap()), id);
+        }
+        assert!(ThemeId::Custom("x".into()).has_own_accent());
+        assert!(!ThemeId::default().has_own_accent());
     }
 
     #[test]
@@ -364,8 +470,7 @@ mod tests {
     fn only_the_panel_in_use_shows_an_accented_tab() {
         for name in ThemeName::ALL {
             let pal = Palette::get(name, hex(crate::defaults::ACCENT_RGB));
-            assert_tabs_work(name.label(), &pal);
-            assert_rows_work(name.label(), &pal);
+            assert_readable(name.label(), &pal);
         }
     }
 
@@ -430,8 +535,7 @@ mod tests {
         for (name, text) in themes {
             let colors = crate::omarchy::Colors::parse(&text).unwrap_or_else(|| panic!("{name}: unreadable"));
             let pal = colors.palette();
-            assert_tabs_work(&name, &pal);
-            assert_rows_work(&name, &pal);
+            assert_readable(&name, &pal);
         }
     }
 }
