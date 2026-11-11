@@ -19,14 +19,14 @@ use crate::theme::{Palette, blend};
 pub const FLAG: &str = "--sound-helper";
 /// How often the helper says where in the music it is.
 const TICK: Duration = Duration::from_millis(200);
-/// What the decoders built in can play. The rest of the audio files only show their tags.
-const PLAYED: &[&str] = &["mp3", "wav", "flac", "ogg", "oga", "m4a", "aac", "aiff", "aif", "mka"];
+/// Opening a file or an audio device must not leave a helper stuck forever.
+const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// How far the arrow keys move in the music.
 pub const STEP: Duration = Duration::from_secs(5);
 pub const TRANSPORT_H: f32 = 28.0;
 
 pub fn playable(kind: Kind, ext: &str) -> bool {
-    kind == Kind::Audio && PLAYED.iter().any(|played| ext.eq_ignore_ascii_case(played))
+    kind == Kind::Audio && crate::fsx::AUDIO_PLAYBACK_EXTS.iter().any(|played| ext.eq_ignore_ascii_case(played))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -63,21 +63,27 @@ impl State {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Order {
+enum CommandKind {
     Pause,
     Resume,
-    Seek(Duration, u64),
+    Seek(Duration),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Order {
+    command: CommandKind,
+    revision: u64,
 }
 
 fn write_order(to: &mut impl Write, order: Order) -> io::Result<()> {
-    let (tag, at, seek) = match order {
-        Order::Pause => (1u8, 0, 0u64),
-        Order::Resume => (2, 0, 0),
-        Order::Seek(at, seek) => (3, at.as_millis() as u64, seek),
+    let (tag, at) = match order.command {
+        CommandKind::Pause => (1u8, 0),
+        CommandKind::Resume => (2, 0),
+        CommandKind::Seek(at) => (3, at.as_millis() as u64),
     };
     to.write_all(&[tag])?;
     to.write_all(&at.to_le_bytes())?;
-    to.write_all(&seek.to_le_bytes())?;
+    to.write_all(&order.revision.to_le_bytes())?;
     to.flush()
 }
 
@@ -85,22 +91,35 @@ fn read_order(from: &mut impl Read) -> io::Result<Order> {
     let mut raw = [0; 17];
     from.read_exact(&mut raw)?;
     let at = Duration::from_millis(u64::from_le_bytes(raw[1..9].try_into().unwrap()));
-    match raw[0] {
-        1 => Ok(Order::Pause),
-        2 => Ok(Order::Resume),
-        3 => Ok(Order::Seek(at, u64::from_le_bytes(raw[9..].try_into().unwrap()))),
-        _ => Err(io::ErrorKind::InvalidData.into()),
+    let command = match raw[0] {
+        1 => CommandKind::Pause,
+        2 => CommandKind::Resume,
+        3 => CommandKind::Seek(at),
+        _ => return Err(io::ErrorKind::InvalidData.into()),
+    };
+    Ok(Order { command, revision: u64::from_le_bytes(raw[9..].try_into().unwrap()) })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Report {
+    state: State,
+    at: Duration,
+    length: Duration,
+    /// All commands, including pause and resume, are acknowledged in order.
+    revision: u64,
+}
+
+impl Report {
+    fn new(state: State, at: Duration, length: Duration, revision: u64) -> Self {
+        Self { state, at, length, revision }
     }
 }
 
-// The last field acknowledges the most recent seek applied by the helper.
-type Report = (State, Duration, Duration, u64);
-
-fn write_report(to: &mut impl Write, (state, at, length, seek): Report) -> io::Result<()> {
-    to.write_all(&[state as u8])?;
-    to.write_all(&(at.as_millis() as u64).to_le_bytes())?;
-    to.write_all(&(length.as_millis() as u64).to_le_bytes())?;
-    to.write_all(&seek.to_le_bytes())?;
+fn write_report(to: &mut impl Write, report: Report) -> io::Result<()> {
+    to.write_all(&[report.state as u8])?;
+    to.write_all(&(report.at.as_millis() as u64).to_le_bytes())?;
+    to.write_all(&(report.length.as_millis() as u64).to_le_bytes())?;
+    to.write_all(&report.revision.to_le_bytes())?;
     to.flush()
 }
 
@@ -109,7 +128,7 @@ fn read_report(from: &mut impl Read) -> io::Result<Report> {
     from.read_exact(&mut raw)?;
     let number = |at: usize| Duration::from_millis(u64::from_le_bytes(raw[at..at + 8].try_into().unwrap()));
     let state = State::from_byte(raw[0]).ok_or(io::ErrorKind::InvalidData)?;
-    Ok((state, number(1), number(9), u64::from_le_bytes(raw[17..].try_into().unwrap())))
+    Ok(Report::new(state, number(1), number(9), u64::from_le_bytes(raw[17..].try_into().unwrap())))
 }
 
 type Music = rodio::Decoder<io::BufReader<std::fs::File>>;
@@ -117,8 +136,19 @@ type Music = rodio::Decoder<io::BufReader<std::fs::File>>;
 /// The music in a file and how long it is; zero when nothing says.
 fn open(path: &Path) -> Option<(Music, Duration)> {
     use rodio::Source;
-    let file = std::fs::File::open(path).ok()?;
-    let bytes = file.metadata().ok()?.len();
+    if !std::fs::metadata(path).ok()?.is_file() { return None; }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    // A regular file may be replaced by a FIFO between metadata and open.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() { return None; }
+    let bytes = metadata.len();
     let mut builder = rodio::Decoder::builder().with_data(io::BufReader::new(file)).with_byte_len(bytes).with_seekable(true);
     if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) { builder = builder.with_hint(&ext.to_ascii_lowercase()); }
     let music = builder.build().ok()?;
@@ -131,21 +161,27 @@ fn open(path: &Path) -> Option<(Music, Duration)> {
 
 /// Obeys orders and reports until the music ends or nobody listens any more.
 fn run(player: &rodio::Player, length: Duration, orders: &mpsc::Receiver<Order>, mut report: impl FnMut(Report) -> bool) {
-    let mut seek = 0;
+    let mut revision = 0;
     loop {
         if player.empty() {
-            report((State::Ended, length, length, seek));
+            report(Report::new(State::Ended, length, length, revision));
             return;
         }
         let state = if player.is_paused() { State::Paused } else { State::Playing };
-        if !report((state, player.get_pos(), length, seek)) { return; }
+        if !report(Report::new(state, player.get_pos(), length, revision)) { return; }
         match orders.recv_timeout(TICK) {
-            Ok(Order::Pause) => player.pause(),
-            Ok(Order::Resume) => player.play(),
-            Ok(Order::Seek(to, requested)) => {
-                let to = if length.is_zero() { to } else { to.min(length) };
-                let _ = player.try_seek(to);
-                seek = requested;
+            Ok(order) => {
+                match order.command {
+                    CommandKind::Pause => player.pause(),
+                    CommandKind::Resume => player.play(),
+                    CommandKind::Seek(to) => {
+                        let to = if length.is_zero() { to } else { to.min(length) };
+                        // A rejected seek is acknowledged with the actual position,
+                        // rather than leaving the UI waiting for an impossible move.
+                        let _ = player.try_seek(to);
+                    }
+                }
+                revision = order.revision;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -156,19 +192,26 @@ fn run(player: &rodio::Player, length: Duration, orders: &mpsc::Receiver<Order>,
 /// The body of `ferrous-commander --sound-helper <file>`: plays until told otherwise.
 pub fn serve(path: &Path) {
     super::helper::limit_this_process();
+    let (ready, startup) = mpsc::channel();
+    std::thread::spawn(move || {
+        if matches!(startup.recv_timeout(START_TIMEOUT), Err(mpsc::RecvTimeoutError::Timeout)) {
+            std::process::exit(1);
+        }
+    });
     let mut output = io::stdout().lock();
     let mut report = move |report: Report| write_report(&mut output, report).is_ok();
     let Some((music, length)) = open(path) else {
-        report((State::Unreadable, Duration::ZERO, Duration::ZERO, 0));
+        report(Report::new(State::Unreadable, Duration::ZERO, Duration::ZERO, 0));
         return;
     };
     let Ok(mut device) = rodio::DeviceSinkBuilder::open_default_sink() else {
-        report((State::NoDevice, Duration::ZERO, length, 0));
+        report(Report::new(State::NoDevice, Duration::ZERO, length, 0));
         return;
     };
     device.log_on_drop(false);
     let player = rodio::Player::connect_new(device.mixer());
     player.append(music);
+    let _ = ready.send(());
     let (tx, orders) = mpsc::channel();
     // Ends with the application's end of the pipe, and takes the music along.
     std::thread::spawn(move || {
@@ -190,13 +233,13 @@ pub struct Status {
     since: Instant,
     /// Which helper this is about; a late word from an older one is ignored.
     run: u64,
-    /// Requested seek; reports from before it must not restore the old position.
-    seek: u64,
+    /// Latest requested command; older reports must not undo it.
+    revision: u64,
 }
 
 impl Status {
     fn idle() -> Status {
-        Status { track: None, state: State::Idle, length: Duration::ZERO, at: Duration::ZERO, since: Instant::now(), run: 0, seek: 0 }
+        Status { track: None, state: State::Idle, length: Duration::ZERO, at: Duration::ZERO, since: Instant::now(), run: 0, revision: 0 }
     }
 
     /// Where in the music it is now, between two reports too.
@@ -205,10 +248,10 @@ impl Status {
         if self.length.is_zero() { at } else { at.min(self.length) }
     }
 
-    fn report(&mut self, (state, at, length, seek): Report) {
-        if seek != self.seek && state.trouble().is_none() { return; }
-        self.length = length;
-        self.set(state, at);
+    fn report(&mut self, report: Report) {
+        if report.revision != self.revision && report.state != State::Ended && report.state.trouble().is_none() { return; }
+        self.length = report.length;
+        self.set(report.state, report.at);
     }
 
     fn set(&mut self, state: State, at: Duration) {
@@ -317,26 +360,32 @@ impl Sound {
 
     /// What the play button does: starts this file, or pauses and continues it.
     pub fn toggle(&mut self, path: &Path, ctx: &egui::Context) {
-        let status = self.status();
-        if status.track.as_deref() != Some(path) || !status.state.running() { return self.play(path, ctx); }
-        // Shown at once; the helper's next report confirms it.
-        let (state, order) = if status.state == State::Paused { (State::Playing, Order::Resume) } else { (State::Paused, Order::Pause) };
-        if status.state != State::Starting { self.status.lock().unwrap().set(state, status.position()); }
+        let order = {
+            let mut status = self.status.lock().unwrap();
+            if status.track.as_deref() != Some(path) || !status.state.running() {
+                drop(status);
+                return self.play(path, ctx);
+            }
+            let (state, command) = if status.state == State::Paused { (State::Playing, CommandKind::Resume) } else { (State::Paused, CommandKind::Pause) };
+            let at = status.position();
+            status.revision += 1;
+            status.set(state, at);
+            Order { command, revision: status.revision }
+        };
         self.order(order);
     }
 
     pub fn seek(&mut self, to: Duration) {
-        let status = self.status();
-        if !status.state.running() { return; }
-        let to = if status.length.is_zero() { to } else { to.min(status.length) };
-        let seek = {
+        let order = {
             let mut status = self.status.lock().unwrap();
-            status.seek += 1;
+            if !status.state.running() { return; }
+            let to = if status.length.is_zero() { to } else { to.min(status.length) };
+            status.revision += 1;
             let state = status.state;
             status.set(state, to);
-            status.seek
+            Order { command: CommandKind::Seek(to), revision: status.revision }
         };
-        self.order(Order::Seek(to, seek));
+        self.order(order);
     }
 
     pub fn stop(&mut self) {
@@ -408,11 +457,11 @@ pub fn transport(ui: &Ui, r: Rect, pal: Palette, status: Option<&Status>, id: eg
     let pending_id = held.id.with("pending_seek");
     let pending = ui.data_mut(|data| {
         if let Some(at) = dropped.filter(|_| known) {
-            data.insert_temp(pending_id, (status.run, status.seek, at));
+            data.insert_temp(pending_id, (status.run, status.revision, at));
         }
         let pending = data.get_temp::<(u64, u64, f32)>(pending_id);
         if let Some((run, seek, at)) = pending {
-            if run == status.run && seek == status.seek && status.state.running() { return Some(at); }
+            if run == status.run && seek == status.revision && status.state.running() { return Some(at); }
             data.remove::<(u64, u64, f32)>(pending_id);
         }
         None
@@ -501,13 +550,14 @@ mod tests {
 
     #[test]
     fn orders_and_reports_survive_the_pipe() {
-        for order in [Order::Pause, Order::Resume, Order::Seek(Duration::from_millis(90_500), 42)] {
+        for command in [CommandKind::Pause, CommandKind::Resume, CommandKind::Seek(Duration::from_millis(90_500))] {
+            let order = Order { command, revision: 42 };
             let mut bytes = Vec::new();
             write_order(&mut bytes, order).unwrap();
             assert_eq!(read_order(&mut bytes.as_slice()).unwrap(), order);
         }
         for state in [State::Playing, State::Paused, State::Ended, State::NoDevice, State::Unreadable] {
-            let report = (state, Duration::from_millis(1500), Duration::from_secs(200), 42);
+            let report = Report::new(state, Duration::from_millis(1500), Duration::from_secs(200), 42);
             let mut bytes = Vec::new();
             write_report(&mut bytes, report).unwrap();
             assert_eq!(read_report(&mut bytes.as_slice()).unwrap(), report);
@@ -530,7 +580,7 @@ mod tests {
         let (_tx, orders) = mpsc::channel();
         let mut reports = Vec::new();
         run(&player, length, &orders, |report| { reports.push(report); true });
-        assert_eq!(reports.last(), Some(&(State::Ended, length, length, 0)));
+        assert_eq!(reports.last(), Some(&Report::new(State::Ended, length, length, 0)));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -545,23 +595,23 @@ mod tests {
         let (tx, orders) = mpsc::channel();
         let mut output = Some(output);
         let mut seen = Vec::new();
-        run(&player, length, &orders, |(state, at, _, seek)| {
+        run(&player, length, &orders, |Report { state, at, revision, .. }| {
             seen.push((state, at));
             match seen.len() {
                 1 => {
                     assert_eq!((state, at), (State::Playing, Duration::ZERO));
-                    tx.send(Order::Pause).unwrap();
+                    tx.send(Order { command: CommandKind::Pause, revision: 1 }).unwrap();
                 }
                 // Nothing was taken yet, as with a device that has not asked for sound.
                 2 => {
                     assert_eq!((state, at), (State::Paused, Duration::ZERO));
                     listen(output.take().unwrap());
-                    tx.send(Order::Seek(Duration::from_secs(599), 1)).unwrap();
+                    tx.send(Order { command: CommandKind::Seek(Duration::from_secs(599)), revision: 2 }).unwrap();
                 }
                 3 => {
                     assert_eq!((state, at), (State::Paused, Duration::from_secs(599)), "moved while paused");
-                    assert_eq!(seek, 1, "the report acknowledges the applied seek");
-                    tx.send(Order::Resume).unwrap();
+                    assert_eq!(revision, 2, "the report acknowledges the applied seek");
+                    tx.send(Order { command: CommandKind::Resume, revision: 3 }).unwrap();
                 }
                 _ => {}
             }
@@ -602,7 +652,7 @@ mod tests {
         let Some(tool) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).map(|d| d.join(format!("ffmpeg{}", std::env::consts::EXE_SUFFIX))).find(|p| p.is_file()) else { return };
         let root = crate::preview::load::scratch("sound_formats");
         let mut made = 0;
-        for ext in PLAYED {
+        for ext in crate::fsx::AUDIO_PLAYBACK_EXTS {
             let file = root.join(format!("tone.{ext}"));
             let done = Command::new(&tool).args(["-hide_banner", "-loglevel", "error", "-nostdin", "-f", "lavfi", "-i", "sine=frequency=440:duration=2"]).arg(&file).status();
             // This ffmpeg may lack an encoder; the others still count.
@@ -646,6 +696,58 @@ mod tests {
         assert!(sound.status().position() < Duration::from_secs(1), "the other file starts from its beginning");
         sound.stop();
         assert_eq!((sound.status().track, sound.status().state), (None, State::Idle));
+    }
+
+    #[test]
+    fn stale_reports_cannot_undo_pause_resume_or_startup_toggles() {
+        let (mut sound, ctx) = silent();
+        let file = Path::new("/music/a.mp3");
+        sound.play(file, &ctx);
+        sound.status.lock().unwrap().set(State::Starting, Duration::ZERO);
+        sound.toggle(file, &ctx);
+        assert_eq!(sound.status().state, State::Paused, "pause is remembered while the device opens");
+        sound.status.lock().unwrap().report(Report::new(State::Playing, Duration::ZERO, Duration::from_secs(100), 0));
+        assert_eq!(sound.status().state, State::Paused);
+        sound.toggle(file, &ctx);
+        sound.status.lock().unwrap().report(Report::new(State::Paused, Duration::ZERO, Duration::from_secs(100), 1));
+        assert_eq!(sound.status().state, State::Playing, "a late pause does not undo resume");
+        sound.status.lock().unwrap().report(Report::new(State::Playing, Duration::from_secs(2), Duration::from_secs(100), 2));
+        assert!(sound.status().position() >= Duration::from_secs(2));
+        sound.toggle(file, &ctx);
+        sound.status.lock().unwrap().report(Report::new(State::Playing, Duration::from_secs(3), Duration::from_secs(100), 2));
+        assert_eq!(sound.status().state, State::Paused);
+        sound.status.lock().unwrap().report(Report::new(State::Ended, Duration::from_secs(100), Duration::from_secs(100), 2));
+        assert_eq!(sound.status().state, State::Ended, "the helper may finish before a final pause reaches it");
+    }
+
+    #[test]
+    fn every_playable_extension_is_classified_as_audio() {
+        for ext in crate::fsx::AUDIO_PLAYBACK_EXTS {
+            assert!(playable(Kind::from_ext(ext), ext), "{ext}");
+            assert!(playable(Kind::from_ext(&ext.to_uppercase()), ext), "{ext}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_files_are_refused_without_opening_or_reading_them() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = crate::preview::load::scratch("sound_special");
+        let pipe = root.join("pipe.mp3");
+        let raw = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a valid pathname, creating a FIFO in this test's directory.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || { let _ = tx.send(open(&pipe).is_none()); });
+        assert!(rx.recv_timeout(Duration::from_secs(1)).expect("opening a FIFO must not block"));
+        assert!(open(Path::new("/dev/zero")).is_none());
+        assert!(open(&root).is_none());
+        let file = root.join("a.wav");
+        let link = root.join("link.wav");
+        write_wav(&file, 1, 8000);
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(open(&link).is_some(), "links to regular music files still work");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -746,14 +848,14 @@ mod tests {
                     assert!((shown - target).abs() < 0.001, "release jumped to {shown}, wanted {target}");
                 }
                 let [Ask::Seek(to)] = asks[..] else { panic!("{asks:?}") };
-                let old_seek = sound.status().seek;
+                let old_seek = sound.status().revision;
                 sound.seek(to);
                 // A report already in the pipe must not restore the pre-seek position.
-                sound.status.lock().unwrap().report((state, Duration::from_secs(40), Duration::from_secs(100), old_seek));
+                sound.status.lock().unwrap().report(Report::new(state, Duration::from_secs(40), Duration::from_secs(100), old_seek));
                 let (_, shown) = frame(&sound, vec![]);
                 assert!((shown - target).abs() < 0.01, "stale report jumped to {shown}");
-                let seek = sound.status().seek;
-                sound.status.lock().unwrap().report((state, to + Duration::from_millis(250), Duration::from_secs(100), seek));
+                let seek = sound.status().revision;
+                sound.status.lock().unwrap().report(Report::new(state, to + Duration::from_millis(250), Duration::from_secs(100), seek));
                 let (_, shown) = frame(&sound, vec![]);
                 assert!((shown - (target + 0.0025)).abs() < 0.001, "acknowledged playback resumes at {shown}");
             }
@@ -769,12 +871,12 @@ mod tests {
         sound.seek(Duration::from_secs(80));
         sound.seek(Duration::from_secs(20));
         let mut status = sound.status.lock().unwrap();
-        status.report((State::Playing, Duration::from_secs(80), Duration::from_secs(100), 1));
+        status.report(Report::new(State::Playing, Duration::from_secs(80), Duration::from_secs(100), 2));
         assert_eq!(status.position(), Duration::from_secs(20));
         assert_eq!(status.state, State::Paused);
-        status.report((State::Paused, Duration::from_millis(20_050), Duration::from_secs(100), 2));
+        status.report(Report::new(State::Paused, Duration::from_millis(20_050), Duration::from_secs(100), 3));
         assert_eq!(status.position(), Duration::from_millis(20_050));
-        status.report((State::NoDevice, Duration::ZERO, Duration::ZERO, 0));
+        status.report(Report::new(State::NoDevice, Duration::ZERO, Duration::ZERO, 0));
         assert_eq!(status.state, State::NoDevice, "startup failures are reported even if a seek was queued");
     }
 

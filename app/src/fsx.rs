@@ -23,7 +23,9 @@ pub const IMAGE_EXTS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tif", "tiff", "tga", "pnm", "ppm", "pgm", "pbm", "pam", "qoi", "hdr", "dds", "exr",
 ];
 const VIDEO_EXTS: &[&str] = &["mkv", "avi", "mp4", "mov", "webm", "m4v", "wmv", "mpeg", "mpg", "3gp"];
-const AUDIO_EXTS: &[&str] = &["mp3", "wav", "aiff", "flac", "aac", "m4a", "ape", "ogg", "opus", "wma"];
+/// Audio formats decoded by the preview player; also used for file classification.
+pub const AUDIO_PLAYBACK_EXTS: &[&str] = &["mp3", "wav", "flac", "ogg", "oga", "m4a", "aac", "aiff", "aif", "mka"];
+const AUDIO_EXTS: &[&str] = &["ape", "opus", "wma"];
 const DOC_EXTS: &[&str] = &[
     "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "pdf", "rtf", "epub",
 ];
@@ -57,7 +59,7 @@ impl Kind {
             Kind::Image
         } else if VIDEO_EXTS.contains(&e) || original::VIDEO_EXTENSIONS.contains(&e) {
             Kind::Video
-        } else if AUDIO_EXTS.contains(&e) || original::AUDIO_EXTENSIONS.contains(&e) {
+        } else if AUDIO_PLAYBACK_EXTS.contains(&e) || AUDIO_EXTS.contains(&e) || original::AUDIO_EXTENSIONS.contains(&e) {
             Kind::Audio
         } else if DOC_EXTS.contains(&e) || original::DOCUMENT_EXTENSIONS.contains(&e) {
             Kind::Document
