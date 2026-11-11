@@ -1751,6 +1751,10 @@ fn music_goes_on_while_its_file_is_on_show_and_ends_when_the_cursor_leaves_it() 
         app.st.layout = layout;
         app.panes[0].cursor = Some(0);
         frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        assert_eq!(app.sound.status().state, State::Playing, "{layout:?}: preview starts automatically");
+        app.sound.toggle(&song, &ctx);
+        for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+        assert_eq!(app.sound.status().state, State::Paused, "manual pause survives redraws");
         app.sound.toggle(&song, &ctx);
         for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
         assert_eq!(app.sound.status().state, State::Playing, "{layout:?}: the pane shows the file");
@@ -1764,7 +1768,6 @@ fn music_goes_on_while_its_file_is_on_show_and_ends_when_the_cursor_leaves_it() 
     assert_eq!(app.sound.status().state, State::Idle, "no pane and no window: nothing shows the file");
     frame(&ctx, &mut app, vec![Event::Text(" ".into())], Modifiers::NONE);
     assert!(app.preview_window);
-    app.sound.toggle(&song, &ctx);
     for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
     assert_eq!(app.sound.status().state, State::Playing, "the preview window shows it");
     key(&ctx, &mut app, Key::Escape, Modifiers::NONE);

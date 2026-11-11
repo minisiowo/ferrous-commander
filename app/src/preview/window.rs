@@ -192,7 +192,7 @@ fn fitting_size(ctx: &egui::Context, content: &PreviewContent, largest: Vec2) ->
         PreviewContent::Archive(entries, ..) => vec2(READING_WIDTH, (entries.len() + 1) as f32 * list_step + SCROLLBAR),
         PreviewContent::Info(rows, cover, _) => {
             let picture = cover.as_ref().map_or(Vec2::splat(96.0), |(_, size)| picture_body(*size, ctx.pixels_per_point()) - Vec2::splat(24.0));
-            vec2(picture.x.max(504.0) + 56.0, picture.y + 24.0 + rows.len() as f32 * 24.0 + 56.0 + sound::TRANSPORT_H + 20.0)
+            vec2(picture.x.max(504.0) + 56.0, picture.y + 24.0 + rows.len() as f32 * 24.0 + 56.0 + sound::TRANSPORT_H + 80.0)
         }
         // Laid out only once shown, so its length is not known yet: a page to read.
         PreviewContent::Doc(_) => vec2(READING_WIDTH + 64.0, largest.y),
@@ -257,7 +257,7 @@ impl App {
             return;
         };
         self.want_preview(Some(Key::of(&e)), ctx);
-        self.sound_shown = Some(e.path.clone());
+        self.sound_preview(&e, ctx);
         let mut neighbours: Vec<Key> = self.panes[i].cursor.map_or_else(Vec::new, |row| {
             [row.wrapping_sub(1), row + 1].into_iter().filter_map(|r| self.entry_at(i, r)).filter(|n| !n.is_dir).map(Key::of).collect()
         });
@@ -522,39 +522,42 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
         let r = fitted_rect(body, tex, *orig, 1.0, paged, ctx.pixels_per_point());
         ui.painter_at(body).image(tex.id(), r, unit_uv(), Color32::WHITE.gamma_multiply(1.0 - t));
     }
-    let mut child = ui.new_child(UiBuilder::new().max_rect(body));
-    child.set_clip_rect(body);
+    // Keep music controls above the navigation overlay even in a short window.
+    let music = sound::playable(s.kind, &s.ext).then(|| music_strip(body));
+    let content_body = music.map_or(body, |strip| Rect::from_min_max(body.min, pos2(body.max.x, strip.min.y - 20.0)));
+    let mut child = ui.new_child(UiBuilder::new().max_rect(content_body));
+    child.set_clip_rect(content_body);
     child.multiply_opacity(t);
     let content = s.content.clone();
     match &content {
-        PreviewContent::Text(doc) if doc.text.is_empty() => card(&child, s, body, "This file is empty"),
-        PreviewContent::Text(doc) => text_view(&mut child, s, doc, body),
-        PreviewContent::Model(tex, orig) => model_view(&mut child, s, tex, *orig, body),
+        PreviewContent::Text(doc) if doc.text.is_empty() => card(&child, s, content_body, "This file is empty"),
+        PreviewContent::Text(doc) => text_view(&mut child, s, doc, content_body),
+        PreviewContent::Model(tex, orig) => model_view(&mut child, s, tex, *orig, content_body),
         PreviewContent::Image(tex, orig, alpha) => {
             let sharpen = tex.size()[0] < orig[0] as usize;
-            image_view(&mut child, s, tex, *orig, *alpha, body, sharpen, false);
+            image_view(&mut child, s, tex, *orig, *alpha, content_body, sharpen, false);
         }
-        PreviewContent::Page { texture, orig, .. } => image_view(&mut child, s, texture, *orig, false, body, true, true),
+        PreviewContent::Page { texture, orig, .. } => image_view(&mut child, s, texture, *orig, false, content_body, true, true),
         PreviewContent::Animation(frames, orig) => {
             let tex = playing_frame(s, &ctx, frames);
-            image_view(&mut child, s, tex, *orig, true, body, false, false);
+            image_view(&mut child, s, tex, *orig, true, content_body, false, false);
         }
         PreviewContent::Doc(doc) => match (&doc.source, s.view.source) {
-            (Some(source), true) => text_view(&mut child, s, source, body),
-            _ => doc_view(&mut child, s, doc, body),
+            (Some(source), true) => text_view(&mut child, s, source, content_body),
+            _ => doc_view(&mut child, s, doc, content_body),
         },
-        PreviewContent::Hex(bytes, total) => hex_view(&mut child, s, bytes, *total, body),
-        PreviewContent::Table(table) => table_view(&mut child, s, table, body),
-        PreviewContent::Archive(entries, total, trimmed) => archive_view(&mut child, s, entries, *total, *trimmed, body),
+        PreviewContent::Hex(bytes, total) => hex_view(&mut child, s, bytes, *total, content_body),
+        PreviewContent::Table(table) => table_view(&mut child, s, table, content_body),
+        PreviewContent::Archive(entries, total, trimmed) => archive_view(&mut child, s, entries, *total, *trimmed, content_body),
         PreviewContent::Info(rows, cover, _) => {
             let picture = cover.as_ref().map(|(frames, size)| (playing_frame(s, &ctx, frames), *size));
-            info_view(&child, s, rows, picture, body);
+            info_view(&child, s, rows, picture, content_body);
         }
         PreviewContent::Folder { folders, files, size } => {
             let text = format!("{folders} folders, {files} files\n{}", fsx::fmt_size(*size, s.mebibytes));
-            card(&child, s, body, &text);
+            card(&child, s, content_body, &text);
         }
-        PreviewContent::Error(message) => card(&child, s, body, message),
+        PreviewContent::Error(message) => card(&child, s, content_body, message),
         PreviewContent::Detail(_) | PreviewContent::None | PreviewContent::Loading => {}
     }
     if let Some(since) = s.loading {
@@ -562,6 +565,13 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
             paced_spinner(ui, Rect::from_center_size(body.center(), Vec2::splat(28.0)));
         } else {
             ctx.request_repaint_after(SPINNER_AFTER);
+        }
+    }
+    if let Some(strip) = music {
+        match sound::transport(ui, strip, pal, s.music().as_ref(), egui::Id::unique("preview_sound")) {
+            Some(sound::Ask::Toggle) => s.send(Cmd::Play, &ctx),
+            Some(sound::Ask::Seek(to)) => s.send(Cmd::Seek(to.as_millis() as u64), &ctx),
+            None => {}
         }
     }
     let zoomable = matches!(content, PreviewContent::Image(..) | PreviewContent::Model(..) | PreviewContent::Page { .. } | PreviewContent::Animation(..));
@@ -999,12 +1009,10 @@ fn archive_view(ui: &mut Ui, s: &mut Shared, entries: &[ArchiveEntry], total: u6
     s.view.offset = output.state.clamped_offset().y;
 }
 
-fn info_view(ui: &Ui, s: &mut Shared, rows: &[(String, String)], cover: Option<(&egui::TextureHandle, [u32; 2])>, body: Rect) {
+fn info_view(ui: &Ui, s: &Shared, rows: &[(String, String)], cover: Option<(&egui::TextureHandle, [u32; 2])>, body: Rect) {
     let pal = s.pal;
     let p = ui.painter_at(body);
-    let played = sound::playable(s.kind, &s.ext);
-    let transport_h = if played { sound::TRANSPORT_H + 20.0 } else { 0.0 };
-    let (row_h, table_h) = (24.0, rows.len() as f32 * 24.0 + transport_h);
+    let (row_h, table_h) = (24.0, rows.len() as f32 * 24.0);
     let area = body.shrink(28.0);
     let picture_h = (area.height() - table_h - 24.0).max(64.0);
     let top = if let Some((tex, size)) = cover {
@@ -1028,15 +1036,6 @@ fn info_view(ui: &Ui, s: &mut Shared, rows: &[(String, String)], cover: Option<(
         p.text(pos2(middle - 10.0, y), Align2::RIGHT_CENTER, key, font.clone(), pal.text_weak);
         let shown = fit_text(&p, value, &font, body.max.x - middle - 40.0);
         p.text(pos2(middle + 10.0, y), Align2::LEFT_CENTER, shown, font.clone(), pal.text);
-    }
-    if played {
-        let width = (body.width() - 80.0).min(420.0);
-        let r = Rect::from_center_size(pos2(middle, top + rows.len() as f32 * row_h + 20.0 + sound::TRANSPORT_H / 2.0), vec2(width, sound::TRANSPORT_H));
-        match sound::transport(ui, r, pal, s.music().as_ref(), egui::Id::unique("preview_sound")) {
-            Some(sound::Ask::Toggle) => s.send(Cmd::Play, ui.ctx()),
-            Some(sound::Ask::Seek(to)) => s.send(Cmd::Seek(to.as_millis() as u64), ui.ctx()),
-            None => {}
-        }
     }
 }
 
@@ -1067,6 +1066,13 @@ fn hex_view(ui: &mut Ui, s: &mut Shared, bytes: &[u8], total: u64, body: Rect) {
         }
     });
     s.view.offset = output.state.clamped_offset().y;
+}
+
+fn music_strip(body: Rect) -> Rect {
+    Rect::from_center_size(
+        pos2(body.center().x, body.max.y - 60.0 - sound::TRANSPORT_H / 2.0),
+        vec2((body.width() - 40.0).clamp(sound::TRANSPORT_H, 420.0), sound::TRANSPORT_H),
+    )
 }
 
 fn control_bar(ui: &mut Ui, s: &mut Shared, body: Rect, ctx: &egui::Context, image: bool, pages: Option<(u32, u32)>) {
@@ -1261,6 +1267,53 @@ mod tests {
         let rows = Arc::new(vec![("Length".to_string(), "1:40".to_string())]);
         let key = Key { path: PathBuf::from("/music/song.mp3"), modified: None, size: 1, page: 0, crop: None, view: None };
         Shared { name: "song.mp3".into(), kind: Kind::Audio, ext: "mp3".into(), content: PreviewContent::Info(rows, None, false), model: Some(key), ..model_on_screen(ctx) }
+    }
+
+    #[test]
+    fn music_controls_stay_visible_and_clickable_above_navigation() {
+        use egui::{Event, Modifiers, PointerButton, RawInput};
+        for size in [vec2(320.0, 240.0), vec2(560.0, 420.0), vec2(800.0, 600.0)] {
+            let ctx = egui::Context::default();
+            let mut s = music_on_screen(&ctx);
+            let full = Rect::from_min_size(Pos2::ZERO, size);
+            let body = Rect::from_min_max(pos2(0.0, BAR_H), full.max);
+            let strip = music_strip(body);
+            let navigation = Rect::from_center_size(pos2(body.center().x, body.max.y - 30.0), vec2(170.0, 36.0));
+            assert!(body.contains_rect(strip) && !strip.intersects(navigation));
+            let at = strip.left_center() + vec2(sound::TRANSPORT_H / 2.0, 0.0);
+            let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            // Dense metadata and loading must never cover or hide the player.
+            for content in [PreviewContent::Info(Arc::new(vec![("Tag".into(), "Value".into()); 12]), None, false), PreviewContent::Loading] {
+                s.content = content;
+                for events in [vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)], vec![]] {
+                    let mut out = ctx.run_ui(RawInput { screen_rect: Some(full), events, ..Default::default() }, |ui| draw(ui, &mut s, ViewportClass::Deferred));
+                    out.textures_delta.clear();
+                }
+                assert_eq!(std::mem::take(&mut s.commands), [Cmd::Play], "{size:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn music_preview_starts_each_file_once_and_preserves_pause_and_failures() {
+        let (mut app, ctx) = app();
+        let song = Entry::named(PathBuf::from("song.mp3"), "song.mp3".into(), false, Kind::Audio);
+        let next = Entry::named(PathBuf::from("next.mp3"), "next.mp3".into(), false, Kind::Audio);
+        app.sound_preview(&song, &ctx);
+        assert_eq!(app.sound.status().state, sound::State::Playing);
+        for state in [sound::State::Paused, sound::State::Ended, sound::State::NoDevice, sound::State::Failed] {
+            app.sound.shared().lock().unwrap().state = state;
+            app.sound_preview(&song, &ctx);
+            assert_eq!(app.sound.status().state, state);
+        }
+        app.sound_preview(&next, &ctx);
+        assert_eq!(app.sound.status().track, Some(next.path));
+        assert_eq!(app.sound.status().state, sound::State::Playing);
+        app.sound_follows();
+        app.sound_follows();
+        assert_eq!(app.sound.status().state, sound::State::Idle);
+        app.sound_preview(&song, &ctx);
+        assert_eq!(app.sound.status().state, sound::State::Playing, "reopening starts again");
     }
 
     #[test]

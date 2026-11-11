@@ -66,47 +66,50 @@ impl State {
 enum Order {
     Pause,
     Resume,
-    Seek(Duration),
+    Seek(Duration, u64),
 }
 
 fn write_order(to: &mut impl Write, order: Order) -> io::Result<()> {
-    let (tag, at) = match order {
-        Order::Pause => (1u8, 0),
-        Order::Resume => (2, 0),
-        Order::Seek(at) => (3, at.as_millis() as u64),
+    let (tag, at, seek) = match order {
+        Order::Pause => (1u8, 0, 0u64),
+        Order::Resume => (2, 0, 0),
+        Order::Seek(at, seek) => (3, at.as_millis() as u64, seek),
     };
     to.write_all(&[tag])?;
     to.write_all(&at.to_le_bytes())?;
+    to.write_all(&seek.to_le_bytes())?;
     to.flush()
 }
 
 fn read_order(from: &mut impl Read) -> io::Result<Order> {
-    let mut raw = [0; 9];
+    let mut raw = [0; 17];
     from.read_exact(&mut raw)?;
-    let at = Duration::from_millis(u64::from_le_bytes(raw[1..].try_into().unwrap()));
+    let at = Duration::from_millis(u64::from_le_bytes(raw[1..9].try_into().unwrap()));
     match raw[0] {
         1 => Ok(Order::Pause),
         2 => Ok(Order::Resume),
-        3 => Ok(Order::Seek(at)),
+        3 => Ok(Order::Seek(at, u64::from_le_bytes(raw[9..].try_into().unwrap()))),
         _ => Err(io::ErrorKind::InvalidData.into()),
     }
 }
 
-type Report = (State, Duration, Duration);
+// The last field acknowledges the most recent seek applied by the helper.
+type Report = (State, Duration, Duration, u64);
 
-fn write_report(to: &mut impl Write, (state, at, length): Report) -> io::Result<()> {
+fn write_report(to: &mut impl Write, (state, at, length, seek): Report) -> io::Result<()> {
     to.write_all(&[state as u8])?;
     to.write_all(&(at.as_millis() as u64).to_le_bytes())?;
     to.write_all(&(length.as_millis() as u64).to_le_bytes())?;
+    to.write_all(&seek.to_le_bytes())?;
     to.flush()
 }
 
 fn read_report(from: &mut impl Read) -> io::Result<Report> {
-    let mut raw = [0; 17];
+    let mut raw = [0; 25];
     from.read_exact(&mut raw)?;
     let number = |at: usize| Duration::from_millis(u64::from_le_bytes(raw[at..at + 8].try_into().unwrap()));
     let state = State::from_byte(raw[0]).ok_or(io::ErrorKind::InvalidData)?;
-    Ok((state, number(1), number(9)))
+    Ok((state, number(1), number(9), u64::from_le_bytes(raw[17..].try_into().unwrap())))
 }
 
 type Music = rodio::Decoder<io::BufReader<std::fs::File>>;
@@ -128,19 +131,21 @@ fn open(path: &Path) -> Option<(Music, Duration)> {
 
 /// Obeys orders and reports until the music ends or nobody listens any more.
 fn run(player: &rodio::Player, length: Duration, orders: &mpsc::Receiver<Order>, mut report: impl FnMut(Report) -> bool) {
+    let mut seek = 0;
     loop {
         if player.empty() {
-            report((State::Ended, length, length));
+            report((State::Ended, length, length, seek));
             return;
         }
         let state = if player.is_paused() { State::Paused } else { State::Playing };
-        if !report((state, player.get_pos(), length)) { return; }
+        if !report((state, player.get_pos(), length, seek)) { return; }
         match orders.recv_timeout(TICK) {
             Ok(Order::Pause) => player.pause(),
             Ok(Order::Resume) => player.play(),
-            Ok(Order::Seek(to)) => {
+            Ok(Order::Seek(to, requested)) => {
                 let to = if length.is_zero() { to } else { to.min(length) };
                 let _ = player.try_seek(to);
+                seek = requested;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -154,11 +159,11 @@ pub fn serve(path: &Path) {
     let mut output = io::stdout().lock();
     let mut report = move |report: Report| write_report(&mut output, report).is_ok();
     let Some((music, length)) = open(path) else {
-        report((State::Unreadable, Duration::ZERO, Duration::ZERO));
+        report((State::Unreadable, Duration::ZERO, Duration::ZERO, 0));
         return;
     };
     let Ok(mut device) = rodio::DeviceSinkBuilder::open_default_sink() else {
-        report((State::NoDevice, Duration::ZERO, length));
+        report((State::NoDevice, Duration::ZERO, length, 0));
         return;
     };
     device.log_on_drop(false);
@@ -185,17 +190,25 @@ pub struct Status {
     since: Instant,
     /// Which helper this is about; a late word from an older one is ignored.
     run: u64,
+    /// Requested seek; reports from before it must not restore the old position.
+    seek: u64,
 }
 
 impl Status {
     fn idle() -> Status {
-        Status { track: None, state: State::Idle, length: Duration::ZERO, at: Duration::ZERO, since: Instant::now(), run: 0 }
+        Status { track: None, state: State::Idle, length: Duration::ZERO, at: Duration::ZERO, since: Instant::now(), run: 0, seek: 0 }
     }
 
     /// Where in the music it is now, between two reports too.
     pub fn position(&self) -> Duration {
         let at = if self.state == State::Playing { self.at + self.since.elapsed() } else { self.at };
         if self.length.is_zero() { at } else { at.min(self.length) }
+    }
+
+    fn report(&mut self, (state, at, length, seek): Report) {
+        if seek != self.seek && state.trouble().is_none() { return; }
+        self.length = length;
+        self.set(state, at);
     }
 
     fn set(&mut self, state: State, at: Duration) {
@@ -269,10 +282,7 @@ impl Sound {
                 if status.run != run { return; }
                 let before = status.state;
                 match report {
-                    Ok((state, at, length)) => {
-                        status.length = length;
-                        status.set(state, at);
-                    }
+                    Ok(report) => status.report(report),
                     Err(_) if before.running() => status.set(State::Failed, Duration::ZERO),
                     Err(_) => {}
                 }
@@ -319,8 +329,14 @@ impl Sound {
         let status = self.status();
         if !status.state.running() { return; }
         let to = if status.length.is_zero() { to } else { to.min(status.length) };
-        self.status.lock().unwrap().set(status.state, to);
-        self.order(Order::Seek(to));
+        let seek = {
+            let mut status = self.status.lock().unwrap();
+            status.seek += 1;
+            let state = status.state;
+            status.set(state, to);
+            status.seek
+        };
+        self.order(Order::Seek(to, seek));
     }
 
     pub fn stop(&mut self) {
@@ -379,7 +395,6 @@ pub fn transport(ui: &Ui, r: Rect, pal: Palette, status: Option<&Status>, id: eg
     let pointed = held.interact_pointer_pos().map(|at| ((at.x - line.min.x) / line.width().max(1.0)).clamp(0.0, 1.0));
     let playing = if known { status.position().as_secs_f32() / status.length.as_secs_f32() } else { 0.0 };
     // While the line is held it shows the hand, and the music moves once on letting go.
-    let shown = if held.dragged() || held.is_pointer_button_down_on() { pointed.unwrap_or(playing) } else { playing };
     let dropped = ui.data_mut(|data| {
         let last = data.get_temp::<f32>(held.id);
         match pointed {
@@ -388,7 +403,22 @@ pub fn transport(ui: &Ui, r: Rect, pal: Palette, status: Option<&Status>, id: eg
         }
         last.filter(|_| pointed.is_none())
     });
+    // The deferred preview queues the seek for the main window. Keep drawing the
+    // released position until that window has applied it to the shared status.
+    let pending_id = held.id.with("pending_seek");
+    let pending = ui.data_mut(|data| {
+        if let Some(at) = dropped.filter(|_| known) {
+            data.insert_temp(pending_id, (status.run, status.seek, at));
+        }
+        let pending = data.get_temp::<(u64, u64, f32)>(pending_id);
+        if let Some((run, seek, at)) = pending {
+            if run == status.run && seek == status.seek && status.state.running() { return Some(at); }
+            data.remove::<(u64, u64, f32)>(pending_id);
+        }
+        None
+    });
     if let Some(at) = dropped.filter(|_| known) { ask = Some(Ask::Seek(status.length.mul_f32(at))); }
+    let shown = pointed.or(pending).unwrap_or(playing);
     let y = line.center().y;
     p.line_segment([pos2(line.min.x, y), pos2(line.max.x, y)], Stroke::new(3.0, blend(pal.panel, pal.text, 0.12)));
     let x = line.min.x + line.width() * shown;
@@ -410,6 +440,14 @@ impl App {
         match ask {
             Ask::Toggle => self.sound.toggle(path, ctx),
             Ask::Seek(to) => self.sound.seek(to),
+        }
+    }
+
+    /// Start a newly shown track once; paused, ended and failed tracks keep their state.
+    pub(crate) fn sound_preview(&mut self, e: &Entry, ctx: &egui::Context) {
+        self.sound_shown = Some(e.path.clone());
+        if playable(e.kind, e.ext()) && self.sound.status().track.as_ref() != Some(&e.path) {
+            self.sound.play(&e.path, ctx);
         }
     }
 
@@ -463,19 +501,19 @@ mod tests {
 
     #[test]
     fn orders_and_reports_survive_the_pipe() {
-        for order in [Order::Pause, Order::Resume, Order::Seek(Duration::from_millis(90_500))] {
+        for order in [Order::Pause, Order::Resume, Order::Seek(Duration::from_millis(90_500), 42)] {
             let mut bytes = Vec::new();
             write_order(&mut bytes, order).unwrap();
             assert_eq!(read_order(&mut bytes.as_slice()).unwrap(), order);
         }
         for state in [State::Playing, State::Paused, State::Ended, State::NoDevice, State::Unreadable] {
-            let report = (state, Duration::from_millis(1500), Duration::from_secs(200));
+            let report = (state, Duration::from_millis(1500), Duration::from_secs(200), 42);
             let mut bytes = Vec::new();
             write_report(&mut bytes, report).unwrap();
             assert_eq!(read_report(&mut bytes.as_slice()).unwrap(), report);
         }
-        assert!(read_order(&mut [9u8; 9].as_slice()).is_err(), "an unknown order");
-        assert!(read_report(&mut [0u8; 17].as_slice()).is_err(), "a state the helper never reports");
+        assert!(read_order(&mut [9u8; 17].as_slice()).is_err(), "an unknown order");
+        assert!(read_report(&mut [0u8; 25].as_slice()).is_err(), "a state the helper never reports");
         assert!(read_report(&mut [State::Playing as u8; 5].as_slice()).is_err(), "cut short");
     }
 
@@ -492,7 +530,7 @@ mod tests {
         let (_tx, orders) = mpsc::channel();
         let mut reports = Vec::new();
         run(&player, length, &orders, |report| { reports.push(report); true });
-        assert_eq!(reports.last(), Some(&(State::Ended, length, length)));
+        assert_eq!(reports.last(), Some(&(State::Ended, length, length, 0)));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -507,7 +545,7 @@ mod tests {
         let (tx, orders) = mpsc::channel();
         let mut output = Some(output);
         let mut seen = Vec::new();
-        run(&player, length, &orders, |(state, at, _)| {
+        run(&player, length, &orders, |(state, at, _, seek)| {
             seen.push((state, at));
             match seen.len() {
                 1 => {
@@ -518,10 +556,11 @@ mod tests {
                 2 => {
                     assert_eq!((state, at), (State::Paused, Duration::ZERO));
                     listen(output.take().unwrap());
-                    tx.send(Order::Seek(Duration::from_secs(599))).unwrap();
+                    tx.send(Order::Seek(Duration::from_secs(599), 1)).unwrap();
                 }
                 3 => {
                     assert_eq!((state, at), (State::Paused, Duration::from_secs(599)), "moved while paused");
+                    assert_eq!(seek, 1, "the report acknowledges the applied seek");
                     tx.send(Order::Resume).unwrap();
                 }
                 _ => {}
@@ -666,13 +705,86 @@ mod tests {
         assert_eq!(click(&sound, play), [Ask::Toggle], "the button stays a button while music plays");
     }
 
+    #[test]
+    fn releasing_the_slider_keeps_its_position_until_the_seek_is_applied() {
+        use egui::{Event, Modifiers, PointerButton, RawInput, Shape};
+        for state in [State::Playing, State::Paused] {
+            let (mut sound, ctx) = silent();
+            sound.play(Path::new("/music/a.mp3"), &ctx);
+            {
+                let mut status = sound.status.lock().unwrap();
+                status.length = Duration::from_secs(100);
+                status.set(state, Duration::from_secs(10));
+            }
+            let pal = Palette::get(crate::theme::ThemeName::Dark, egui::Color32::WHITE);
+            let r = Rect::from_min_size(pos2(100.0, 100.0), vec2(400.0, TRANSPORT_H));
+            let line = |part: f32| pos2(178.0 + 282.0 * part, 114.0);
+            let button = |part, pressed| Event::PointerButton { pos: line(part), button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            let frame = |sound: &Sound, events| {
+                let status = sound.status();
+                let mut ask = None;
+                let mut out = ctx.run_ui(RawInput { events, ..Default::default() }, |ui| {
+                    ask = transport(ui, r, pal, Some(&status), egui::Id::unique("seek_regression"));
+                });
+                out.textures_delta.clear();
+                let x = out.shapes.iter().find_map(|shape| match &shape.shape {
+                    Shape::LineSegment { points, stroke } if stroke.color == pal.accent => Some(points[1].x),
+                    _ => None,
+                }).expect("the played part of the timeline is drawn");
+                (ask, (x - 178.0) / 282.0)
+            };
+            for target in [0.8, 0.2] {
+                frame(&sound, vec![Event::PointerMoved(line(0.4))]);
+                frame(&sound, vec![button(0.4, true)]);
+                let (_, shown) = frame(&sound, vec![Event::PointerMoved(line(target))]);
+                assert!((shown - target).abs() < 0.001);
+                let mut asks = Vec::new();
+                // Delay the main window processing the command, as in a deferred preview.
+                for events in [vec![button(target, false)], vec![], vec![], vec![]] {
+                    let (ask, shown) = frame(&sound, events);
+                    asks.extend(ask);
+                    assert!((shown - target).abs() < 0.001, "release jumped to {shown}, wanted {target}");
+                }
+                let [Ask::Seek(to)] = asks[..] else { panic!("{asks:?}") };
+                let old_seek = sound.status().seek;
+                sound.seek(to);
+                // A report already in the pipe must not restore the pre-seek position.
+                sound.status.lock().unwrap().report((state, Duration::from_secs(40), Duration::from_secs(100), old_seek));
+                let (_, shown) = frame(&sound, vec![]);
+                assert!((shown - target).abs() < 0.01, "stale report jumped to {shown}");
+                let seek = sound.status().seek;
+                sound.status.lock().unwrap().report((state, to + Duration::from_millis(250), Duration::from_secs(100), seek));
+                let (_, shown) = frame(&sound, vec![]);
+                assert!((shown - (target + 0.0025)).abs() < 0.001, "acknowledged playback resumes at {shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_latest_seek_acknowledgement_can_update_the_position() {
+        let (mut sound, ctx) = silent();
+        sound.play(Path::new("/music/a.mp3"), &ctx);
+        sound.toggle(Path::new("/music/a.mp3"), &ctx);
+        sound.status.lock().unwrap().length = Duration::from_secs(100);
+        sound.seek(Duration::from_secs(80));
+        sound.seek(Duration::from_secs(20));
+        let mut status = sound.status.lock().unwrap();
+        status.report((State::Playing, Duration::from_secs(80), Duration::from_secs(100), 1));
+        assert_eq!(status.position(), Duration::from_secs(20));
+        assert_eq!(status.state, State::Paused);
+        status.report((State::Paused, Duration::from_millis(20_050), Duration::from_secs(100), 2));
+        assert_eq!(status.position(), Duration::from_millis(20_050));
+        status.report((State::NoDevice, Duration::ZERO, Duration::ZERO, 0));
+        assert_eq!(status.state, State::NoDevice, "startup failures are reported even if a seek was queued");
+    }
+
     #[cfg(target_os = "linux")]
     fn with_helper(script: &'static str) -> (Sound, egui::Context) {
         let (mut sound, ctx) = silent();
         sound.start = Some(match script {
             "dies" => |_: &Path| { let mut c = Command::new("/bin/sh"); c.args(["-c", "exit 3"]); Ok(c) },
-            "no device" => |_: &Path| { let mut c = Command::new("/bin/sh"); c.args(["-c", r"printf '\005\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000'"]); Ok(c) },
-            "plays" => |_: &Path| { let mut c = Command::new("/bin/sh"); c.args(["-c", r"printf '\002\350\003\000\000\000\000\000\000\020\047\000\000\000\000\000\000'; exec sleep 30"]); Ok(c) },
+            "no device" => |_: &Path| { let mut c = Command::new("/bin/sh"); c.args(["-c", r"printf '\005\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000'"]); Ok(c) },
+            "plays" => |_: &Path| { let mut c = Command::new("/bin/sh"); c.args(["-c", r"printf '\002\350\003\000\000\000\000\000\000\020\047\000\000\000\000\000\000\000\000\000\000\000\000\000\000'; exec sleep 30"]); Ok(c) },
             _ => |_: &Path| Err(io::ErrorKind::NotFound.into()),
         });
         (sound, ctx)

@@ -1397,7 +1397,7 @@ impl App {
         let pv = take_left(&mut rr, pw);
         self.preview_box(ui, pv, e.as_ref());
         if self.active == i && let Some(e) = &e {
-            self.sound_shown = Some(e.path.clone());
+            self.sound_preview(e, ui.ctx());
             let strip = Rect::from_min_max(pos2(rr.max.x - 240.0f32.min(rr.width() * 0.5), rr.max.y - sound::TRANSPORT_H), rr.max);
             self.sound_strip(ui, strip, e);
         }
@@ -1495,7 +1495,7 @@ impl App {
         let dh = det_h.min(rr.height() * 0.5);
         let det = take_bottom(&mut rr, dh);
         if self.active == i && let Some(e) = &e {
-            self.sound_shown = Some(e.path.clone());
+            self.sound_preview(e, ui.ctx());
             if sound::playable(e.kind, e.ext()) {
                 let strip = take_bottom(&mut rr, sound::TRANSPORT_H);
                 self.sound_strip(ui, strip, e);
