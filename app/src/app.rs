@@ -377,6 +377,18 @@ pub struct ShotState {
     pub done: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// The appearance last applied to egui; each option has one explicit place in the key.
+#[derive(PartialEq)]
+struct AppliedTheme {
+    theme: ThemeName,
+    accent: String,
+    font_size: u32,
+    desktop_colors: Option<crate::omarchy::Colors>,
+    glass: bool,
+    rounded: bool,
+    outlines: bool,
+}
+
 pub struct App {
     pub st: Settings,
     pub keys: crate::keymap::Keymap,
@@ -440,7 +452,7 @@ pub struct App {
     last_save: Instant,
     last_evict: Instant,
     watched_generation: u64,
-    applied: Option<(ThemeName, String, u32, Option<crate::omarchy::Colors>, bool, bool, bool)>,
+    applied: Option<AppliedTheme>,
     /// The desktop's material is showing behind the main window right now.
     pub see_through: bool,
     /// This Windows has no such material to show.
@@ -853,15 +865,15 @@ impl App {
             self.omarchy_watch = None;
             self.omarchy_colors = None;
         }
-        let key = (
-            self.st.theme,
-            self.st.accent.clone(),
-            self.st.font_size.to_bits(),
-            self.omarchy_colors,
-            self.see_through,
-            self.st.rounded,
-            self.st.outlines,
-        );
+        let key = AppliedTheme {
+            theme: self.st.theme,
+            accent: self.st.accent.clone(),
+            font_size: self.st.font_size.to_bits(),
+            desktop_colors: self.omarchy_colors,
+            glass: self.see_through,
+            rounded: self.st.rounded,
+            outlines: self.st.outlines,
+        };
         if self.applied.as_ref() != Some(&key) {
             self.pal = match self.omarchy_colors {
                 Some(colors) => colors.palette(),
