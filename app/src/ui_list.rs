@@ -10,7 +10,7 @@ use egui::{
 
 use crate::keymap::Command;
 use crate::app::{Act, App, CrumbDrag, DragPaths, DropTarget, ToastKind, is_computer};
-use crate::preview::{Key as PreviewKey, PreviewContent};
+use crate::preview::{Key as PreviewKey, PreviewContent, sound};
 use crate::fsx::{self, Entry, SortBy};
 use crate::icons;
 use crate::theme::{TAGS, blend, hex};
@@ -1396,6 +1396,11 @@ impl App {
         let pw = (rr.height() * 1.6).min(rr.width() * 0.35);
         let pv = take_left(&mut rr, pw);
         self.preview_box(ui, pv, e.as_ref());
+        if self.active == i && let Some(e) = &e {
+            self.sound_shown = Some(e.path.clone());
+            let strip = Rect::from_min_max(pos2(rr.max.x - 240.0f32.min(rr.width() * 0.5), rr.max.y - sound::TRANSPORT_H), rr.max);
+            self.sound_strip(ui, strip, e);
+        }
         let p = ui.painter_at(rr);
         let (n, sel, total) = self.counts(i);
         let summary = format!(
@@ -1489,6 +1494,14 @@ impl App {
         let det_h = rows.len() as f32 * 15.0 + 8.0;
         let dh = det_h.min(rr.height() * 0.5);
         let det = take_bottom(&mut rr, dh);
+        if self.active == i && let Some(e) = &e {
+            self.sound_shown = Some(e.path.clone());
+            if sound::playable(e.kind, e.ext()) {
+                let strip = take_bottom(&mut rr, sound::TRANSPORT_H);
+                self.sound_strip(ui, strip, e);
+                take_bottom(&mut rr, 8.0);
+            }
+        }
         self.preview_box(ui, rr, e.as_ref());
         let p = ui.painter_at(det);
         let f = FontId::proportional(11.0);

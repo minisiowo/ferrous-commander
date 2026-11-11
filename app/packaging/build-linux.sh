@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # Builds the Linux release, a tar.gz with an install script, and a .deb when cargo-deb is present.
-# Needs (Debian/Ubuntu): sudo apt install build-essential libxkbcommon-dev libgl1-mesa-dev libwayland-dev
+# Needs (Debian/Ubuntu): sudo apt install build-essential libxkbcommon-dev libgl1-mesa-dev libwayland-dev libasound2-dev
 # Run from the app folder:  sh packaging/build-linux.sh
 set -eu
 cd "$(dirname "$0")/.."

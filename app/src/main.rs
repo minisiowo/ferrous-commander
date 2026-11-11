@@ -240,6 +240,10 @@ fn main() {
         preview::helper::serve();
         return;
     }
+    if args.get(1).is_some_and(|a| a == preview::sound::FLAG) {
+        if let Some(file) = args.get(2) { preview::sound::serve(std::path::Path::new(file)); }
+        return;
+    }
     let mut shot = None;
     let mut start: Option<PathBuf> = None;
     let mut k = 1;

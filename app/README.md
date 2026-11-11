@@ -114,7 +114,7 @@ Settings live in a readable Lua table, and **Settings → Open configuration fol
 
 ## Build from source
 
-You need the Rust toolchain. On Debian or Ubuntu also install `build-essential libxkbcommon-dev libgl1-mesa-dev libwayland-dev`.
+You need the Rust toolchain. On Debian or Ubuntu also install `build-essential libxkbcommon-dev libgl1-mesa-dev libwayland-dev libasound2-dev`.
 
 ```sh
 cd app

@@ -395,6 +395,7 @@ impl App {
         self.notices_ui(&ctx);
         self.guard_close(&ctx);
         self.preview_window_ui(&ctx);
+        self.sound_follows();
         self.search_window(&ctx);
         self.settings_window(&ctx);
         self.shortcuts_window(&ctx);

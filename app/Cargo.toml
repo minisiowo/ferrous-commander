@@ -39,6 +39,7 @@ chardetng = "1"
 calamine = "0.38"
 lofty = "0.25"
 quick-xml = "0.42"
+rodio = { version = "0.23", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav", "symphonia-aiff", "symphonia-alac", "symphonia-mkv"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13.2"

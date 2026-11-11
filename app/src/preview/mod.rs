@@ -11,6 +11,7 @@ mod model;
 mod office;
 mod pdf;
 mod picture;
+pub mod sound;
 pub mod text;
 pub mod window;
 

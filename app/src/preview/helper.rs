@@ -150,7 +150,7 @@ fn read_reply(from: &mut impl Read) -> io::Result<Reply> {
 
 /// Keeps a broken file's damage small: no huge allocation, no crash report, no orphan.
 #[cfg(target_os = "linux")]
-fn limit_this_process() {
+pub(super) fn limit_this_process() {
     let limit = |what, value: u64| {
         let value = libc::rlimit { rlim_cur: value, rlim_max: value };
         // SAFETY: passes a valid struct; on failure the process merely stays unlimited.
@@ -163,7 +163,7 @@ fn limit_this_process() {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn limit_this_process() {}
+pub(super) fn limit_this_process() {}
 
 /// The body of `ferrous-commander --preview-helper`: answers until stdin closes.
 pub fn serve() {
@@ -198,7 +198,7 @@ pub struct Helper {
 #[cfg_attr(test, allow(dead_code))]
 impl Helper {
     /// The running program's own file: an update replacing it on disk changes nothing here.
-    fn program() -> io::Result<PathBuf> {
+    pub(super) fn program() -> io::Result<PathBuf> {
         #[cfg(target_os = "linux")]
         return Ok(PathBuf::from("/proc/self/exe"));
         #[cfg(not(target_os = "linux"))]

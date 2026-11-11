@@ -13,7 +13,7 @@ use super::text::{CLASS_COMMENT, CLASS_FUNCTION, CLASS_KEYWORD, CLASS_NUMBER, CL
 use super::load::ArchiveEntry;
 use super::load::ModelView;
 use super::model::{MIN_MODEL_ZOOM, TILT_OFFSETS};
-use super::{DocData, Job, Key, PreviewContent, Slot, TableDoc, TextDoc};
+use super::{DocData, Job, Key, PreviewContent, Slot, TableDoc, TextDoc, sound};
 use crate::app::{Act, App};
 use crate::chrome::{self, BAR_H, Icon};
 use crate::fsx::{self, Entry, Kind};
@@ -56,6 +56,9 @@ enum Cmd {
     Detail([u16; 4]),
     Turn(ModelView),
     Open,
+    /// The play button of a music file, and moving to a place in it, in milliseconds.
+    Play,
+    Seek(u64),
 }
 
 #[derive(Default)]
@@ -110,6 +113,8 @@ struct Shared {
     /// Where looks at a 3D model are asked for and collected, and the file they belong to.
     lane: Option<Arc<Slot>>,
     model: Option<Key>,
+    /// What the music is doing, straight from the player.
+    sound: Arc<Mutex<sound::Status>>,
 }
 
 pub struct Quick {
@@ -187,7 +192,7 @@ fn fitting_size(ctx: &egui::Context, content: &PreviewContent, largest: Vec2) ->
         PreviewContent::Archive(entries, ..) => vec2(READING_WIDTH, (entries.len() + 1) as f32 * list_step + SCROLLBAR),
         PreviewContent::Info(rows, cover, _) => {
             let picture = cover.as_ref().map_or(Vec2::splat(96.0), |(_, size)| picture_body(*size, ctx.pixels_per_point()) - Vec2::splat(24.0));
-            vec2(picture.x.max(504.0) + 56.0, picture.y + 24.0 + rows.len() as f32 * 24.0 + 56.0)
+            vec2(picture.x.max(504.0) + 56.0, picture.y + 24.0 + rows.len() as f32 * 24.0 + 56.0 + sound::TRANSPORT_H + 20.0)
         }
         // Laid out only once shown, so its length is not known yet: a page to read.
         PreviewContent::Doc(_) => vec2(READING_WIDTH + 64.0, largest.y),
@@ -226,6 +231,11 @@ impl App {
                     let step = if by > 0 { crate::keymap::Command::CursorDown } else { crate::keymap::Command::CursorUp };
                     self.run_command(i, step, false, None, false, 1);
                 }
+                Cmd::Play | Cmd::Seek(_) => {
+                    let Some(path) = self.preview.path.clone() else { continue };
+                    let ask = if let Cmd::Seek(ms) = command { sound::Ask::Seek(Duration::from_millis(ms)) } else { sound::Ask::Toggle };
+                    self.sound_ask(&path, ask, ctx);
+                }
                 Cmd::Open => {
                     if let Some(e) = self.cursor_entry(i) {
                         self.acts.push(Act::Open(i, e.path.clone()));
@@ -247,6 +257,7 @@ impl App {
             return;
         };
         self.want_preview(Some(Key::of(&e)), ctx);
+        self.sound_shown = Some(e.path.clone());
         let mut neighbours: Vec<Key> = self.panes[i].cursor.map_or_else(Vec::new, |row| {
             [row.wrapping_sub(1), row + 1].into_iter().filter_map(|r| self.entry_at(i, r)).filter(|n| !n.is_dir).map(Key::of).collect()
         });
@@ -292,6 +303,7 @@ impl App {
         let pal = self.pal;
         let size = if e.is_dir { String::new() } else { fsx::fmt_size(e.size, self.st.mebibytes) };
         let place = (self.panes[i].cursor.map_or(0, |c| c + 1), self.panes[i].view.len());
+        let sound = self.sound.shared();
         let quick = self.quick.get_or_insert_with(|| {
             let (size, limit, position) = placement(ctx);
             Quick {
@@ -314,6 +326,7 @@ impl App {
                     detail: None,
                     lane: None,
                     model: None,
+                    sound,
                 })),
                 opened: Instant::now(),
                 sized: Instant::now(),
@@ -393,6 +406,13 @@ impl Shared {
         lane.ask_look(Job { key, ctx: ctx.clone(), prefetch: false });
     }
 
+    /// The music of the shown file, while it can be paused or moved in.
+    fn music(&self) -> Option<sound::Status> {
+        let status = self.sound.lock().unwrap().clone();
+        let mine = status.state != sound::State::Idle && status.track.as_ref() == self.model.as_ref().map(|key| &key.path);
+        mine.then_some(status)
+    }
+
     /// Takes the newest look at the shown model, if one has arrived.
     fn collect_look(&mut self) {
         if self.view.sent_view.is_none() { return; }
@@ -417,7 +437,14 @@ fn keys(ctx: &egui::Context, s: &mut Shared, page: f32) {
         let egui::Event::Key { key, pressed: true, repeat, modifiers, .. } = event else { continue };
         if modifiers.ctrl || modifiers.alt || modifiers.command { continue; }
         let paged = matches!(s.content, PreviewContent::Page { .. });
+        let music = s.music();
         match key {
+            K::P if !repeat && sound::playable(s.kind, &s.ext) => s.send(Cmd::Play, ctx),
+            K::ArrowRight | K::ArrowLeft if music.is_some() => {
+                let Some(status) = music else { continue };
+                let to = if key == K::ArrowRight { status.position() + sound::STEP } else { status.position().saturating_sub(sound::STEP) };
+                s.send(Cmd::Seek(to.as_millis() as u64), ctx);
+            }
             K::PageDown if paged => s.send(Cmd::Page(1), ctx),
             K::PageUp if paged => s.send(Cmd::Page(-1), ctx),
             K::Space | K::Escape if !repeat => s.send(Cmd::Close, ctx),
@@ -972,10 +999,12 @@ fn archive_view(ui: &mut Ui, s: &mut Shared, entries: &[ArchiveEntry], total: u6
     s.view.offset = output.state.clamped_offset().y;
 }
 
-fn info_view(ui: &Ui, s: &Shared, rows: &[(String, String)], cover: Option<(&egui::TextureHandle, [u32; 2])>, body: Rect) {
+fn info_view(ui: &Ui, s: &mut Shared, rows: &[(String, String)], cover: Option<(&egui::TextureHandle, [u32; 2])>, body: Rect) {
     let pal = s.pal;
     let p = ui.painter_at(body);
-    let (row_h, table_h) = (24.0, rows.len() as f32 * 24.0);
+    let played = sound::playable(s.kind, &s.ext);
+    let transport_h = if played { sound::TRANSPORT_H + 20.0 } else { 0.0 };
+    let (row_h, table_h) = (24.0, rows.len() as f32 * 24.0 + transport_h);
     let area = body.shrink(28.0);
     let picture_h = (area.height() - table_h - 24.0).max(64.0);
     let top = if let Some((tex, size)) = cover {
@@ -999,6 +1028,15 @@ fn info_view(ui: &Ui, s: &Shared, rows: &[(String, String)], cover: Option<(&egu
         p.text(pos2(middle - 10.0, y), Align2::RIGHT_CENTER, key, font.clone(), pal.text_weak);
         let shown = fit_text(&p, value, &font, body.max.x - middle - 40.0);
         p.text(pos2(middle + 10.0, y), Align2::LEFT_CENTER, shown, font.clone(), pal.text);
+    }
+    if played {
+        let width = (body.width() - 80.0).min(420.0);
+        let r = Rect::from_center_size(pos2(middle, top + rows.len() as f32 * row_h + 20.0 + sound::TRANSPORT_H / 2.0), vec2(width, sound::TRANSPORT_H));
+        match sound::transport(ui, r, pal, s.music().as_ref(), egui::Id::unique("preview_sound")) {
+            Some(sound::Ask::Toggle) => s.send(Cmd::Play, ui.ctx()),
+            Some(sound::Ask::Seek(to)) => s.send(Cmd::Seek(to.as_millis() as u64), ui.ctx()),
+            None => {}
+        }
     }
 }
 
@@ -1075,6 +1113,7 @@ mod tests {
             content: PreviewContent::Model(texture, [32, 32]),
             previous: None, switched: Instant::now() - Duration::from_secs(1), loading: None, commands: Vec::new(),
             view: View { zoom: 1.0, ..Default::default() }, detail: None, lane: None, model: None,
+            sound: sound::Sound::new().shared(),
         }
     }
 
@@ -1216,6 +1255,67 @@ mod tests {
         app.quick.as_ref().unwrap().shared.lock().unwrap().commands.extend([Cmd::Page(1), Cmd::Page(1), Cmd::Page(1)]);
         app.preview_commands(&ctx);
         assert_eq!(app.preview.page, 4, "stops at the last page");
+    }
+
+    fn music_on_screen(ctx: &egui::Context) -> Shared {
+        let rows = Arc::new(vec![("Length".to_string(), "1:40".to_string())]);
+        let key = Key { path: PathBuf::from("/music/song.mp3"), modified: None, size: 1, page: 0, crop: None, view: None };
+        Shared { name: "song.mp3".into(), kind: Kind::Audio, ext: "mp3".into(), content: PreviewContent::Info(rows, None, false), model: Some(key), ..model_on_screen(ctx) }
+    }
+
+    #[test]
+    fn p_plays_the_shown_music_and_the_arrows_move_in_it() {
+        use egui::{Event, Modifiers, RawInput};
+        let ctx = egui::Context::default();
+        let mut s = music_on_screen(&ctx);
+        let press = |s: &mut Shared, key| {
+            let events = vec![Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }];
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| draw(ui, s, ViewportClass::Deferred));
+            out.textures_delta.clear();
+            std::mem::take(&mut s.commands)
+        };
+        assert_eq!(press(&mut s, K::ArrowRight), [Cmd::Page(1)], "nothing plays yet");
+        assert_eq!(press(&mut s, K::P), [Cmd::Play]);
+        let mut player = sound::Sound::new();
+        s.sound = player.shared();
+        player.play(std::path::Path::new("/music/song.mp3"), &ctx);
+        s.sound.lock().unwrap().length = Duration::from_secs(100);
+        player.seek(Duration::from_secs(40));
+        let [Cmd::Seek(ahead)] = press(&mut s, K::ArrowRight)[..] else { panic!("no move ahead") };
+        let [Cmd::Seek(back)] = press(&mut s, K::ArrowLeft)[..] else { panic!("no move back") };
+        assert!((45_000..46_000).contains(&ahead) && (35_000..36_000).contains(&back), "{ahead} {back}");
+        player.play(std::path::Path::new("/music/other.mp3"), &ctx);
+        assert_eq!(press(&mut s, K::ArrowRight), [Cmd::Page(1)], "the music of another file is not this window's");
+        s.kind = Kind::Other;
+        assert!(press(&mut s, K::P).is_empty(), "only music has a play key");
+    }
+
+    #[test]
+    fn the_play_command_starts_the_shown_file_and_leaving_it_ends_the_music() {
+        let (mut app, ctx) = app();
+        let song = entry("song.mp3");
+        app.want_preview(Some(Key::of(&song)), &ctx);
+        app.hand_over(&ctx, &song, 0);
+        let ask = |app: &mut App, command| {
+            app.quick.as_ref().unwrap().shared.lock().unwrap().commands.push(command);
+            app.preview_commands(&ctx);
+            app.sound.status()
+        };
+        let status = ask(&mut app, Cmd::Play);
+        assert_eq!((status.track.as_ref(), status.state), (Some(&song.path), sound::State::Playing));
+        assert_eq!(ask(&mut app, Cmd::Play).state, sound::State::Paused);
+        assert_eq!(ask(&mut app, Cmd::Seek(7000)).position(), Duration::from_secs(7));
+        assert_eq!(ask(&mut app, Cmd::Play).state, sound::State::Playing);
+        app.sound_shown = Some(song.path.clone());
+        app.sound_follows();
+        assert_eq!(app.sound.status().state, sound::State::Playing, "its preview is still on show");
+        app.sound_shown = Some(PathBuf::from("next.mp3"));
+        app.sound_follows();
+        assert_eq!(app.sound.status().state, sound::State::Idle, "another file is on show");
+        ask(&mut app, Cmd::Play);
+        app.sound_follows();
+        assert_eq!(app.sound.status().state, sound::State::Idle, "no preview is on show at all");
     }
 
     #[test]

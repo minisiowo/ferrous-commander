@@ -1,0 +1,751 @@
+//! Playing a music file from its preview.
+//!
+//! The sound comes from a process of its own (`--sound-helper <file>`), one for each file
+//! played. A decoder that breaks on a damaged file then ends the music and not the
+//! application, and nothing of it stays in memory once the music stops.
+
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
+
+use egui::{Align2, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
+
+use crate::app::App;
+use crate::fsx::{Entry, Kind};
+use crate::theme::{Palette, blend};
+
+pub const FLAG: &str = "--sound-helper";
+/// How often the helper says where in the music it is.
+const TICK: Duration = Duration::from_millis(200);
+/// What the decoders built in can play. The rest of the audio files only show their tags.
+const PLAYED: &[&str] = &["mp3", "wav", "flac", "ogg", "oga", "m4a", "aac", "aiff", "aif", "mka"];
+/// How far the arrow keys move in the music.
+pub const STEP: Duration = Duration::from_secs(5);
+pub const TRANSPORT_H: f32 = 28.0;
+
+pub fn playable(kind: Kind, ext: &str) -> bool {
+    kind == Kind::Audio && PLAYED.iter().any(|played| ext.eq_ignore_ascii_case(played))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum State {
+    Idle,
+    Starting,
+    Playing,
+    Paused,
+    Ended,
+    NoDevice,
+    Unreadable,
+    /// The helper ended without saying why.
+    Failed,
+}
+
+impl State {
+    fn from_byte(byte: u8) -> Option<State> {
+        [State::Playing, State::Paused, State::Ended, State::NoDevice, State::Unreadable].into_iter().find(|s| *s as u8 == byte)
+    }
+
+    /// Music that can still be paused, continued or moved in.
+    pub fn running(self) -> bool {
+        matches!(self, State::Starting | State::Playing | State::Paused)
+    }
+
+    fn trouble(self) -> Option<&'static str> {
+        match self {
+            State::NoDevice => Some("No sound device was found"),
+            State::Unreadable => Some("This file cannot be played here"),
+            State::Failed => Some("Playing this file failed"),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Order {
+    Pause,
+    Resume,
+    Seek(Duration),
+}
+
+fn write_order(to: &mut impl Write, order: Order) -> io::Result<()> {
+    let (tag, at) = match order {
+        Order::Pause => (1u8, 0),
+        Order::Resume => (2, 0),
+        Order::Seek(at) => (3, at.as_millis() as u64),
+    };
+    to.write_all(&[tag])?;
+    to.write_all(&at.to_le_bytes())?;
+    to.flush()
+}
+
+fn read_order(from: &mut impl Read) -> io::Result<Order> {
+    let mut raw = [0; 9];
+    from.read_exact(&mut raw)?;
+    let at = Duration::from_millis(u64::from_le_bytes(raw[1..].try_into().unwrap()));
+    match raw[0] {
+        1 => Ok(Order::Pause),
+        2 => Ok(Order::Resume),
+        3 => Ok(Order::Seek(at)),
+        _ => Err(io::ErrorKind::InvalidData.into()),
+    }
+}
+
+type Report = (State, Duration, Duration);
+
+fn write_report(to: &mut impl Write, (state, at, length): Report) -> io::Result<()> {
+    to.write_all(&[state as u8])?;
+    to.write_all(&(at.as_millis() as u64).to_le_bytes())?;
+    to.write_all(&(length.as_millis() as u64).to_le_bytes())?;
+    to.flush()
+}
+
+fn read_report(from: &mut impl Read) -> io::Result<Report> {
+    let mut raw = [0; 17];
+    from.read_exact(&mut raw)?;
+    let number = |at: usize| Duration::from_millis(u64::from_le_bytes(raw[at..at + 8].try_into().unwrap()));
+    let state = State::from_byte(raw[0]).ok_or(io::ErrorKind::InvalidData)?;
+    Ok((state, number(1), number(9)))
+}
+
+type Music = rodio::Decoder<io::BufReader<std::fs::File>>;
+
+/// The music in a file and how long it is; zero when nothing says.
+fn open(path: &Path) -> Option<(Music, Duration)> {
+    use rodio::Source;
+    let file = std::fs::File::open(path).ok()?;
+    let bytes = file.metadata().ok()?.len();
+    let mut builder = rodio::Decoder::builder().with_data(io::BufReader::new(file)).with_byte_len(bytes).with_seekable(true);
+    if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) { builder = builder.with_hint(&ext.to_ascii_lowercase()); }
+    let music = builder.build().ok()?;
+    let length = music.total_duration().or_else(|| {
+        use lofty::prelude::AudioFile;
+        Some(lofty::read_from_path(path).ok()?.properties().duration())
+    });
+    Some((music, length.unwrap_or_default()))
+}
+
+/// Obeys orders and reports until the music ends or nobody listens any more.
+fn run(player: &rodio::Player, length: Duration, orders: &mpsc::Receiver<Order>, mut report: impl FnMut(Report) -> bool) {
+    loop {
+        if player.empty() {
+            report((State::Ended, length, length));
+            return;
+        }
+        let state = if player.is_paused() { State::Paused } else { State::Playing };
+        if !report((state, player.get_pos(), length)) { return; }
+        match orders.recv_timeout(TICK) {
+            Ok(Order::Pause) => player.pause(),
+            Ok(Order::Resume) => player.play(),
+            Ok(Order::Seek(to)) => {
+                let to = if length.is_zero() { to } else { to.min(length) };
+                let _ = player.try_seek(to);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// The body of `ferrous-commander --sound-helper <file>`: plays until told otherwise.
+pub fn serve(path: &Path) {
+    super::helper::limit_this_process();
+    let mut output = io::stdout().lock();
+    let mut report = move |report: Report| write_report(&mut output, report).is_ok();
+    let Some((music, length)) = open(path) else {
+        report((State::Unreadable, Duration::ZERO, Duration::ZERO));
+        return;
+    };
+    let Ok(mut device) = rodio::DeviceSinkBuilder::open_default_sink() else {
+        report((State::NoDevice, Duration::ZERO, length));
+        return;
+    };
+    device.log_on_drop(false);
+    let player = rodio::Player::connect_new(device.mixer());
+    player.append(music);
+    let (tx, orders) = mpsc::channel();
+    // Ends with the application's end of the pipe, and takes the music along.
+    std::thread::spawn(move || {
+        let mut input = io::stdin().lock();
+        while let Ok(order) = read_order(&mut input) {
+            if tx.send(order).is_err() { return; }
+        }
+    });
+    run(&player, length, &orders, report);
+}
+
+/// What is known about the music, in the application.
+#[derive(Clone, Debug)]
+pub struct Status {
+    pub track: Option<PathBuf>,
+    pub state: State,
+    pub length: Duration,
+    at: Duration,
+    since: Instant,
+    /// Which helper this is about; a late word from an older one is ignored.
+    run: u64,
+}
+
+impl Status {
+    fn idle() -> Status {
+        Status { track: None, state: State::Idle, length: Duration::ZERO, at: Duration::ZERO, since: Instant::now(), run: 0 }
+    }
+
+    /// Where in the music it is now, between two reports too.
+    pub fn position(&self) -> Duration {
+        let at = if self.state == State::Playing { self.at + self.since.elapsed() } else { self.at };
+        if self.length.is_zero() { at } else { at.min(self.length) }
+    }
+
+    fn set(&mut self, state: State, at: Duration) {
+        (self.state, self.at, self.since) = (state, at, Instant::now());
+    }
+}
+
+struct Link {
+    child: Option<Child>,
+    stdin: ChildStdin,
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else { return };
+        let _ = child.kill();
+        std::thread::spawn(move || { let _ = child.wait(); });
+    }
+}
+
+type Start = fn(&Path) -> io::Result<Command>;
+
+#[cfg_attr(test, allow(dead_code))]
+fn helper_command(path: &Path) -> io::Result<Command> {
+    let mut command = Command::new(super::helper::Helper::program()?);
+    command.arg(FLAG).arg(path);
+    Ok(command)
+}
+
+/// Tests have no helper binary to start: there the music is only said to play.
+#[cfg(not(test))]
+const START: Option<Start> = Some(helper_command);
+#[cfg(test)]
+const START: Option<Start> = None;
+
+pub struct Sound {
+    status: Arc<Mutex<Status>>,
+    link: Option<Link>,
+    start: Option<Start>,
+    runs: u64,
+}
+
+impl Sound {
+    pub fn new() -> Sound {
+        Sound { status: Arc::new(Mutex::new(Status::idle())), link: None, start: START, runs: 0 }
+    }
+
+    pub fn status(&self) -> Status {
+        self.status.lock().unwrap().clone()
+    }
+
+    /// For the preview window, which is drawn without the application.
+    pub fn shared(&self) -> Arc<Mutex<Status>> {
+        self.status.clone()
+    }
+
+    fn connect(&self, path: &Path, run: u64, ctx: &egui::Context) -> io::Result<Link> {
+        let Some(start) = self.start else { return Err(io::ErrorKind::Unsupported.into()) };
+        let mut command = start(path)?;
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut command, 0x08000000);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = command.spawn()?;
+        let stdin = child.stdin.take().ok_or(io::ErrorKind::BrokenPipe)?;
+        let mut stdout = child.stdout.take().ok_or(io::ErrorKind::BrokenPipe)?;
+        let (status, ctx) = (self.status.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            loop {
+                let report = read_report(&mut stdout);
+                let mut status = status.lock().unwrap();
+                if status.run != run { return; }
+                let before = status.state;
+                match report {
+                    Ok((state, at, length)) => {
+                        status.length = length;
+                        status.set(state, at);
+                    }
+                    Err(_) if before.running() => status.set(State::Failed, Duration::ZERO),
+                    Err(_) => {}
+                }
+                let changed = status.state != before;
+                drop(status);
+                if changed {
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    ctx.request_repaint_of(super::window::viewport());
+                }
+                if report.is_err() { return; }
+            }
+        });
+        Ok(Link { child: Some(child), stdin })
+    }
+
+    pub fn play(&mut self, path: &Path, ctx: &egui::Context) {
+        self.link = None;
+        self.runs += 1;
+        let state = if self.start.is_some() { State::Starting } else { State::Playing };
+        *self.status.lock().unwrap() = Status { track: Some(path.to_path_buf()), state, run: self.runs, ..Status::idle() };
+        if self.start.is_none() { return; }
+        match self.connect(path, self.runs, ctx) {
+            Ok(link) => self.link = Some(link),
+            Err(_) => self.status.lock().unwrap().set(State::Failed, Duration::ZERO),
+        }
+    }
+
+    fn order(&mut self, order: Order) {
+        let Some(link) = &mut self.link else { return };
+        if write_order(&mut link.stdin, order).is_err() { self.link = None; }
+    }
+
+    /// What the play button does: starts this file, or pauses and continues it.
+    pub fn toggle(&mut self, path: &Path, ctx: &egui::Context) {
+        let status = self.status();
+        if status.track.as_deref() != Some(path) || !status.state.running() { return self.play(path, ctx); }
+        // Shown at once; the helper's next report confirms it.
+        let (state, order) = if status.state == State::Paused { (State::Playing, Order::Resume) } else { (State::Paused, Order::Pause) };
+        if status.state != State::Starting { self.status.lock().unwrap().set(state, status.position()); }
+        self.order(order);
+    }
+
+    pub fn seek(&mut self, to: Duration) {
+        let status = self.status();
+        if !status.state.running() { return; }
+        let to = if status.length.is_zero() { to } else { to.min(status.length) };
+        self.status.lock().unwrap().set(status.state, to);
+        self.order(Order::Seek(to));
+    }
+
+    pub fn stop(&mut self) {
+        self.link = None;
+        self.runs += 1;
+        *self.status.lock().unwrap() = Status { run: self.runs, ..Status::idle() };
+    }
+}
+
+/// What the user asked of the transport.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Ask {
+    Toggle,
+    Seek(Duration),
+}
+
+fn clock(time: Duration) -> String {
+    super::media::duration(time.as_secs())
+}
+
+/// The play button and the line that shows and sets the place in the music.
+/// `status` is that of this very file, and `None` while something else plays or nothing.
+pub fn transport(ui: &Ui, r: Rect, pal: Palette, status: Option<&Status>, id: egui::Id) -> Option<Ask> {
+    let p = ui.painter_at(r.expand(4.0));
+    let mut ask = None;
+    let state = status.map_or(State::Idle, |s| s.state);
+    let side = r.height().min(TRANSPORT_H);
+    let button = Rect::from_center_size(pos2(r.min.x + side / 2.0, r.center().y), vec2(side, side));
+    let pressed = ui.interact(button, id.with("play"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if pressed.clicked() { ask = Some(Ask::Toggle); }
+    p.rect_filled(button, pal.corner(), if pressed.hovered() { pal.hover } else { blend(pal.panel, pal.text, 0.06) });
+    let (c, half) = (button.center(), side * 0.19);
+    if matches!(state, State::Starting | State::Playing) {
+        for x in [-half * 0.75, half * 0.75] {
+            p.rect_filled(Rect::from_center_size(c + vec2(x, 0.0), vec2(half * 0.7, half * 2.0)), 0.0, pal.text);
+        }
+    } else {
+        let points = vec![c + vec2(-half * 0.8, -half), c + vec2(half, 0.0), c + vec2(-half * 0.8, half)];
+        p.add(egui::Shape::convex_polygon(points, pal.text, Stroke::NONE));
+    }
+    let font = FontId::proportional(11.0);
+    let rest = Rect::from_min_max(pos2(button.max.x + 10.0, r.min.y), r.max);
+    if let Some(trouble) = state.trouble() {
+        p.text(rest.left_center(), Align2::LEFT_CENTER, crate::ui::fit_text(&p, trouble, &font, rest.width()), font, pal.text_weak);
+        return ask;
+    }
+    let Some(status) = status.filter(|s| s.state != State::Idle) else {
+        p.line_segment([rest.left_center(), rest.right_center()], Stroke::new(3.0, blend(pal.panel, pal.text, 0.12)));
+        return ask;
+    };
+    let times = rest.width() > 150.0;
+    let line = if times { rest.shrink2(vec2(40.0, 0.0)) } else { rest };
+    let known = !status.length.is_zero();
+    let sense = if known && status.state.running() { Sense::click_and_drag() } else { Sense::hover() };
+    let held = ui.interact(line.expand2(vec2(4.0, 0.0)), id.with("line"), sense);
+    let pointed = held.interact_pointer_pos().map(|at| ((at.x - line.min.x) / line.width().max(1.0)).clamp(0.0, 1.0));
+    let playing = if known { status.position().as_secs_f32() / status.length.as_secs_f32() } else { 0.0 };
+    // While the line is held it shows the hand, and the music moves once on letting go.
+    let shown = if held.dragged() || held.is_pointer_button_down_on() { pointed.unwrap_or(playing) } else { playing };
+    let dropped = ui.data_mut(|data| {
+        let last = data.get_temp::<f32>(held.id);
+        match pointed {
+            Some(at) => { data.insert_temp(held.id, at); }
+            None => data.remove::<f32>(held.id),
+        }
+        last.filter(|_| pointed.is_none())
+    });
+    if let Some(at) = dropped.filter(|_| known) { ask = Some(Ask::Seek(status.length.mul_f32(at))); }
+    let y = line.center().y;
+    p.line_segment([pos2(line.min.x, y), pos2(line.max.x, y)], Stroke::new(3.0, blend(pal.panel, pal.text, 0.12)));
+    let x = line.min.x + line.width() * shown;
+    p.line_segment([pos2(line.min.x, y), pos2(x, y)], Stroke::new(3.0, pal.accent));
+    if held.hovered() || held.dragged() { p.circle_filled(pos2(x, y), 5.0, pal.accent); }
+    if times {
+        let at = if known { status.length.mul_f32(shown) } else { status.position() };
+        p.text(pos2(line.min.x - 8.0, y), Align2::RIGHT_CENTER, clock(at), font.clone(), pal.text_weak);
+        if known { p.text(pos2(line.max.x + 8.0, y), Align2::LEFT_CENTER, clock(status.length), font, pal.text_weak); }
+    }
+    if status.state == State::Playing || status.state == State::Starting {
+        ui.ctx().request_repaint_after(Duration::from_millis(if held.dragged() { 16 } else { 250 }));
+    }
+    ask
+}
+
+impl App {
+    pub(crate) fn sound_ask(&mut self, path: &Path, ask: Ask, ctx: &egui::Context) {
+        match ask {
+            Ask::Toggle => self.sound.toggle(path, ctx),
+            Ask::Seek(to) => self.sound.seek(to),
+        }
+    }
+
+    /// The transport inside the file list's own panels. Says that this file is on show, which
+    /// is what lets its music go on.
+    pub fn sound_strip(&mut self, ui: &Ui, r: Rect, e: &Entry) {
+        if !playable(e.kind, e.ext()) { return; }
+        let status = self.sound.status();
+        let mine = (status.track.as_deref() == Some(&*e.path)).then_some(&status);
+        if let Some(ask) = transport(ui, r, self.pal, mine, egui::Id::unique("sound_strip")) {
+            self.sound_ask(&e.path, ask, ui.ctx());
+        }
+    }
+
+    /// Music belongs to the file whose preview is on show, and ends when that one is left.
+    pub(crate) fn sound_follows(&mut self) {
+        let shown = self.sound_shown.take();
+        let status = self.sound.status();
+        if status.track.is_some() && status.track != shown { self.sound.stop(); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Silence as a WAV file: one channel, 16 bits.
+    fn write_wav(path: &Path, seconds: u32, rate: u32) {
+        let bytes = seconds * rate * 2;
+        let mut wav = Vec::with_capacity(44 + bytes as usize);
+        wav.extend(b"RIFF");
+        wav.extend((36 + bytes).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(rate.to_le_bytes());
+        wav.extend((rate * 2).to_le_bytes());
+        wav.extend(2u16.to_le_bytes());
+        wav.extend(16u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend(bytes.to_le_bytes());
+        wav.resize(44 + bytes as usize, 0);
+        std::fs::write(path, wav).unwrap();
+    }
+
+    /// Stands in for the sound device: takes the samples as fast as they come.
+    fn listen(output: rodio::queue::SourcesQueueOutput) {
+        std::thread::spawn(move || for _ in output {});
+    }
+
+    #[test]
+    fn orders_and_reports_survive_the_pipe() {
+        for order in [Order::Pause, Order::Resume, Order::Seek(Duration::from_millis(90_500))] {
+            let mut bytes = Vec::new();
+            write_order(&mut bytes, order).unwrap();
+            assert_eq!(read_order(&mut bytes.as_slice()).unwrap(), order);
+        }
+        for state in [State::Playing, State::Paused, State::Ended, State::NoDevice, State::Unreadable] {
+            let report = (state, Duration::from_millis(1500), Duration::from_secs(200));
+            let mut bytes = Vec::new();
+            write_report(&mut bytes, report).unwrap();
+            assert_eq!(read_report(&mut bytes.as_slice()).unwrap(), report);
+        }
+        assert!(read_order(&mut [9u8; 9].as_slice()).is_err(), "an unknown order");
+        assert!(read_report(&mut [0u8; 17].as_slice()).is_err(), "a state the helper never reports");
+        assert!(read_report(&mut [State::Playing as u8; 5].as_slice()).is_err(), "cut short");
+    }
+
+    #[test]
+    fn music_is_played_to_its_end_and_reported_on_the_way() {
+        let root = crate::preview::load::scratch("sound_end");
+        let file = root.join("a.wav");
+        write_wav(&file, 3, 8000);
+        let (music, length) = open(&file).unwrap();
+        assert_eq!(length, Duration::from_secs(3));
+        let (player, output) = rodio::Player::new();
+        player.append(music);
+        listen(output);
+        let (_tx, orders) = mpsc::channel();
+        let mut reports = Vec::new();
+        run(&player, length, &orders, |report| { reports.push(report); true });
+        assert_eq!(reports.last(), Some(&(State::Ended, length, length)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn music_pauses_moves_and_goes_on_when_told() {
+        let root = crate::preview::load::scratch("sound_orders");
+        let file = root.join("a.wav");
+        write_wav(&file, 600, 8000);
+        let (music, length) = open(&file).unwrap();
+        let (player, output) = rodio::Player::new();
+        player.append(music);
+        let (tx, orders) = mpsc::channel();
+        let mut output = Some(output);
+        let mut seen = Vec::new();
+        run(&player, length, &orders, |(state, at, _)| {
+            seen.push((state, at));
+            match seen.len() {
+                1 => {
+                    assert_eq!((state, at), (State::Playing, Duration::ZERO));
+                    tx.send(Order::Pause).unwrap();
+                }
+                // Nothing was taken yet, as with a device that has not asked for sound.
+                2 => {
+                    assert_eq!((state, at), (State::Paused, Duration::ZERO));
+                    listen(output.take().unwrap());
+                    tx.send(Order::Seek(Duration::from_secs(599))).unwrap();
+                }
+                3 => {
+                    assert_eq!((state, at), (State::Paused, Duration::from_secs(599)), "moved while paused");
+                    tx.send(Order::Resume).unwrap();
+                }
+                _ => {}
+            }
+            true
+        });
+        assert_eq!(seen.last(), Some(&(State::Ended, length)), "{seen:?}");
+        assert!(seen.len() < 20, "the last second is over quickly: {seen:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_is_not_music_is_refused_and_the_helper_stops_when_unheard() {
+        let root = crate::preview::load::scratch("sound_bad");
+        let file = root.join("a.mp3");
+        std::fs::write(&file, b"not audio at all, only a name that says so").unwrap();
+        assert!(open(&file).is_none());
+        assert!(open(&root.join("missing.mp3")).is_none());
+        let good = root.join("a.wav");
+        write_wav(&good, 600, 8000);
+        let (music, length) = open(&good).unwrap();
+        let (player, _output) = rodio::Player::new();
+        player.append(music);
+        let (_tx, orders) = mpsc::channel();
+        let mut reports = 0;
+        run(&player, length, &orders, |_| { reports += 1; false });
+        assert_eq!(reports, 1, "a closed pipe ends the helper");
+        let (tx, orders) = mpsc::channel::<Order>();
+        drop(tx);
+        let mut reports = 0;
+        run(&player, length, &orders, |_| { reports += 1; true });
+        assert_eq!(reports, 1, "and so does the end of the orders");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every format that gets a play button must really open. Needs ffmpeg to make the files.
+    #[test]
+    fn every_format_with_a_play_button_opens() {
+        let Some(tool) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).map(|d| d.join(format!("ffmpeg{}", std::env::consts::EXE_SUFFIX))).find(|p| p.is_file()) else { return };
+        let root = crate::preview::load::scratch("sound_formats");
+        let mut made = 0;
+        for ext in PLAYED {
+            let file = root.join(format!("tone.{ext}"));
+            let done = Command::new(&tool).args(["-hide_banner", "-loglevel", "error", "-nostdin", "-f", "lavfi", "-i", "sine=frequency=440:duration=2"]).arg(&file).status();
+            // This ffmpeg may lack an encoder; the others still count.
+            if !done.is_ok_and(|status| status.success()) { continue; }
+            made += 1;
+            let (music, length) = open(&file).unwrap_or_else(|| panic!("{ext} does not open"));
+            assert!((1900..2200).contains(&length.as_millis()), "{ext}: {length:?}");
+            assert!(music.take(1000).count() == 1000, "{ext} gives no sound");
+        }
+        assert!(made >= 5, "only {made} formats could be made");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_music_the_decoders_know_gets_a_play_button() {
+        assert!(playable(Kind::Audio, "MP3") && playable(Kind::Audio, "flac"));
+        assert!(!playable(Kind::Audio, "opus") && !playable(Kind::Audio, "ape"));
+        assert!(!playable(Kind::Video, "mp4") && !playable(Kind::Other, "wav"));
+    }
+
+    fn silent() -> (Sound, egui::Context) {
+        (Sound::new(), egui::Context::default())
+    }
+
+    #[test]
+    fn the_button_starts_pauses_continues_and_starts_another_file() {
+        let (mut sound, ctx) = silent();
+        let (a, b) = (Path::new("/music/a.mp3"), Path::new("/music/b.mp3"));
+        assert_eq!(sound.status().state, State::Idle);
+        sound.toggle(a, &ctx);
+        assert_eq!((sound.status().track.as_deref(), sound.status().state), (Some(a), State::Playing));
+        sound.toggle(a, &ctx);
+        assert_eq!(sound.status().state, State::Paused);
+        let paused_at = sound.status().position();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(sound.status().position(), paused_at, "paused music stays where it is");
+        sound.toggle(a, &ctx);
+        assert_eq!(sound.status().state, State::Playing);
+        sound.toggle(b, &ctx);
+        assert_eq!((sound.status().track.as_deref(), sound.status().state), (Some(b), State::Playing));
+        assert!(sound.status().position() < Duration::from_secs(1), "the other file starts from its beginning");
+        sound.stop();
+        assert_eq!((sound.status().track, sound.status().state), (None, State::Idle));
+    }
+
+    #[test]
+    fn the_place_moves_between_reports_and_stays_within_the_music() {
+        let (mut sound, ctx) = silent();
+        sound.play(Path::new("/music/a.mp3"), &ctx);
+        sound.status.lock().unwrap().length = Duration::from_secs(100);
+        sound.seek(Duration::from_secs(40));
+        std::thread::sleep(Duration::from_millis(30));
+        let at = sound.status().position();
+        assert!(at > Duration::from_secs(40) && at < Duration::from_secs(41), "{at:?}");
+        sound.seek(Duration::from_secs(500));
+        assert_eq!(sound.status().position(), Duration::from_secs(100));
+        sound.stop();
+        sound.seek(Duration::from_secs(5));
+        assert_eq!(sound.status().state, State::Idle, "nothing to move in");
+    }
+
+    #[test]
+    fn the_button_asks_to_play_and_the_line_asks_for_a_place_once_let_go() {
+        use egui::{Event, Modifiers, PointerButton, RawInput};
+        let (mut sound, ctx) = silent();
+        let file = Path::new("/music/a.mp3");
+        let pal = Palette::get(crate::theme::ThemeName::Dark, egui::Color32::WHITE);
+        let r = Rect::from_min_size(pos2(100.0, 100.0), vec2(400.0, TRANSPORT_H));
+        let run = |sound: &Sound, events: Vec<Event>| {
+            let status = sound.status();
+            let mine = (status.track.as_deref() == Some(file)).then_some(&status);
+            let mut ask = None;
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))), events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| ask = transport(ui, r, pal, mine, egui::Id::unique("test_transport")));
+            out.textures_delta.clear();
+            ask
+        };
+        let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let click = |sound: &Sound, pos| {
+            let frames = [vec![Event::PointerMoved(pos)], vec![button(pos, true)], vec![button(pos, false)], vec![], vec![]];
+            frames.into_iter().filter_map(|events| run(sound, events)).collect::<Vec<_>>()
+        };
+        let (play, line) = (pos2(114.0, 114.0), |part: f32| pos2(178.0 + 282.0 * part, 114.0));
+        assert!(click(&sound, line(0.5)).is_empty(), "there is no place in music that does not play");
+        assert_eq!(click(&sound, play), [Ask::Toggle]);
+        sound.toggle(file, &ctx);
+        sound.status.lock().unwrap().length = Duration::from_secs(100);
+        let asked = click(&sound, line(0.75));
+        let [Ask::Seek(to)] = asked[..] else { panic!("{asked:?}") };
+        assert!((74_000..76_000).contains(&to.as_millis()), "{to:?}");
+        // Held and moved: nothing is asked until the button is let go, and then once.
+        let mut asks = Vec::new();
+        for events in [vec![Event::PointerMoved(line(0.1))], vec![button(line(0.1), true)], vec![Event::PointerMoved(line(0.2))], vec![Event::PointerMoved(line(0.3))]] {
+            asks.extend(run(&sound, events));
+        }
+        assert!(asks.is_empty(), "{asks:?}");
+        for events in [vec![button(line(0.3), false)], vec![], vec![]] { asks.extend(run(&sound, events)); }
+        let [Ask::Seek(to)] = asks[..] else { panic!("{asks:?}") };
+        assert!((29_000..31_000).contains(&to.as_millis()), "{to:?}");
+        assert_eq!(click(&sound, play), [Ask::Toggle], "the button stays a button while music plays");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn with_helper(script: &'static str) -> (Sound, egui::Context) {
+        let (mut sound, ctx) = silent();
+        sound.start = Some(match script {
+            "dies" => |_: &Path| { let mut c = Command::new("/bin/sh"); c.args(["-c", "exit 3"]); Ok(c) },
+            "no device" => |_: &Path| { let mut c = Command::new("/bin/sh"); c.args(["-c", r"printf '\005\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000'"]); Ok(c) },
+            "plays" => |_: &Path| { let mut c = Command::new("/bin/sh"); c.args(["-c", r"printf '\002\350\003\000\000\000\000\000\000\020\047\000\000\000\000\000\000'; exec sleep 30"]); Ok(c) },
+            _ => |_: &Path| Err(io::ErrorKind::NotFound.into()),
+        });
+        (sound, ctx)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for(sound: &Sound, state: State) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while sound.status().state != state {
+            assert!(Instant::now() < until, "still {:?}", sound.status().state);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_helper_that_dies_or_has_no_device_is_reported_and_can_be_tried_again() {
+        let file = Path::new("/music/a.mp3");
+        let (mut sound, ctx) = with_helper("dies");
+        sound.play(file, &ctx);
+        wait_for(&sound, State::Failed);
+        let (mut sound, ctx) = with_helper("no device");
+        sound.play(file, &ctx);
+        wait_for(&sound, State::NoDevice);
+        let (mut sound, ctx) = with_helper("missing");
+        sound.play(file, &ctx);
+        assert_eq!(sound.status().state, State::Failed);
+        let (mut sound, ctx) = with_helper("plays");
+        sound.toggle(file, &ctx);
+        wait_for(&sound, State::Playing);
+        let status = sound.status();
+        assert_eq!(status.length, Duration::from_secs(10));
+        assert!(status.position() >= Duration::from_secs(1) && status.position() < Duration::from_secs(3));
+        sound.stop();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(sound.status().state, State::Idle, "the ended helper's last word changes nothing");
+    }
+
+    /// The real helper on the real sound device, three seconds of silence:
+    /// `cargo build --release`, then with `FERROUS_HELPER_EXE=target/release/ferrous-commander`
+    /// `cargo test --release sound_through_the_real_helper -- --ignored --nocapture`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs the release program, named by FERROUS_HELPER_EXE, and a sound device"]
+    fn sound_through_the_real_helper() {
+        let root = crate::preview::load::scratch("sound_real");
+        let file = root.join("a.wav");
+        write_wav(&file, 3, 44100);
+        let (mut sound, ctx) = silent();
+        sound.start = Some(|path: &Path| {
+            let mut command = Command::new(std::env::var_os("FERROUS_HELPER_EXE").expect("FERROUS_HELPER_EXE"));
+            command.arg(FLAG).arg(path);
+            Ok(command)
+        });
+        let started = Instant::now();
+        sound.play(&file, &ctx);
+        wait_for(&sound, State::Playing);
+        println!("playing after {} ms", started.elapsed().as_millis());
+        let child = sound.link.as_ref().unwrap().child.as_ref().unwrap().id();
+        std::thread::sleep(Duration::from_millis(1000));
+        let rollup = std::fs::read_to_string(format!("/proc/{child}/smaps_rollup")).unwrap();
+        for line in rollup.lines().filter(|line| line.starts_with("Pss") || line.starts_with("Rss")) { println!("helper {line}"); }
+        sound.toggle(&file, &ctx);
+        wait_for(&sound, State::Paused);
+        // The helper's own word on where it stopped replaces the estimate.
+        std::thread::sleep(Duration::from_millis(500));
+        let paused = sound.status().position();
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(sound.status().position(), paused);
+        sound.seek(Duration::from_millis(2500));
+        sound.toggle(&file, &ctx);
+        wait_for(&sound, State::Ended);
+        assert!(started.elapsed() < Duration::from_millis(3500), "moving ahead shortened it: {:?}", started.elapsed());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

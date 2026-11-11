@@ -424,6 +424,9 @@ pub struct App {
     #[cfg(not(windows))]
     pub app_chooser: Option<crate::openwith::Chooser>,
     pub preview: Preview,
+    pub sound: crate::preview::sound::Sound,
+    /// The file whose preview was on show in this frame, for its music to go on.
+    pub sound_shown: Option<PathBuf>,
     pub preview_window: bool,
     pub quick: Option<crate::preview::window::Quick>,
     /// When the preview window closed itself; its key press must not open it again.
@@ -702,6 +705,8 @@ impl App {
             #[cfg(not(windows))]
             app_chooser: None,
             preview: Preview::new(),
+            sound: crate::preview::sound::Sound::new(),
+            sound_shown: None,
             preview_window: false,
             quick: None,
             preview_closed: None,

@@ -25,7 +25,7 @@ jobs:
           version=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[0].version')
           test "v$version" = "$GITHUB_REF_NAME"
       - run: rustup update stable && rustup default stable
-      - run: sudo apt-get update && sudo apt-get install -y build-essential libxkbcommon-dev libgl1-mesa-dev libwayland-dev acl attr
+      - run: sudo apt-get update && sudo apt-get install -y build-essential libxkbcommon-dev libgl1-mesa-dev libwayland-dev libasound2-dev acl attr
       - run: cargo test --locked
       - run: sh packaging/build-linux.sh
       - uses: actions/upload-artifact@v4

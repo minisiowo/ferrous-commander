@@ -56,7 +56,7 @@ The build uses the dependency versions in `Cargo.lock` and honours `CARGO_TARGET
 When continuing development on Linux after using another device, rebuild from
 source rather than launching the Windows `.exe` or an older bundled binary.
 Install the Rust toolchain and Linux build dependencies first (Debian/Ubuntu:
-`build-essential libxkbcommon-dev libgl1-mesa-dev libwayland-dev`), then run:
+`build-essential libxkbcommon-dev libgl1-mesa-dev libwayland-dev libasound2-dev`), then run:
 
 ```sh
 cd app
@@ -202,7 +202,7 @@ pendrives have an eject button in the sidebar; right click offers the same.
 Ctrl+C/X/V copy/cut/paste · Del move to Trash/Recycle Bin · Shift+Del delete for good (asks first) · F2 rename · Ctrl+Shift+N new folder ·
 Ctrl+N new file · Ctrl+D duplicate · Ctrl+T/W/Tab tabs · Ctrl+Shift+T reopen tab ·
 Alt+←/→ back/forward · Backspace parent · \ or Alt+D edit path (Tab or → takes the suggested folder) · Ctrl+L edit path with all of it selected · type to filter ·
-Space preview (in the preview: ↑/↓ files, ←/→ pages or sheets, +/−/0 zoom, drag to turn a 3D model and right-drag to move it, W wrap, M Markdown source, Enter open) · Ctrl+H hidden files · Ctrl+F search · F5 refresh · F10 terminal ·
+Space preview (in the preview: ↑/↓ files, ←/→ pages or sheets, P play or pause music and ←/→ five seconds back or ahead in it, +/−/0 zoom, drag to turn a 3D model and right-drag to move it, W wrap, M Markdown source, Enter open) · Ctrl+H hidden files · Ctrl+F search · F5 refresh · F10 terminal ·
 Tab switch browser · drag to move, Ctrl+drag to copy.
 Ctrl+A select all · Ctrl+Enter open in a new tab · Alt+↑ parent · Ctrl+Shift+C copy path ·
 Ctrl+Shift+Tab previous tab · Shift+Tab previous panel · Ctrl+Alt+arrows panel in that direction.

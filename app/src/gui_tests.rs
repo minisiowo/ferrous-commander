@@ -1728,6 +1728,50 @@ fn space_opens_the_preview_arrows_change_its_file_and_escape_closes_it() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn music_goes_on_while_its_file_is_on_show_and_ends_when_the_cursor_leaves_it() {
+    use crate::preview::sound::State;
+    let (root, _, ctx, mut app) = safety_app("music");
+    let song = root.join("a song.mp3");
+    std::fs::write(&song, b"only the name matters here").unwrap();
+    app.request_folder(&root, true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.panes[0].view.len() != 2 {
+        assert!(std::time::Instant::now() < deadline, "folder load timed out");
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    app.st.show_preview = true;
+    // One panel, so that it is wide enough for the pane at its right.
+    while app.panes.len() > 1 { app.close_panel(app.panes.len() - 1); }
+    app.active = 0;
+    app.panes[0].cursor = Some(0);
+    assert_eq!(app.cursor_entry(0).map(|e| e.path.clone()), Some(song.clone()));
+    for layout in [crate::settings::Layout::Standard, crate::settings::Layout::Columns] {
+        app.st.layout = layout;
+        app.panes[0].cursor = Some(0);
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        app.sound.toggle(&song, &ctx);
+        for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+        assert_eq!(app.sound.status().state, State::Playing, "{layout:?}: the pane shows the file");
+        key(&ctx, &mut app, Key::ArrowDown, Modifiers::NONE);
+        assert_eq!(app.sound.status().state, State::Idle, "{layout:?}: another file is on show");
+    }
+    app.panes[0].cursor = Some(0);
+    app.st.show_preview = false;
+    app.sound.toggle(&song, &ctx);
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    assert_eq!(app.sound.status().state, State::Idle, "no pane and no window: nothing shows the file");
+    frame(&ctx, &mut app, vec![Event::Text(" ".into())], Modifiers::NONE);
+    assert!(app.preview_window);
+    app.sound.toggle(&song, &ctx);
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.sound.status().state, State::Playing, "the preview window shows it");
+    key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    assert_eq!(app.sound.status().state, State::Idle, "closing the preview ends the music");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// Where the painted text `label` is, after the windows have settled.
 fn text_rect(ctx: &egui::Context, app: &mut App, label: &str) -> Rect {
     let mut found = None;

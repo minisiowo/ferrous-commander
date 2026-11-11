@@ -28,7 +28,7 @@ fn note(key: &str, value: &str) -> Reply {
     (Loaded::Info { rows: vec![(key.to_string(), value.to_string())], more: false }, None)
 }
 
-fn duration(seconds: u64) -> String {
+pub(super) fn duration(seconds: u64) -> String {
     let (h, m, s) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
     if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
 }
