@@ -428,6 +428,7 @@ impl App {
             return;
         }
         let before = serde_json::to_string(&self.st).unwrap_or_default();
+        let listing_before = self.st.listing_options();
         let pal = self.pal;
         let weak = pal.text_weak;
         let accent = pal.accent;
@@ -591,6 +592,9 @@ impl App {
                     let tags = std::mem::take(&mut self.st.tags);
                     self.st = crate::settings::Settings { favorites, tags, ..Default::default() };
                     self.keymap_changed();
+                    // Reset also removes per-folder sort overrides. The common
+                    // settings handler reloads when the global sorting changed.
+                    if listing_before.sorting == self.st.sorting { self.reload_all(); }
                 }
                 ui.label(RichText::new("Settings are saved automatically").color(weak).size(11.0));
             });
@@ -605,11 +609,7 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if serde_json::to_string(&self.st).unwrap_or_default() != before {
-            self.mark_dirty();
-            self.reload_all();
-            for p in &mut self.panes {
-                p.view_key = None;
-            }
+            self.settings_changed(listing_before);
         }
         if closed {
             self.settings_open = false;

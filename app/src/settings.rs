@@ -98,6 +98,14 @@ impl Default for WindowPlace {
     }
 }
 
+/// Settings that change the contents or order of a file listing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ListingOptions {
+    pub sorting: Sorting,
+    pub show_hidden: bool,
+    pub tree_files: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -143,6 +151,12 @@ pub struct Settings {
     pub rounded: bool,
     /// A thin line around every panel and every card of the sidebar.
     pub outlines: bool,
+}
+
+impl Settings {
+    pub(crate) fn listing_options(&self) -> ListingOptions {
+        ListingOptions { sorting: self.sorting, show_hidden: self.show_hidden, tree_files: self.tree_files }
+    }
 }
 
 impl Default for Settings {

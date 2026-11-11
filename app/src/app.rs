@@ -1270,6 +1270,19 @@ impl App {
         }
     }
 
+    /// Appearance changes need a repaint, not another walk of every visible folder.
+    pub(crate) fn settings_changed(&mut self, before: crate::settings::ListingOptions) {
+        self.mark_dirty();
+        let after = self.st.listing_options();
+        if before.sorting != after.sorting { self.reload_all(); }
+        if before != after {
+            for pane in &mut self.panes {
+                pane.view_key = None;
+                pane.tree_key = None;
+            }
+        }
+    }
+
     pub fn reload_all(&mut self) {
         let visible = self.visible_folders();
         self.cache.retain(|p, _| visible.contains(p));
@@ -2527,6 +2540,34 @@ mod performance_tests {
         app.update_view(0);
         assert_eq!(app.panes[0].view.len(), 1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn settings_only_reread_folders_when_their_sort_order_changes() {
+        let mut app = App::new(Some(PathBuf::from("unused.png")));
+        let root = std::env::temp_dir().join(format!("fc_settings_no_io_{}", std::process::id()));
+        app.panes[0].tab().path = root.clone();
+        let mut cached = listing(Instant::now());
+        cached.generation = 1;
+        app.cache.insert(root.clone(), cached);
+        let key = (root.clone(), 1, String::new(), false);
+        app.panes[0].view_key = Some(key.clone());
+        let before = app.st.listing_options();
+        app.st.rounded = !app.st.rounded;
+        app.st.outlines = !app.st.outlines;
+        app.st.font_size += 1.0;
+        app.settings_changed(before);
+        assert!(!app.folder_pending.contains_key(&root), "appearance must not queue disk reads");
+        assert_eq!(app.panes[0].view_key, Some(key));
+        let before = app.st.listing_options();
+        app.st.show_hidden = !app.st.show_hidden;
+        app.settings_changed(before);
+        assert!(!app.folder_pending.contains_key(&root), "hidden files are filtered from the cache");
+        assert!(app.panes[0].view_key.is_none());
+        let before = app.st.listing_options();
+        app.st.sorting.folders_on_top = !app.st.sorting.folders_on_top;
+        app.settings_changed(before);
+        assert!(app.folder_pending.contains_key(&root), "sorting is reapplied by the folder worker");
     }
 
     #[test]

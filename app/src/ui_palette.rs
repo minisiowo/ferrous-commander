@@ -31,6 +31,8 @@ const DEEP_DELAY: Duration = Duration::from_millis(140);
 const DEEP_RESULTS_MAX: usize = 300;
 /// How often what the search has found joins the list while it runs, so rows do not shuffle on every find.
 const DEEP_REFRESH: Duration = Duration::from_millis(250);
+/// Reuse a completed search while typing quickly, then recheck the disk on the next query.
+const DEEP_MAX_AGE: Duration = Duration::from_secs(2);
 /// A folder larger than this is left to the search below it, which is limited.
 const HERE_MAX: usize = 20_000;
 
@@ -39,6 +41,9 @@ struct Deep {
     needle: String,
     root: PathBuf,
     hidden: bool,
+    generation: u64,
+    /// When the disk was last searched; narrowing must not renew this timestamp.
+    completed: Instant,
     /// `None` once it has ended and `found` holds all of its results.
     run: Option<ops::Search>,
     found: Vec<Entry>,
@@ -68,6 +73,7 @@ impl Deep {
         }
         self.taken = Instant::now();
         if done {
+            self.completed = Instant::now();
             self.before.clear();
             self.run = None;
         }
@@ -162,14 +168,14 @@ impl PaletteUi {
     }
 
     /// Starts, keeps or drops the search below `root`, and takes what it has found so far.
-    fn search_below(&mut self, mode: Mode, needle: &str, root: &Path, show_hidden: bool, ctx: &egui::Context) {
+    fn search_below(&mut self, mode: Mode, needle: &str, root: &Path, show_hidden: bool, generation: u64, ctx: &egui::Context) {
         let wanted = mode == Mode::Places && needle.chars().count() >= 2 && !is_computer(root)
             && !crate::ui_list::typed_path(needle).is_absolute();
         if !wanted {
             self.deep = None;
             return;
         }
-        if !self.deep.as_ref().is_some_and(|deep| deep.needle == needle && deep.root == root && deep.hidden == show_hidden) {
+        if !self.deep.as_ref().is_some_and(|deep| deep.needle == needle && deep.root == root && deep.hidden == show_hidden && deep.generation == generation) {
             // Until typing pauses, the last search keeps its results on screen.
             let waited = self.changed.elapsed();
             if waited < DEEP_DELAY {
@@ -181,9 +187,10 @@ impl PaletteUi {
                 // Text that only narrows a search that ended needs no second walk of the disk:
                 // what it would find is among what was found.
                 let narrowed = old.as_ref().is_some_and(|old| {
-                    old.whole() && search_words(&old.needle).iter().all(|was| words.iter().any(|word| word.contains(was.as_str())))
+                    old.whole() && old.generation == generation && old.completed.elapsed() < DEEP_MAX_AGE && search_words(&old.needle).iter().all(|was| words.iter().any(|word| word.contains(was.as_str())))
                 });
                 // The same rule as the search's own, so nothing kept is what it would not find.
+                let completed = old.as_ref().map_or_else(Instant::now, |old| old.completed);
                 let mut seen = HashSet::new();
                 let kept: Vec<Entry> = old.map(|old| old.found.into_iter().chain(old.before)
                         .filter(|e| words.iter().all(|word| e.lname().contains(word.as_str())) && seen.insert(e.path.clone()))
@@ -195,7 +202,7 @@ impl PaletteUi {
                     let run = ops::search_within(root.to_path_buf(), needle.to_string(), show_hidden, Some(DEEP_RESULTS_MAX), ctx.clone());
                     (Some(run), Vec::new(), kept)
                 };
-                self.deep = Some(Deep { needle: needle.to_string(), root: root.to_path_buf(), hidden: show_hidden, run, found, before, taken: Instant::now() });
+                self.deep = Some(Deep { needle: needle.to_string(), root: root.to_path_buf(), hidden: show_hidden, generation, completed, run, found, before, taken: Instant::now() });
             }
         }
         if let Some(deep) = &mut self.deep && let Some(run) = &deep.run {
@@ -370,8 +377,8 @@ impl App {
         let query = palette.query.clone();
         let (mode, needle) = palette::split(&query);
         let here = self.panes[self.active].path().to_path_buf();
-        palette.search_below(mode, needle, &here, self.st.show_hidden, ctx);
         let listing = self.cache.get(&here).map_or(0, |l| l.generation);
+        palette.search_below(mode, needle, &here, self.st.show_hidden, listing, ctx);
         let key = (mode, here, listing);
         let mut gathered = palette.gathered.as_ref() == Some(&key);
         if !gathered {
@@ -686,6 +693,7 @@ impl App {
                 stays = ctrl;
             }
             Pick::Setting(setting) => {
+                let before = self.st.listing_options();
                 let st = &mut self.st;
                 stays = ctrl;
                 match setting {
@@ -720,12 +728,48 @@ impl App {
                         stays = false;
                     }
                 }
-                // As after a change in the settings window: lists follow the new settings.
-                self.mark_dirty();
-                self.reload_all();
-                for pane in &mut self.panes { pane.view_key = None; }
+                self.settings_changed(before);
             }
         }
         stays
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn finish(palette: &mut PaletteUi, root: &Path, needle: &str, generation: u64, ctx: &egui::Context) {
+        palette.changed = Instant::now() - DEEP_DELAY;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            palette.search_below(Mode::Places, needle, root, false, generation, ctx);
+            if palette.deep.as_ref().is_some_and(|deep| deep.run.is_none()) { break; }
+            assert!(Instant::now() < deadline, "search did not finish");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn expired_searches_and_listing_changes_find_new_files() {
+        for expire in [true, false] {
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            let root = std::env::temp_dir().join(format!("fc_palette_cache_{}_{stamp}", std::process::id()));
+            let sub = root.join("sub");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(sub.join("report-old.txt"), b"x").unwrap();
+            let ctx = egui::Context::default();
+            let mut palette = PaletteUi::new(Mode::Places);
+            finish(&mut palette, &root, "re", 1, &ctx);
+            let completed = palette.deep.as_ref().unwrap().completed;
+            finish(&mut palette, &root, "rep", 1, &ctx);
+            assert_eq!(palette.deep.as_ref().unwrap().completed, completed, "narrowing does not prolong freshness");
+            let added = sub.join("report-new.txt");
+            std::fs::write(&added, b"x").unwrap();
+            if expire { palette.deep.as_mut().unwrap().completed = Instant::now() - DEEP_MAX_AGE; }
+            finish(&mut palette, &root, if expire { "repo" } else { "rep" }, if expire { 1 } else { 2 }, &ctx);
+            assert!(palette.deep.as_ref().unwrap().found.iter().any(|e| e.path == added));
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }
