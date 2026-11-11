@@ -534,77 +534,7 @@ fn move_by_copy(src: &Path, dest_dir: &Path, cancel: &AtomicBool) -> Result<Path
 
 // ---------- search ----------
 
-pub struct Search {
-    pub results: Arc<Mutex<Vec<fsx::Entry>>>,
-    pub done: Arc<AtomicBool>,
-    pub cancel: Arc<AtomicBool>,
-    pub scanned: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl Drop for Search {
-    fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-    }
-}
-
-/// Search names under `root` containing every word of `query` (case-insensitive).
-pub fn search(root: PathBuf, query: String, show_hidden: bool, ctx: egui::Context) -> Search {
-    search_within(root, query, show_hidden, None, ctx)
-}
-
-/// With a limit the search ends at that many results, and takes the folders nearest the
-/// root first, so that the few results kept are the ones closest to hand.
-pub fn search_within(root: PathBuf, query: String, show_hidden: bool, limit: Option<usize>, ctx: egui::Context) -> Search {
-    let s = Search {
-        results: Arc::new(Mutex::new(Vec::new())),
-        done: Arc::new(AtomicBool::new(false)),
-        cancel: Arc::new(AtomicBool::new(false)),
-        scanned: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-    };
-    let (res, done, cancel, scanned) = (s.results.clone(), s.done.clone(), s.cancel.clone(), s.scanned.clone());
-    std::thread::spawn(move || {
-        let words: Vec<String> = query.to_lowercase().split_whitespace().map(String::from).collect();
-        let mut stack = std::collections::VecDeque::from([root]);
-        let mut last = std::time::Instant::now();
-        let mut full = false;
-        while let Some(dir) = if limit.is_some() { stack.pop_front() } else { stack.pop_back() } {
-            if full || cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            let Ok(list) = fsx::read_dir(&dir) else { continue };
-            for e in list {
-                if cancel.load(Ordering::Relaxed) {
-                    break;
-                }
-                if e.hidden && !show_hidden {
-                    continue;
-                }
-                scanned.fetch_add(1, Ordering::Relaxed);
-                if e.is_dir {
-                    let link = std::fs::symlink_metadata(&e.path).map(|m| fsx::is_link_like(&m)).unwrap_or(true);
-                    if !link {
-                        stack.push_back(e.path.clone());
-                    }
-                }
-                if !words.is_empty() && words.iter().all(|w| e.lname().contains(w.as_str())) {
-                    let mut found = res.lock().unwrap();
-                    found.push(e);
-                    if limit.is_some_and(|limit| found.len() >= limit) {
-                        full = true;
-                        break;
-                    }
-                }
-            }
-            if last.elapsed().as_millis() > 100 {
-                last = std::time::Instant::now();
-                ctx.request_repaint();
-            }
-        }
-        done.store(true, Ordering::Relaxed);
-        ctx.request_repaint();
-    });
-    s
-}
+pub use crate::search::{Search, search, search_within};
 
 #[cfg(all(test, any(windows, target_os = "linux")))]
 #[path = "chaos_tests.rs"]
@@ -1490,6 +1420,7 @@ mod tests {
             done: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
             scanned: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            progress: Arc::new(Mutex::new(Default::default())),
         };
         let cancel = s.cancel.clone();
         drop(s);

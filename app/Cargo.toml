@@ -32,6 +32,7 @@ tar = { version = "0.4.46", default-features = false }
 zip = { version = "9.4.1", default-features = false, features = ["aes-crypto", "bzip2", "chrono", "deflate-flate2", "deflate64", "lzma", "ppmd", "xz"] }
 hayro = "0.9"
 resvg = { version = "0.49", default-features = false, features = ["svgz", "text", "system-fonts", "memmap-fonts", "raster-images"] }
+regex-automata = "0.4"
 syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 encoding_rs = "0.8"

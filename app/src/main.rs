@@ -22,6 +22,7 @@ mod lua_config;
 mod omarchy;
 mod openwith;
 mod ops;
+mod search;
 mod palette;
 mod preview;
 mod defaults;
