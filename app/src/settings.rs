@@ -145,6 +145,8 @@ pub struct Settings {
     pub history: Vec<PathBuf>,
     /// Folders visited, the latest first: the quick palette's history, longer than the sidebar's.
     pub recent_folders: Vec<PathBuf>,
+    /// Files opened from the app, the latest first, offered by the quick palette.
+    pub recent_files: Vec<PathBuf>,
     /// Commands and settings last used from the quick palette, by their ids.
     pub palette_recent: Vec<String>,
     pub show_history: bool,
@@ -199,6 +201,7 @@ impl Default for Settings {
             favorites: default_favorites(),
             history: Vec::new(),
             recent_folders: Vec::new(),
+            recent_files: Vec::new(),
             palette_recent: Vec::new(),
             show_history: true,
             show_cloud: true,
@@ -446,6 +449,7 @@ impl Settings {
         let mut s = self.clone();
         s.history.retain(text);
         s.recent_folders.retain(text);
+        s.recent_files.retain(text);
         for group in s.favorites.iter_mut().chain(&mut s.removed_groups) { group.paths.retain(text); }
         for pane in s.panes.iter_mut().chain(s.layouts.iter_mut().flat_map(|p| p.panes.iter_mut())) {
             pane.make_storable();
@@ -694,6 +698,9 @@ mod tests {
         let round = |s: &Settings| Settings::from_lua(&crate::lua_config::encode(&serde_json::to_value(s).unwrap())).unwrap();
         // An empty Lua table says nothing about being a list.
         assert!(round(&s).recent_folders.is_empty() && round(&s).palette_recent.is_empty());
+        assert!(round(&s).recent_files.is_empty());
+        s.recent_files = vec![PathBuf::from("/home/me/notes.txt")];
+        assert_eq!(round(&s).recent_files, s.recent_files);
         s.recent_folders = vec![PathBuf::from("/home/me/Projects"), PathBuf::from(r"C:\Work")];
         s.palette_recent = vec!["toggle_hidden".into(), "theme:Gruvbox".into()];
         assert_eq!(round(&s).recent_folders, s.recent_folders);

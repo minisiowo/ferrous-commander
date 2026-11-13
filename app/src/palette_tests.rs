@@ -368,3 +368,20 @@ fn the_sidebar_actions_and_every_on_off_setting_are_in_the_palette() {
     assert_eq!(app.st.show_cloud, !before, "Enter flips it");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn a_file_opened_before_is_offered_from_any_folder() {
+    let (ctx, mut app, root) = palette_app("palette_opened");
+    let file = root.join("dir05").join("inner").join("budget.ods");
+    std::fs::write(&file, b"x").unwrap();
+    // As the system reports it opened; opening it for real would start another program.
+    app.report_opened(&file, Ok(()));
+    app.report_opened(&root.join("dir06"), Ok(()));
+    assert_eq!(app.st.recent_files, [file.clone()], "folders are not files");
+    app.navigate(0, root.join("dir09"), None);
+    settle(&ctx, &mut app);
+    alt_p(&ctx, &mut app);
+    word(&ctx, &mut app, "budg");
+    assert_eq!(palette(&app).titles()[0], "budget.ods", "found without searching below the folder");
+    std::fs::remove_dir_all(root).unwrap();
+}

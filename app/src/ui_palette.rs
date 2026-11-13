@@ -23,6 +23,8 @@ const ROWS_MAX: usize = 100;
 const ROWS_SHOWN: usize = 10;
 /// Folders visited, kept for the palette's history. The sidebar shows only the latest few.
 pub const RECENT_FOLDERS_MAX: usize = 200;
+/// Files opened, kept for the palette.
+pub const RECENT_FILES_MAX: usize = 200;
 /// Commands and settings used from the palette, offered first the next time.
 const RECENT_PICKS_MAX: usize = 8;
 /// A pause in typing before the folders below the current one are searched.
@@ -317,6 +319,9 @@ impl App {
         let here = self.panes[i].path();
         for path in self.visited().filter(|p| p.as_path() != here) {
             add(Item::new(fsx::display_name(path), parent_text(path), "recent", Pick::Folder(path.clone())).boost(80), path);
+        }
+        for path in &self.st.recent_files {
+            add(Item::new(fsx::display_name(path), parent_text(path), "opened", Pick::File(path.clone())).boost(75), path);
         }
         for group in &self.st.favorites {
             for path in &group.paths {

@@ -1525,7 +1525,13 @@ impl App {
         self.report_opened(p, result);
     }
 
-    fn report_opened(&mut self, p: &Path, result: Result<(), String>) {
+    pub(crate) fn report_opened(&mut self, p: &Path, result: Result<(), String>) {
+        if result.is_ok() && !p.is_dir() {
+            self.st.recent_files.retain(|f| f != p);
+            self.st.recent_files.insert(0, p.to_path_buf());
+            self.st.recent_files.truncate(crate::ui_palette::RECENT_FILES_MAX);
+            self.mark_dirty();
+        }
         match result {
             Ok(()) => self.toast(ToastKind::Info, format!("Opened {}", fsx::display_name(p))),
             Err(e) => self.toast(ToastKind::Error, format!("Couldn't open {}: {e}", fsx::display_name(p))),
