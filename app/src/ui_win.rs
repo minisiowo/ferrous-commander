@@ -21,6 +21,11 @@ fn settings_section(ui: &mut egui::Ui, title: &str, accent: egui::Color32) {
 
 const TRASH_NAME: &str = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
 
+/// Labels in the first column of the "Appearance & layout" grid; keep in step with it.
+const SETTINGS_GRID_LABELS: &[&str] = &[
+    "Theme", "Accent color", "Window layout", "Panels", "Font size", "Corners", "Outlines", "Window",
+];
+
 impl App {
     pub fn dialogs(&mut self, ctx: &egui::Context) {
         #[cfg(not(windows))]
@@ -369,7 +374,15 @@ impl App {
             ui.spacing_mut().item_spacing.y = 8.0;
             ui.label(RichText::new("Appearance & layout").strong().color(accent));
             ui.add_space(4.0);
-            egui::Grid::new("settings_grid").num_columns(2).spacing(vec2(16.0, 8.0)).show(ui, |ui| {
+            // The label column is as wide as its widest label at the largest font size, so the
+            // controls beside it stay put while the font size changes. Otherwise the font size
+            // slider moves under the pointer as it is dragged, which changes the font size again.
+            let widest_font = egui::FontId::proportional(crate::defaults::MAX_FONT_SIZE);
+            let label_column = SETTINGS_GRID_LABELS.iter()
+                .map(|label| ui.painter().layout_no_wrap((*label).to_owned(), widest_font.clone(), weak).size().x)
+                .fold(0.0, f32::max)
+                .ceil();
+            egui::Grid::new("settings_grid").num_columns(2).spacing(vec2(16.0, 8.0)).min_col_width(label_column).show(ui, |ui| {
                 ui.label("Theme");
                 ui.vertical(|ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -427,7 +440,7 @@ impl App {
                 });
                 ui.end_row();
                 ui.label("Font size");
-                ui.add(egui::Slider::new(&mut self.st.font_size, 10.0..=18.0).step_by(0.5));
+                ui.add(egui::Slider::new(&mut self.st.font_size, crate::defaults::MIN_FONT_SIZE..=crate::defaults::MAX_FONT_SIZE).step_by(0.5));
                 ui.end_row();
                 ui.label("Corners");
                 ui.horizontal(|ui| {

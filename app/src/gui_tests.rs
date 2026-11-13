@@ -162,6 +162,56 @@ fn the_configuration_folder_opens_in_a_new_tab_of_the_app() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// Where a text was painted in the last frame, found by its exact words.
+fn painted_text(ctx: &egui::Context, app: &mut App, name: &str) -> Option<Rect> {
+    let output = ctx.run_ui(RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))),
+        ..Default::default()
+    }, |ui| app.draw(ui));
+    output.shapes.iter().find_map(|shape| match &shape.shape {
+        egui::epaint::Shape::Text(text) if text.galley.job.text == name => Some(Rect::from_min_size(text.pos, text.galley.size())),
+        _ => None,
+    })
+}
+
+#[test]
+fn the_font_size_slider_stays_still_while_it_is_dragged() {
+    let root = std::env::temp_dir().join(format!("fc_font_slider_{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(root.join("unused.png")));
+    app.settings_open = true;
+    let mut controls_x = Vec::new();
+    for size in [crate::defaults::MIN_FONT_SIZE, crate::defaults::MAX_FONT_SIZE] {
+        app.st.font_size = size;
+        for _ in 0..4 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+        controls_x.push(painted_text(&ctx, &mut app, "Standard").expect("the layout choice is painted").min.x);
+    }
+    assert_eq!(controls_x[0], controls_x[1], "the settings controls must not move sideways with the font size");
+
+    // Hold the pointer still on the slider: the font size must settle, not keep changing.
+    app.st.font_size = crate::defaults::ITEM_FONT_SIZE;
+    for _ in 0..4 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    let row = painted_text(&ctx, &mut app, "Font size").expect("the font size row is painted");
+    let on_slider = pos2(controls_x[0] + 60.0, row.center().y);
+    frame(&ctx, &mut app, vec![Event::PointerMoved(on_slider)], Modifiers::NONE);
+    frame(&ctx, &mut app, vec![Event::PointerButton {
+        pos: on_slider, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE,
+    }], Modifiers::NONE);
+    frame(&ctx, &mut app, vec![Event::PointerMoved(on_slider + vec2(1.0, 0.0))], Modifiers::NONE);
+    let mut sizes = Vec::new();
+    for _ in 0..8 {
+        frame(&ctx, &mut app, vec![Event::PointerMoved(on_slider + vec2(1.0, 0.0))], Modifiers::NONE);
+        sizes.push(app.st.font_size);
+    }
+    frame(&ctx, &mut app, vec![Event::PointerButton {
+        pos: on_slider, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE,
+    }], Modifiers::NONE);
+    assert_ne!(sizes[0], crate::defaults::ITEM_FONT_SIZE, "the drag must reach the slider");
+    assert!(sizes.windows(2).all(|w| w[0] == w[1]), "the font size kept changing under a still pointer: {sizes:?}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn tree_marquee_matches_painted_rows_after_scrolling() {
     let root = std::env::temp_dir().join(format!("fc_tree_marquee_{}", std::process::id()));

@@ -721,8 +721,8 @@ impl App {
                     Setting::HistoryCard => st.show_history = !st.show_history,
                     Setting::Rounded => st.rounded = !st.rounded,
                     Setting::Outlines => st.outlines = !st.outlines,
-                    Setting::FontLarger => st.font_size = (st.font_size + 1.0).min(18.0),
-                    Setting::FontSmaller => st.font_size = (st.font_size - 1.0).max(10.0),
+                    Setting::FontLarger => st.font_size = (st.font_size + 1.0).min(crate::defaults::MAX_FONT_SIZE),
+                    Setting::FontSmaller => st.font_size = (st.font_size - 1.0).max(crate::defaults::MIN_FONT_SIZE),
                     Setting::OpenSettings => {
                         self.settings_open = true;
                         stays = false;
