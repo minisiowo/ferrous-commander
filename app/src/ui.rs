@@ -1147,7 +1147,7 @@ impl App {
     /// The button on a drive row, and the same choice on right click.
     fn eject_controls(&mut self, ui: &mut Ui, row: &egui::Response, d: &crate::app::DriveInfo) {
         if d.eject.is_none() { return; }
-        let busy = self.ejecting.iter().any(|(mount, ..)| *mount == d.path);
+        let busy = self.ejecting.iter().any(|((mount, _), _)| *mount == d.path);
         let rect = Rect::from_center_size(pos2(row.rect.max.x - 46.0, row.rect.min.y + 11.0), vec2(20.0, 20.0));
         let button = ui.interact(rect, row.id.with("eject"), if busy { Sense::hover() } else { Sense::click() });
         let pal = self.pal;

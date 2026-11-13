@@ -2,11 +2,12 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use egui::Color32;
 
+use crate::background::{Polled, Task, Wake, take_finished};
+use crate::folder_loader::{FolderLoader, FolderRequest};
 use crate::fsx::{self, Entry, Sorting};
 use crate::ops::{self, Job, OpKind};
 use crate::preview::Preview;
@@ -20,8 +21,6 @@ const EVICT_EVERY: Duration = Duration::from_secs(1);
 
 /// Folder refresh poll.
 pub const REFRESH_MS: u64 = crate::defaults::REFRESH_MS;
-/// One unresponsive network share occupies one worker; the others keep loading.
-const FOLDER_WORKERS: usize = 4;
 /// Slowest redraw while nothing happens, for the drive list, sidebar and clipboard.
 /// Everything that needs the window sooner wakes it.
 const IDLE_HEARTBEAT: Duration = Duration::from_secs(5);
@@ -62,22 +61,6 @@ pub struct DriveInfo {
     pub eject: Option<String>,
 }
 
-#[derive(Clone)]
-struct FolderRequest {
-    path: PathBuf,
-    sorting: Sorting,
-    old_mtime: Option<SystemTime>,
-    force: bool,
-    /// Sent by the watcher: an unchanged folder produces no result.
-    poll: bool,
-}
-struct FolderResult {
-    path: PathBuf,
-    listing: Option<Listing>,
-    fallback: Option<PathBuf>,
-    polled: bool,
-}
-
 pub struct Listing {
     pub entries: Vec<Entry>,
     pub error: Option<String>,
@@ -85,6 +68,13 @@ pub struct Listing {
     pub generation: u64,
     pub sorting: Sorting,
     pub used: Instant,
+}
+
+impl Listing {
+    /// A listing not read from disk, `generation` 0 until it is.
+    pub fn empty(entries: Vec<Entry>, sorting: Sorting) -> Listing {
+        Listing { entries, error: None, mtime: None, generation: 0, sorting, used: Instant::now() }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -156,31 +146,6 @@ pub struct Counted {
 pub const COUNTED_FOR: Duration = Duration::from_millis(250);
 /// Below this many rows the numbers are cheap to add up for every frame.
 pub const COUNTED_FROM: usize = 20_000;
-
-/// Reading and sorting a huge folder takes seconds, and a copy into it changes it all the
-/// time. It is read again only after a multiple of what the last reading took.
-#[derive(Default)]
-struct RefreshPace {
-    wait_until: HashMap<PathBuf, Instant>,
-}
-
-impl RefreshPace {
-    const SLOW_READ: Duration = Duration::from_millis(100);
-    const WAIT_FACTOR: u32 = 5;
-    const LONGEST_WAIT: Duration = Duration::from_secs(10);
-
-    fn due(&self, path: &Path, now: Instant) -> bool {
-        self.wait_until.get(path).is_none_or(|until| now >= *until)
-    }
-
-    fn note(&mut self, path: &Path, took: Duration, now: Instant) {
-        if took < Self::SLOW_READ {
-            self.wait_until.remove(path);
-        } else {
-            self.wait_until.insert(path.to_path_buf(), now + (took * Self::WAIT_FACTOR).min(Self::LONGEST_WAIT));
-        }
-    }
-}
 
 impl Pane {
     pub fn path(&self) -> &Path {
@@ -415,15 +380,11 @@ pub struct App {
     /// Panel rectangles from the last frame (to split along the longer side).
     pub pane_rects: Vec<(usize, egui::Rect)>,
     pub cloud: Vec<PathBuf>,
-    drives_rx: Option<mpsc::Receiver<(Vec<DriveInfo>, Vec<PathBuf>)>>,
+    drives_task: Option<Task<(Vec<DriveInfo>, Vec<PathBuf>)>>,
     pub cache: HashMap<PathBuf, Listing>,
-    folder_tx: mpsc::SyncSender<FolderRequest>,
+    folders: FolderLoader,
     /// Lets background threads wake the window as soon as a result is ready.
-    wake: std::sync::Arc<std::sync::OnceLock<egui::Context>>,
-    /// Folders the background watcher checks for changes, without drawing a frame.
-    watch: std::sync::Arc<std::sync::Mutex<Vec<FolderRequest>>>,
-    folder_rx: mpsc::Receiver<FolderResult>,
-    folder_pending: HashMap<PathBuf, bool>,
+    wake: Wake,
     pub drives: Vec<DriveInfo>,
     drives_at: Option<Instant>,
     pub clip: Option<(std::sync::Arc<[PathBuf]>, bool)>,
@@ -431,9 +392,9 @@ pub struct App {
     clip_sequence: u32,
     pub jobs: Vec<Job>,
     pub toasts: Vec<Toast>,
-    open_with_pending: Vec<(PathBuf, mpsc::Receiver<Result<(), String>>)>,
-    /// Drives being ejected: mount point, name and the eventual outcome.
-    pub ejecting: Vec<(PathBuf, String, mpsc::Receiver<Result<String, String>>)>,
+    open_with_pending: Vec<(PathBuf, Task<Result<(), String>>)>,
+    /// Drives being ejected: mount point and name, and the eventual outcome.
+    pub ejecting: Vec<((PathBuf, String), Task<Result<String, String>>)>,
     pub dialog: Option<Dialog>,
     /// Archives waiting for a password, one question at a time.
     locked: VecDeque<(PathBuf, Option<PathBuf>, bool)>,
@@ -492,35 +453,6 @@ pub struct App {
     pub acts: Vec<Act>,
     /// The user has been told that settings cannot be saved.
     save_warned: bool,
-}
-
-/// Checks visible folders on its own timer, so that an idle window does not redraw
-/// to notice changes. It stops when the app that owns `watch` is gone.
-fn spawn_folder_watcher(
-    watch: std::sync::Weak<std::sync::Mutex<Vec<FolderRequest>>>,
-    watching: std::sync::Arc<std::sync::Mutex<HashSet<PathBuf>>>,
-    folders: mpsc::SyncSender<FolderRequest>,
-) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(REFRESH_MS));
-        let Some(watch) = watch.upgrade() else { return };
-        let Ok(list) = watch.lock().map(|list| list.clone()) else { return };
-        drop(watch);
-        for req in list {
-            let Ok(mut watching) = watching.lock() else { return };
-            // A silent share stays in flight here instead of queueing up every tick.
-            if !watching.insert(req.path.clone()) {
-                continue;
-            }
-            match folders.try_send(req) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(req)) => {
-                    watching.remove(&req.path);
-                }
-                Err(mpsc::TrySendError::Disconnected(_)) => return,
-            }
-        }
-    });
 }
 
 /// Panels from a saved session, `empty` of them when it has none. No disk access here:
@@ -611,93 +543,11 @@ impl App {
         } else { None };
         let accent = hex(&st.accent);
         let tiles = st.tiles.clone().unwrap_or(Tile::Leaf(0)).sanitize(n);
-        // A bounded queue and a few workers: slow network paths never block rendering
-        // or accumulate a new thread on every refresh.
-        let (folder_tx, requests) = mpsc::sync_channel::<FolderRequest>(32);
-        let requests = std::sync::Arc::new(std::sync::Mutex::new(requests));
-        let (results, folder_rx) = mpsc::channel();
-        let wake = std::sync::Arc::new(std::sync::OnceLock::<egui::Context>::new());
-        let watch = std::sync::Arc::new(std::sync::Mutex::new(Vec::<FolderRequest>::new()));
-        let watching = std::sync::Arc::new(std::sync::Mutex::new(HashSet::<PathBuf>::new()));
-        spawn_folder_watcher(std::sync::Arc::downgrade(&watch), watching.clone(), folder_tx.clone());
-        let refresh_pace = std::sync::Arc::new(std::sync::Mutex::new(RefreshPace::default()));
-        for _ in 0..FOLDER_WORKERS {
-            let (requests, results, wake) = (requests.clone(), results.clone(), wake.clone());
-            let watching = watching.clone();
-            let refresh_pace = refresh_pace.clone();
-            std::thread::spawn(move || {
-                // The closure consumes the lock guard, so it is released before the work.
-                while let Ok(req) = requests.lock().map_err(drop).and_then(|queue| queue.recv().map_err(drop)) {
-                let metadata = std::fs::metadata(&req.path);
-                let fallback = if metadata
-                    .as_ref()
-                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-                {
-                    Some(
-                        req.path
-                            .ancestors()
-                            .skip(1)
-                            .find(|p| p.is_dir())
-                            .map(Path::to_path_buf)
-                            .unwrap_or_else(computer),
-                    )
-                } else {
-                    None
-                };
-                let mtime = metadata.and_then(|m| m.modified()).ok();
-                // Asked for by the user, it is read at once. The watcher comes back anyway.
-                let due = !req.poll || req.force || refresh_pace.lock().map_or(true, |pace| pace.due(&req.path, Instant::now()));
-                let listing = if due && (req.force || mtime != req.old_mtime) {
-                    let started = Instant::now();
-                    let (mut entries, error) = match fsx::read_dir(&req.path) {
-                        Ok(entries) => (entries, None),
-                        Err(error) => (Vec::new(), Some(error)),
-                    };
-                    fsx::sort_entries(&mut entries, req.sorting);
-                    if let Ok(mut pace) = refresh_pace.lock() { pace.note(&req.path, started.elapsed(), Instant::now()); }
-                    Some(Listing {
-                        entries,
-                        error,
-                        mtime,
-                        generation: 0,
-                        sorting: req.sorting,
-                        used: Instant::now(),
-                    })
-                } else {
-                    None
-                };
-                if req.poll {
-                    if let Ok(mut watching) = watching.lock() {
-                        watching.remove(&req.path);
-                    }
-                    // Nothing changed: no reason to wake the window.
-                    if listing.is_none() && fallback.is_none() {
-                        continue;
-                    }
-                }
-                if results
-                    .send(FolderResult {
-                        path: req.path,
-                        polled: req.poll,
-                        listing,
-                        fallback,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-                if let Some(ctx) = wake.get() {
-                    ctx.request_repaint();
-                }
-                }
-            });
-        }
+        let wake = Wake::default();
+        let folders = FolderLoader::start(wake.clone());
         let mut app = App {
-            folder_tx,
+            folders,
             wake,
-            watch,
-            folder_rx,
-            folder_pending: HashMap::new(),
             pal: Palette::get(st.theme.builtin().unwrap_or_default(), accent),
             keys: crate::keymap::Keymap::new(&st.keymap),
             matcher: Default::default(),
@@ -711,7 +561,7 @@ impl App {
             prev_active: 0,
             pane_rects: Vec::new(),
             cloud: Vec::new(),
-            drives_rx: None,
+            drives_task: None,
             cache: HashMap::new(),
             drives: Vec::new(),
             drives_at: None,
@@ -882,7 +732,7 @@ impl App {
 
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         self.frame += 1;
-        self.wake.get_or_init(|| ctx.clone());
+        self.wake.set(ctx);
         self.follow_user_themes(ctx);
         if self.st.theme == ThemeName::Omarchy.into() {
             if self.omarchy_watch.is_none() {
@@ -964,37 +814,13 @@ impl App {
         self.finish_jobs();
         self.ask_for_password();
         self.receive_preview();
-        for i in (0..self.ejecting.len()).rev() {
-            let result = match self.ejecting[i].2.try_recv() {
-                Ok(result) => result,
-                Err(mpsc::TryRecvError::Empty) => continue,
-                Err(mpsc::TryRecvError::Disconnected) => Err("Ejecting stopped unexpectedly".into()),
-            };
-            let (mount, name, _) = self.ejecting.swap_remove(i);
-            self.finish_eject(&mount, &name, result);
+        for ((mount, name), result) in take_finished(&mut self.ejecting) {
+            self.finish_eject(&mount, &name, result.unwrap_or_else(|| Err("Ejecting stopped unexpectedly".into())));
         }
-        for i in (0..self.open_with_pending.len()).rev() {
-            let result = match self.open_with_pending[i].1.try_recv() {
-                Ok(result) => result,
-                Err(mpsc::TryRecvError::Empty) => continue,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Err("Application handler stopped unexpectedly".into())
-                }
-            };
-            let (path, _) = self.open_with_pending.swap_remove(i);
-            match result {
-                Ok(()) => self.toast(
-                    ToastKind::Info,
-                    format!("Opened {}", fsx::display_name(&path)),
-                ),
-                Err(e) => self.toast(
-                    ToastKind::Error,
-                    format!("Couldn't open {}: {e}", fsx::display_name(&path)),
-                ),
-            }
+        for (path, result) in take_finished(&mut self.open_with_pending) {
+            self.report_opened(&path, result.unwrap_or_else(|| Err("Application handler stopped unexpectedly".into())));
         }
-        while let Ok(result) = self.folder_rx.try_recv() {
-            let again = self.folder_pending.remove(&result.path).unwrap_or(false);
+        while let Some(result) = self.folders.receive() {
             // A watcher result may predate a change of the folder's sorting.
             let stale = result.polled && result.listing.as_ref().is_some_and(|l| l.sorting != self.sorting_for(&result.path));
             if let Some(mut listing) = result.listing.filter(|_| !stale) {
@@ -1013,7 +839,7 @@ impl App {
                     }
                 }
             }
-            if again {
+            if result.again {
                 self.request_folder(&result.path, true);
             }
         }
@@ -1161,7 +987,7 @@ impl App {
 
     pub fn eject(&mut self, drive: &DriveInfo) {
         let Some(id) = drive.eject.clone() else { return };
-        if self.ejecting.iter().any(|(mount, ..)| *mount == drive.path) { return; }
+        if self.ejecting.iter().any(|((mount, _), _)| *mount == drive.path) { return; }
         // Everything is refused, not only jobs touching this drive: a job does not list
         // its sources, and pulling a drive under a running one is what this must prevent.
         if !self.jobs.is_empty() {
@@ -1171,14 +997,10 @@ impl App {
             });
             return;
         }
-        let (tx, rx) = mpsc::channel();
-        let (mount, wake) = (drive.path.clone(), self.wake.clone());
-        self.ejecting.push((mount.clone(), drive.name.clone(), rx));
+        let mount = drive.path.clone();
+        let task = Task::spawn(&self.wake, move || crate::drives::eject(&mount, &id));
+        self.ejecting.push(((drive.path.clone(), drive.name.clone()), task));
         self.toast(ToastKind::Info, format!("Ejecting {}. Keep it connected until this finishes", drive.name));
-        std::thread::spawn(move || {
-            let _ = tx.send(crate::drives::eject(&mount, &id));
-            if let Some(ctx) = wake.get() { ctx.request_repaint(); }
-        });
     }
 
     fn finish_eject(&mut self, mount: &Path, name: &str, result: Result<String, String>) {
@@ -1207,34 +1029,25 @@ impl App {
     /// Ask a background thread for the drive list (network drives can take seconds to answer).
     pub fn refresh_drives(&mut self) {
         self.drives_at = Some(Instant::now());
-        if self.drives_rx.is_some() {
-            return;
+        if self.drives_task.is_none() {
+            self.drives_task = Some(Task::spawn(&self.wake, || (crate::drives::list(), crate::drives::cloud_folders())));
         }
-        let (tx, rx) = mpsc::channel();
-        let wake = self.wake.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send((crate::drives::list(), crate::drives::cloud_folders()));
-            if let Some(ctx) = wake.get() {
-                ctx.request_repaint();
-            }
-        });
-        self.drives_rx = Some(rx);
     }
 
     fn receive_drives(&mut self, ctx: &egui::Context) {
-        let Some(rx) = &self.drives_rx else { return };
-        match rx.try_recv() {
-            Ok((drives, cloud)) => {
+        let Some(task) = &self.drives_task else { return };
+        match task.poll() {
+            Polled::Running => {}
+            Polled::Lost => self.drives_task = None,
+            Polled::Done((drives, cloud)) => {
                 self.drives = drives;
                 self.cloud = cloud;
-                self.drives_rx = None;
+                self.drives_task = None;
                 if let Some(l) = self.cache.get_mut(&computer()) {
                     l.error = Some("reload".into());
                 }
                 ctx.request_repaint();
             }
-            Err(mpsc::TryRecvError::Disconnected) => self.drives_rx = None,
-            Err(mpsc::TryRecvError::Empty) => {}
         }
     }
 
@@ -1265,47 +1078,27 @@ impl App {
                     e
                 })
                 .collect();
-            return Listing {
-                entries,
-                error: None,
-                mtime: None,
-                generation: self.generation,
-                sorting,
-                used: Instant::now(),
-            };
+            return Listing { generation: self.generation, ..Listing::empty(entries, sorting) };
         }
         // Initial placeholder; the worker supplies the actual listing.
-        Listing {
-            entries: Vec::new(),
-            error: None,
-            mtime: None,
-            generation: 0,
-            sorting,
-            used: Instant::now(),
-        }
+        Listing::empty(Vec::new(), sorting)
     }
 
     pub(crate) fn request_folder(&mut self, p: &Path, force: bool) {
         if is_computer(p) {
             return;
         }
-        if let Some(again) = self.folder_pending.get_mut(p) {
-            *again |= force;
+        if self.folders.coalesce(p, force) {
             return;
         }
-        let req = FolderRequest {
+        let request = FolderRequest {
             path: p.to_path_buf(),
             sorting: self.sorting_for(p),
             old_mtime: self.cache.get(p).and_then(|l| l.mtime),
             force,
             poll: false,
         };
-        if self.folder_tx.try_send(req).is_ok() {
-            self.folder_pending.insert(p.to_path_buf(), false);
-        } else if let Some(ctx) = self.wake.get() {
-            // The queue is full, and the next frame asks again. It may be far off otherwise.
-            ctx.request_repaint_after(Duration::from_millis(50));
-        }
+        self.folders.send(request);
     }
 
     pub fn ensure(&mut self, p: &Path) {
@@ -1321,7 +1114,7 @@ impl App {
             self.cache.insert(p.to_path_buf(), l);
         }
         if self.cache.get(p).is_some_and(|l| l.generation == 0)
-            && !self.folder_pending.contains_key(p)
+            && !self.folders.is_pending(p)
         {
             self.request_folder(p, true);
         }
@@ -1366,9 +1159,7 @@ impl App {
             poll: true,
             path,
         }).collect();
-        if let Ok(mut watch) = self.watch.lock() {
-            *watch = list;
-        }
+        self.folders.watch(list);
     }
 
     fn visible_folders(&self) -> HashSet<PathBuf> {
@@ -1705,14 +1496,14 @@ impl App {
             // As in Nautilus: opening an archive unpacks it beside itself. "Open with" still
             // reaches an archive manager.
             self.acts.push(Act::Extract(vec![p], None));
-            if let Some(ctx) = self.wake.get() { ctx.request_repaint(); }
+            self.wake.repaint();
         } else if let Some(place) = run_warning(&p) {
             // A click behind the open window must not stack a second question.
             if !self.notices.iter().any(|n| matches!(n, Notice::ConfirmRun { path, .. } if *path == p)) {
                 let link = link_target(&p);
                 self.notices.push(Notice::ConfirmRun { path: p, place, link });
                 // Asked from the search window, the question would wait behind it.
-                if let Some(ctx) = self.wake.get() {
+                if let Some(ctx) = self.wake.ctx() {
                     ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 }
             }
@@ -1723,12 +1514,14 @@ impl App {
 
     /// Hand a file to the system, which runs it if it is a program.
     pub fn launch(&mut self, p: &Path) {
-        match fsx::open_with_system(p) {
-            Ok(_) => self.toast(ToastKind::Info, format!("Opened {}", fsx::display_name(p))),
-            Err(e) => self.toast(
-                ToastKind::Error,
-                format!("Couldn't open {}: {e}", fsx::display_name(p)),
-            ),
+        let result = fsx::open_with_system(p).map(drop).map_err(|e| e.to_string());
+        self.report_opened(p, result);
+    }
+
+    fn report_opened(&mut self, p: &Path, result: Result<(), String>) {
+        match result {
+            Ok(()) => self.toast(ToastKind::Info, format!("Opened {}", fsx::display_name(p))),
+            Err(e) => self.toast(ToastKind::Error, format!("Couldn't open {}: {e}", fsx::display_name(p))),
         }
     }
 
@@ -2017,17 +1810,13 @@ impl App {
                     if !p.is_file() {
                         self.toast(ToastKind::Error, "The selected file no longer exists");
                     } else {
-                        self.app_chooser = Some(crate::openwith::Chooser::new(p, ctx.clone()));
+                        self.app_chooser = Some(crate::openwith::Chooser::new(p, &self.wake));
                     }
                     return;
                 }
-                let (tx, rx) = mpsc::channel();
-                self.open_with_pending.push((p.clone(), rx));
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    let _ = tx.send(crate::openwith::launch(&p, app.as_ref()));
-                    ctx.request_repaint();
-                });
+                let path = p.clone();
+                let task = Task::spawn(&self.wake, move || crate::openwith::launch(&path, app.as_ref()));
+                self.open_with_pending.push((p, task));
             }
             Act::Compress(i, paths) => {
                 let folder = self.panes[i].path().to_path_buf();
@@ -2537,21 +2326,6 @@ impl Drop for App {
 #[cfg(test)]
 mod performance_tests {
     #[test]
-    fn a_huge_changing_folder_is_read_again_less_often() {
-        use std::path::Path;
-        use std::time::{Duration, Instant};
-        let (mut pace, now, huge) = (super::RefreshPace::default(), Instant::now(), Path::new("huge"));
-        assert!(pace.due(huge, now), "a folder never read is read");
-        pace.note(huge, Duration::from_secs(1), now);
-        assert!(!pace.due(huge, now + Duration::from_secs(4)));
-        assert!(pace.due(huge, now + Duration::from_secs(5)));
-        pace.note(huge, Duration::from_secs(60), now);
-        assert!(pace.due(huge, now + Duration::from_secs(10)), "not for longer than this");
-        pace.note(huge, Duration::from_millis(10), now);
-        assert!(pace.due(huge, now), "quick to read, it follows every change");
-    }
-
-    #[test]
     fn the_window_changes_with_the_desktop_theme_and_can_leave_it() {
         let dir = std::env::temp_dir().join(format!("fc-omarchy-app-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2732,17 +2506,17 @@ mod performance_tests {
         app.st.outlines = !app.st.outlines;
         app.st.font_size += 1.0;
         app.settings_changed(before);
-        assert!(!app.folder_pending.contains_key(&root), "appearance must not queue disk reads");
+        assert!(!app.folders.is_pending(&root), "appearance must not queue disk reads");
         assert_eq!(app.panes[0].view_key, Some(key));
         let before = app.st.listing_options();
         app.st.show_hidden = !app.st.show_hidden;
         app.settings_changed(before);
-        assert!(!app.folder_pending.contains_key(&root), "hidden files are filtered from the cache");
+        assert!(!app.folders.is_pending(&root), "hidden files are filtered from the cache");
         assert!(app.panes[0].view_key.is_none());
         let before = app.st.listing_options();
         app.st.sorting.folders_on_top = !app.st.sorting.folders_on_top;
         app.settings_changed(before);
-        assert!(app.folder_pending.contains_key(&root), "sorting is reapplied by the folder worker");
+        assert!(app.folders.is_pending(&root), "sorting is reapplied by the folder worker");
     }
 
     #[test]
@@ -2766,12 +2540,12 @@ mod performance_tests {
         for _ in 0..100 {
             app.reload(&root);
         }
-        assert_eq!(app.folder_pending.len(), 1);
+        assert_eq!(app.folders.pending().len(), 1);
         assert!(
-            app.folder_pending[&root],
+            app.folders.pending()[&root],
             "one follow-up preserves changes during a pending read"
         );
-        let result = app.folder_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let result = app.folders.receive_within(Duration::from_secs(5)).unwrap();
         assert_eq!(result.path, root);
         let mut listing = result.listing.unwrap();
         assert_eq!(listing.entries[0].name(), "loaded.txt");
@@ -2799,10 +2573,10 @@ mod performance_tests {
         app.cache.insert(root.clone(), known);
         app.publish_watch_list();
         let quiet = Duration::from_millis(REFRESH_MS * 2 + 100);
-        assert!(app.folder_rx.recv_timeout(quiet).is_err(), "an unchanged folder stays silent");
+        assert!(app.folders.receive_within(quiet).is_none(), "an unchanged folder stays silent");
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(root.join("new.txt"), "new").unwrap();
-        let result = app.folder_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let result = app.folders.receive_within(Duration::from_secs(5)).unwrap();
         assert!(result.polled);
         assert_eq!(result.listing.unwrap().entries.len(), 1);
         drop(app);

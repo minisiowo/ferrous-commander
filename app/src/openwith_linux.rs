@@ -1,6 +1,7 @@
 //! Freedesktop application discovery. Keep desktop files as launch identities:
 //! GIO handles Exec quoting, field codes, Terminal and D-Bus activation for us.
-use std::{collections::HashSet, path::{Path, PathBuf}, sync::mpsc};
+use std::{collections::HashSet, path::{Path, PathBuf}};
+use crate::background::{Polled, Task, Wake};
 use super::AppEntry;
 
 pub struct Chooser {
@@ -9,24 +10,20 @@ pub struct Chooser {
     pub apps: Vec<AppEntry>,
     pub loading: bool,
     pub focus: bool,
-    receiver: mpsc::Receiver<Vec<AppEntry>>,
+    task: Task<Vec<AppEntry>>,
 }
 
 impl Chooser {
-    pub fn new(path: PathBuf, ctx: egui::Context) -> Self {
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = sender.send(installed_apps());
-            ctx.request_repaint();
-        });
-        Self { path, query: String::new(), apps: Vec::new(), loading: true, focus: true, receiver }
+    pub fn new(path: PathBuf, wake: &Wake) -> Self {
+        let task = Task::spawn(wake, installed_apps);
+        Self { path, query: String::new(), apps: Vec::new(), loading: true, focus: true, task }
     }
 
     pub fn poll(&mut self) {
-        match self.receiver.try_recv() {
-            Ok(apps) => { self.apps = apps; self.loading = false; }
-            Err(mpsc::TryRecvError::Disconnected) => self.loading = false,
-            Err(mpsc::TryRecvError::Empty) => {}
+        match self.task.poll() {
+            Polled::Done(apps) => { self.apps = apps; self.loading = false; }
+            Polled::Lost => self.loading = false,
+            Polled::Running => {}
         }
     }
 }

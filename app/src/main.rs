@@ -2,10 +2,12 @@
 //! Ferrous Commander — a fast, light multi-pane file manager with tiled panels, tabs and column navigation.
 
 mod app;
+mod background;
 mod archive;
 mod chrome;
 mod compress;
 mod drives;
+mod folder_loader;
 mod fsx;
 #[cfg(windows)]
 mod file_transfer;

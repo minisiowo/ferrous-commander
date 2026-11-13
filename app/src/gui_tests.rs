@@ -1535,9 +1535,8 @@ fn eject_waits_for_running_operations_and_tabs_leave_a_drive_that_went() {
     assert_eq!(app.panes[0].path(), root.as_path());
     app.notices.clear();
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    tx.send(Ok("It is safe to remove the drive".to_string())).unwrap();
-    app.ejecting.push((root.clone(), "Stick".into(), rx));
+    let done = crate::background::Task::done(Ok("It is safe to remove the drive".to_string()));
+    app.ejecting.push(((root.clone(), "Stick".into()), done));
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
     assert!(crate::app::is_computer(app.panes[0].path()), "the tab left the drive");
     assert!(app.notices.is_empty());
