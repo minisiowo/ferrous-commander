@@ -841,11 +841,11 @@ impl App {
                     let left = Rect::from_min_size(row.min, vec2(half, row.height()));
                     let right = Rect::from_min_size(pos2(row.max.x - half, row.min.y), vec2(half, row.height()));
                     let group_tip = self.tip("Creates new Favorite group and adds current folder", Command::NewGroup);
-                    if self.add_button(ui, left, "+  New group", &group_tip).clicked() {
+                    if self.add_button(ui, left, "New group", &group_tip).clicked() {
                         self.dialog = Some(Dialog::NewGroup { name: String::new(), focus: true });
                     }
                     let tip = self.tip("Saves the open panels, their tabs and layout under a name", Command::SaveLayout);
-                    if self.add_button(ui, right, "+  New layout", &tip).clicked() {
+                    if self.add_button(ui, right, "New layout", &tip).clicked() {
                         self.dialog = Some(self.new_layout_dialog());
                     }
                     ui.add_space(8.0);
@@ -860,10 +860,17 @@ impl App {
         if resp.hovered() {
             ui.painter().rect_filled(r, pal.corner(), pal.hover);
         }
+        // A drawn plus, sharp and level with the words, as on the groups' own + buttons.
+        const PLUS: f32 = 10.0;
+        const GAP: f32 = 6.0;
         let font = FontId::proportional(13.0);
-        let label = fit_text(ui.painter(), text, &font, r.width() - 8.0);
+        let label = fit_text(ui.painter(), text, &font, r.width() - 8.0 - PLUS - GAP);
         let color = if resp.hovered() { pal.text } else { pal.text_weak };
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, label, font, color);
+        let galley = ui.painter().layout_no_wrap(label, font, color);
+        let left = (r.center().x - (PLUS + GAP + galley.size().x) / 2.0).round();
+        icons::glyph(ui.painter(), Rect::from_center_size(pos2(left + PLUS / 2.0, r.center().y), vec2(PLUS, PLUS)), "plus", color);
+        let top = icons::text_level(ui.painter(), r.center().y, FontId::proportional(13.0)) - galley.size().y / 2.0;
+        ui.painter().galley(pos2(left + PLUS + GAP, top), galley, color);
         resp.on_hover_text(tip)
     }
 
