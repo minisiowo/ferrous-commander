@@ -92,6 +92,8 @@ pub enum Pick {
     Setting(Setting),
     Theme(ThemeId),
     Sort(SortBy),
+    /// A saved panel layout, by its place among the profiles.
+    Profile(usize),
 }
 
 impl Pick {
@@ -102,7 +104,7 @@ impl Pick {
             Pick::Setting(setting) => format!("setting:{setting:?}"),
             Pick::Theme(theme) => format!("theme:{}", theme.key()),
             Pick::Sort(by) => format!("sort:{by:?}"),
-            Pick::Folder(_) | Pick::File(_) | Pick::Typed(_) => return None,
+            Pick::Folder(_) | Pick::File(_) | Pick::Typed(_) | Pick::Profile(_) => return None,
         })
     }
 }

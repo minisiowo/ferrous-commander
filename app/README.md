@@ -22,7 +22,7 @@
 |---|---|
 | 🪟 **Tiled panels** | As many panels as you need, split either way, with tabs you can drag between them |
 | 🧭 **Navigation** | Expandable tree, breadcrumbs, history, type to filter |
-| ⭐ **Sidebar** | Favorites in groups, drives and pendrives with eject, cloud folders |
+| ⭐ **Sidebar** | Favorites in groups, drives and pendrives with eject, cloud folders, profiles that bring back a whole panel layout |
 | 👁️ **Preview and search** | Space opens a floating preview of PDFs, pictures, code, documents, spreadsheets, archives, audio, video and 3D models (STL, 3MF). Search, color tags for folders and files |
 | 📦 **Archives** | Unpack and create archives with nothing else to install |
 | 🗑️ **Safe by default** | Delete goes to the Trash, existing files are never overwritten, cancelled jobs leave nothing behind |

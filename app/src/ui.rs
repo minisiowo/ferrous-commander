@@ -327,6 +327,18 @@ pub(crate) fn tab_widths(strip: f32, wanted: &[f32]) -> Vec<f32> {
     natural.iter().map(|w| w.min(low.floor())).collect()
 }
 
+/// What a profile opens, one panel to a line: its folders, the active one first.
+pub(crate) fn profile_summary(profile: &crate::settings::Profile) -> String {
+    let panels = profile.panes.len().max(1);
+    let mut lines = vec![if panels == 1 { "1 panel".to_string() } else { format!("{panels} panels") }];
+    for pane in &profile.panes {
+        let mut tabs: Vec<String> = pane.tabs.iter().map(|t| t.display().to_string()).collect();
+        if pane.active < tabs.len() { let active = tabs.remove(pane.active); tabs.insert(0, active); }
+        lines.push(tabs.join(", "));
+    }
+    lines.join("\n")
+}
+
 fn tab_name(path: &Path) -> String {
     if is_computer(path) { "This PC".to_string() } else { fsx::display_name(path) }
 }
@@ -684,6 +696,7 @@ impl App {
             }
             // panels, Hyprland style
             Command::NewPanel => self.acts.push(Act::OpenPanel(i, None)),
+            Command::SaveProfile => self.dialog = Some(self.new_profile_dialog()),
             Command::ClosePanel => self.acts.push(Act::ClosePanel(i)),
             Command::ToggleSplit => self.acts.push(Act::ToggleSplit(i)),
             Command::FocusLeft => self.focus_dir(-1.0, 0.0),
@@ -819,6 +832,7 @@ impl App {
                             SidebarSection::Cloud => self.cloud_card(ui),
                             SidebarSection::Favorite(g) => self.fav_group(ui, g),
                             SidebarSection::History => self.history_card(ui),
+                            SidebarSection::Profiles => self.profiles_card(ui),
                         });
                     }
                     ui.vertical_centered(|ui| {
@@ -836,9 +850,22 @@ impl App {
                             });
                         }
                     });
+                    ui.vertical_centered(|ui| {
+                        let b = egui::Button::new(RichText::new("+  New profile").color(pal.text_weak)).frame(false);
+                        let tip = self.tip("Saves the open panels, their tabs and layout under a name", Command::SaveProfile);
+                        if ui.add(b).on_hover_text(tip).clicked() {
+                            self.dialog = Some(self.new_profile_dialog());
+                        }
+                    });
                     ui.add_space(8.0);
                 });
         });
+    }
+
+    /// Asks for a profile's name, suggesting the active panel's folder.
+    pub(crate) fn new_profile_dialog(&self) -> Dialog {
+        let name = fsx::display_name(self.panes[self.active].path());
+        Dialog::NewProfile { name, focus: true }
     }
 
     fn side_item(&mut self, ui: &mut Ui, path: &Path, label: &str) -> egui::Response {
@@ -1281,6 +1308,54 @@ impl App {
             }
         });
         self.sidebar_group_drop(ui, &r.response, SidebarSection::History);
+    }
+
+    fn profiles_card(&mut self, ui: &mut Ui) {
+        let pal = self.pal;
+        let profiles = self.st.profiles.clone();
+        let r = card(ui, &pal, |ui| {
+            ui.horizontal(|ui| {
+                Self::sidebar_heading(ui, &pal, "Profiles", SidebarSection::Profiles);
+            });
+            ui.spacing_mut().item_spacing.y = 1.0;
+            for (k, profile) in profiles.iter().enumerate() {
+                let h = self.row_h() + 1.0;
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
+                if self.open_profile == Some(k) {
+                    ui.painter().rect_filled(r, pal.corner(), pal.selection());
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(r, pal.corner(), pal.hover);
+                }
+                let ir = Rect::from_min_size(pos2(r.min.x + 4.0, r.center().y - 8.0), vec2(16.0, 16.0));
+                icons::face(ui.painter(), ir, "#dual", 14.0, pal.text_weak);
+                let font = FontId::proportional(self.st.font_size);
+                let t = fit_text(ui.painter(), &profile.name, &font, r.max.x - 4.0 - (ir.max.x + 6.0));
+                ui.painter().text(pos2(ir.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, t, font, pal.text);
+                if resp.clicked() {
+                    self.acts.push(Act::OpenProfile(k));
+                }
+                resp.on_hover_text(profile_summary(profile)).context_menu(|ui| {
+                    if ui.button("Open").clicked() {
+                        self.acts.push(Act::OpenProfile(k));
+                        ui.close();
+                    }
+                    if ui.button("Update to current layout").clicked() {
+                        self.acts.push(Act::UpdateProfile(k));
+                        ui.close();
+                    }
+                    if ui.button("Rename…").clicked() {
+                        self.dialog = Some(Dialog::RenameProfile { profile: k, name: profile.name.clone(), focus: true });
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Delete profile").clicked() {
+                        self.acts.push(Act::DeleteProfile(k));
+                        ui.close();
+                    }
+                });
+            }
+        });
+        self.sidebar_group_drop(ui, &r.response, SidebarSection::Profiles);
     }
 
     // ================================================================= browsers

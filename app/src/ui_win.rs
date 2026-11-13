@@ -44,6 +44,8 @@ impl App {
             Dialog::RenameFavorite { .. } => ("Rename shortcut", "Folder name", "Rename"),
             Dialog::RenameGroup { .. } => ("Rename group", "Group name", "Rename"),
             Dialog::NewGroup { .. } => ("New group", "New Group name", "Create"),
+            Dialog::NewProfile { .. } => ("Save layout as profile", "Profile name", "Save"),
+            Dialog::RenameProfile { .. } => ("Rename profile", "Profile name", "Rename"),
             Dialog::Password { .. } => ("Password needed", "Password", "Extract"),
             Dialog::Compress { .. } => ("Create archive", "Archive name", "Compress"),
         };
@@ -73,6 +75,8 @@ impl App {
                     | Dialog::NewFile { name, focus, .. }
                     | Dialog::RenameGroup { name, focus, .. }
                     | Dialog::NewGroup { name, focus }
+                    | Dialog::NewProfile { name, focus }
+                    | Dialog::RenameProfile { name, focus, .. }
                     | Dialog::Compress { name, focus, .. }
                     | Dialog::Password { name, focus, .. } => (name, focus),
                 };
@@ -99,6 +103,11 @@ impl App {
                         for option in crate::compress::Kind::ALL { ui.selectable_value(kind, option, option.suffix()); }
                     });
                     ui.label(RichText::new(format!("{} item(s), saved in this folder. Existing files are never replaced.", sources.len())).color(pal.text_weak).size(11.0));
+                }
+                if matches!(d, Dialog::NewProfile { .. }) {
+                    let panels = self.panes.len();
+                    let t = format!("Keeps {} with their tabs and layout. Open it again from the sidebar or Alt+P.", if panels == 1 { "1 panel".to_string() } else { format!("all {panels} panels") });
+                    ui.label(RichText::new(t).color(pal.text_weak).size(11.0));
                 }
                 if matches!(d, Dialog::RenameFavorite { .. }) {
                     ui.label(RichText::new("Changes the name in the sidebar only; the folder is not renamed. Leave empty to use the folder's name.").color(pal.text_weak).size(11.0));
@@ -178,6 +187,8 @@ impl App {
                             self.group_add_new(name.trim().to_string());
                         }
                     }
+                    Dialog::NewProfile { .. } => self.acts.push(Act::SaveProfile(name.clone())),
+                    Dialog::RenameProfile { profile, .. } => self.acts.push(Act::RenameProfile(*profile, name.clone())),
                     Dialog::Compress { pane, sources, kind, .. } => {
                         self.compress(*pane, sources.clone(), crate::compress::file_name(&name, *kind), *kind, ui.ctx());
                     }

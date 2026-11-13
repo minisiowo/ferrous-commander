@@ -178,7 +178,7 @@ shortcuts that open it can be changed like any other, under **View** in **Custom
 
 | Typed first | Lists |
 |---|---|
-| nothing | Folders visited lately, favorites, drives and the items of the current folder. From the second letter it also searches the folders below the current one, nearest first. A full path, or one that starts with `~`, is offered as it stands |
+| nothing | Profiles, folders visited lately, favorites, drives and the items of the current folder. From the second letter it also searches the folders below the current one, nearest first. A full path, or one that starts with `~`, is offered as it stands |
 | `>` | Commands with their shortcuts, and quick settings: themes, sorting, hidden files, sidebar, tree, text size, Neovim-style keys. Ctrl+Shift+P opens the palette here. What you used last comes first |
 | `@` | The last 200 folders visited, the latest first |
 
@@ -289,6 +289,17 @@ automatically lists local sync folders; its tooltip explains the source and Sett
 controls its visibility. Use **Settings → Restore groups…** to restore History, default
 folders or a deleted group with its saved shortcuts. Closing History hides it
 without discarding its entries.
+
+### Profiles
+
+A profile keeps the open panels under a name: each panel's tabs and active tab, how the
+panels are split and their sizes, and which panel is active. Save one with **+ New profile**
+at the foot of the sidebar or the **Save layout as profile…** command (`>` in the quick
+palette; it has no shortcut until you give it one). The **Profiles** card appears in the
+sidebar once there is a profile; click one to replace the panels with it, or find it by name
+with Alt+P. Right-click a profile to update it to the current panels, rename or delete it.
+A folder that is gone opens on its nearest parent. Profiles are saved in `settings.lua`
+under `profiles`.
 
 Windows filesystem audit, tested behavior and remaining limits:
 [WINDOWS_FILESYSTEM_AUDIT.md](../WINDOWS_FILESYSTEM_AUDIT.md).

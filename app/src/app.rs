@@ -10,7 +10,7 @@ use egui::Color32;
 use crate::fsx::{self, Entry, Sorting};
 use crate::ops::{self, Job, OpKind};
 use crate::preview::Preview;
-use crate::settings::{FavGroup, PaneSession, Settings};
+use crate::settings::{FavGroup, PaneSession, Profile, Settings};
 use crate::theme::{Palette, ThemeId, ThemeName, hex};
 use crate::user_theme::UserTheme;
 use crate::tiles::Tile;
@@ -251,6 +251,8 @@ pub enum Dialog {
         name: String,
         focus: bool,
     },
+    NewProfile { name: String, focus: bool },
+    RenameProfile { profile: usize, name: String, focus: bool },
     Compress {
         pane: usize,
         sources: Vec<PathBuf>,
@@ -352,6 +354,13 @@ pub enum Act {
     PlaceFavorites { group: usize, at: usize, paths: Vec<PathBuf> },
     DeleteGroup(usize),
     MoveGroup(usize, i32),
+    /// Keep the panels as they are now as a new profile with this name.
+    SaveProfile(String),
+    /// Put the panels as they are now in place of what the profile held.
+    UpdateProfile(usize),
+    RenameProfile(usize, String),
+    DeleteProfile(usize),
+    OpenProfile(usize),
     Refresh,
     Terminal(PathBuf),
     SetSort(usize, fsx::SortBy),
@@ -483,6 +492,8 @@ pub struct App {
     pub acts: Vec<Act>,
     /// The user has been told that settings cannot be saved.
     save_warned: bool,
+    /// The profile opened last in this run, marked in the sidebar.
+    pub open_profile: Option<usize>,
 }
 
 /// Checks visible folders on its own timer, so that an idle window does not redraw
@@ -512,6 +523,27 @@ fn spawn_folder_watcher(
             }
         }
     });
+}
+
+/// Panels from a saved session, `empty` of them when it has none. No disk access here:
+/// the folder loader moves a tab whose folder is gone to its nearest parent, and a
+/// sleeping share cannot delay the window.
+pub(crate) fn panes_from(sessions: &[PaneSession], empty: usize) -> Vec<Pane> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let n = if sessions.is_empty() { empty.max(1) } else { sessions.len() };
+    (0..n).map(|i| {
+        let sess = sessions.get(i).cloned().unwrap_or_default();
+        // A relative path saved by an older version means nothing in a later run.
+        let mut tabs: Vec<Tab> = sess.tabs.iter().filter(|p| p.is_absolute() || is_computer(p)).cloned().map(Tab::new).collect();
+        if tabs.is_empty() {
+            let start = if i == 0 { home.clone() } else { dirs::download_dir().unwrap_or_else(|| home.clone()) };
+            tabs.push(Tab::new(start));
+        }
+        let mut pane = Pane::default();
+        pane.active = sess.active.min(tabs.len() - 1);
+        pane.tabs = tabs;
+        pane
+    }).collect()
 }
 
 impl App {
@@ -570,34 +602,11 @@ impl App {
                 palette = Some(shown);
             }
         }
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-        let n = if st.panes.is_empty() {
-            if st.dual { 2 } else { 1 }
-        } else {
-            st.panes.len()
-        };
-        let mut panes: Vec<Pane> = (0..n).map(|_| Pane::default()).collect();
-        for (i, p) in panes.iter_mut().enumerate() {
-            let sess = st.panes.get(i).cloned().unwrap_or_default();
-            // No disk access here: the folder loader moves a tab whose folder is gone
-            // to its nearest parent, and a sleeping share cannot delay the window.
-            // A relative path saved by an older version means nothing in a later run.
-            let mut tabs: Vec<Tab> = sess.tabs.iter().filter(|p| p.is_absolute() || is_computer(p)).cloned().map(Tab::new).collect();
-            if tabs.is_empty() {
-                let start = if i == 0 {
-                    home.clone()
-                } else {
-                    dirs::download_dir().unwrap_or_else(|| home.clone())
-                };
-                tabs.push(Tab::new(start));
-            }
-            p.active = sess.active.min(tabs.len() - 1);
-            if i == 0
-                && let Some(d) = START_DIR.get() {
-                    tabs.push(Tab::new(d.clone()));
-                    p.active = tabs.len() - 1;
-                }
-            p.tabs = tabs;
+        let mut panes = panes_from(&st.panes, if st.dual { 2 } else { 1 });
+        let n = panes.len();
+        if let Some(d) = START_DIR.get() {
+            panes[0].tabs.push(Tab::new(d.clone()));
+            panes[0].active = panes[0].tabs.len() - 1;
         }
         let search = if !persist && std::env::var("FC_SHOT").unwrap_or_default().split(',').any(|look| look == "search") {
             Some(SearchUi::screenshot(panes[0].path().to_path_buf(), st.show_hidden))
@@ -723,6 +732,7 @@ impl App {
             }).into_iter().collect(),
             closing: false,
             save_warned: false,
+            open_profile: None,
             #[cfg(target_os = "linux")]
             properties: None,
             #[cfg(not(windows))]
@@ -845,6 +855,7 @@ impl App {
         match section {
             Cloud => self.st.show_cloud && !self.cloud.is_empty(),
             History => self.st.show_history,
+            Profiles => !self.st.profiles.is_empty(),
             Drives | Favorite(_) => true,
         }
     }
@@ -1097,14 +1108,7 @@ impl App {
         if !self.persist {
             return;
         }
-        self.st.panes = self
-            .panes
-            .iter()
-            .map(|p| PaneSession {
-                tabs: p.tabs.iter().map(|t| t.path.clone()).collect(),
-                active: p.active,
-            })
-            .collect();
+        self.st.panes = self.session();
         self.st.tiles = Some(self.tiles.clone());
         // Once per run of failures: this repeats on a timer, and one message says it all.
         match self.st.save_result() {
@@ -1117,6 +1121,37 @@ impl App {
         }
         self.dirty = false;
         self.last_save = Instant::now();
+    }
+
+    /// Every panel's tabs as they are now.
+    pub fn session(&self) -> Vec<PaneSession> {
+        self.panes
+            .iter()
+            .map(|p| PaneSession { tabs: p.tabs.iter().map(|t| t.path.clone()).collect(), active: p.active })
+            .collect()
+    }
+
+    /// The panels as they are now, under a name.
+    pub fn snapshot_profile(&self, name: String) -> Profile {
+        Profile { name, panes: self.session(), tiles: Some(self.tiles.clone()), active: self.active }
+    }
+
+    /// Replaces every panel with the ones a profile holds, laid out as it was saved.
+    pub fn apply_profile(&mut self, k: usize) {
+        let Some(profile) = self.st.profiles.get(k).cloned() else { return };
+        self.panes = panes_from(&profile.panes, 1);
+        let n = self.panes.len();
+        self.tiles = profile.tiles.unwrap_or(Tile::Leaf(0)).sanitize(n);
+        self.active = profile.active.min(n - 1);
+        self.prev_active = self.active;
+        // Both may point at panels that are gone, and the numbers mean other panels now.
+        self.dialog = None;
+        self.pane_rects.clear();
+        self.tab_rects.clear();
+        self.drop_zones.clear();
+        self.open_profile = Some(k);
+        self.mark_dirty();
+        self.toast(ToastKind::Info, format!("Opened profile “{}”", profile.name));
     }
 
     /// The breadcrumb's steps: the computer level, then every ancestor down to `p`.
@@ -2307,6 +2342,50 @@ impl App {
                 }
                 self.mark_dirty();
             }
+            Act::SaveProfile(name) => {
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                } else if self.st.profiles.iter().any(|p| p.name == name) {
+                    self.toast(ToastKind::Error, format!("A profile named “{name}” already exists"));
+                } else {
+                    let profile = self.snapshot_profile(name.clone());
+                    self.st.profiles.push(profile);
+                    self.open_profile = Some(self.st.profiles.len() - 1);
+                    self.toast(ToastKind::Info, format!("Saved profile “{name}”"));
+                    self.mark_dirty();
+                }
+            }
+            Act::UpdateProfile(k) => {
+                if let Some(name) = self.st.profiles.get(k).map(|p| p.name.clone()) {
+                    self.st.profiles[k] = self.snapshot_profile(name.clone());
+                    self.open_profile = Some(k);
+                    self.toast(ToastKind::Info, format!("Profile “{name}” now holds these panels"));
+                    self.mark_dirty();
+                }
+            }
+            Act::RenameProfile(k, name) => {
+                let name = name.trim().to_string();
+                if name.is_empty() || k >= self.st.profiles.len() {
+                } else if self.st.profiles.iter().enumerate().any(|(i, p)| i != k && p.name == name) {
+                    self.toast(ToastKind::Error, format!("A profile named “{name}” already exists"));
+                } else {
+                    self.st.profiles[k].name = name;
+                    self.mark_dirty();
+                }
+            }
+            Act::DeleteProfile(k) => {
+                if k < self.st.profiles.len() {
+                    let removed = self.st.profiles.remove(k);
+                    self.open_profile = match self.open_profile {
+                        Some(o) if o == k => None,
+                        Some(o) if o > k => Some(o - 1),
+                        o => o,
+                    };
+                    self.toast(ToastKind::Info, format!("Deleted profile “{}”", removed.name));
+                    self.mark_dirty();
+                }
+            }
+            Act::OpenProfile(k) => self.apply_profile(k),
             Act::MoveGroup(g, d) => {
                 self.st.normalize_sidebar();
                 let section = crate::settings::SidebarSection::Favorite(g);

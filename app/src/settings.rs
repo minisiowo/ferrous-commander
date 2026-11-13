@@ -14,6 +14,7 @@ pub enum SidebarSection {
     Cloud,
     Favorite(usize),
     History,
+    Profiles,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,6 +61,29 @@ impl FavGroup {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct PaneSession {
     pub tabs: Vec<PathBuf>,
+    pub active: usize,
+}
+
+impl PaneSession {
+    /// Text settings cannot hold a path that is not valid Unicode. A tab keeps its
+    /// place, on the nearest folder that can be stored.
+    fn make_storable(&mut self) {
+        for tab in &mut self.tabs {
+            if tab.to_str().is_none() {
+                *tab = tab.ancestors().find(|a| a.to_str().is_some()).unwrap_or(Path::new("")).to_path_buf();
+            }
+        }
+    }
+}
+
+/// A named panel layout: every panel with its tabs, how they are split, and which is active.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Profile {
+    pub name: String,
+    pub panes: Vec<PaneSession>,
+    #[serde(default)]
+    pub tiles: Option<crate::tiles::Tile>,
+    #[serde(default)]
     pub active: usize,
 }
 
@@ -126,6 +150,8 @@ pub struct Settings {
     pub panes: Vec<PaneSession>,
     /// Panel arrangement (tiling tree over `panes`).
     pub tiles: Option<crate::tiles::Tile>,
+    /// Saved panel layouts, opened from the sidebar or the quick palette.
+    pub profiles: Vec<Profile>,
     pub tags: HashMap<String, u8>,
     pub font_size: f32,
     /// Keys work as in Neovim, on top of the standard shortcuts.
@@ -174,6 +200,7 @@ impl Default for Settings {
             removed_groups: Vec::new(),
             panes: Vec::new(),
             tiles: None,
+            profiles: Vec::new(),
             tags: HashMap::new(),
             font_size: crate::defaults::ITEM_FONT_SIZE,
             vim_keys: false,
@@ -222,6 +249,7 @@ impl Settings {
         let mut sections = vec![SidebarSection::Drives, SidebarSection::Cloud];
         sections.extend((0..self.favorites.len()).map(SidebarSection::Favorite));
         sections.push(SidebarSection::History);
+        sections.push(SidebarSection::Profiles);
         let mut seen = Vec::new();
         self.sidebar_order.retain(|s| {
             if sections.contains(s) && !seen.contains(s) { seen.push(*s); true } else { false }
@@ -337,12 +365,8 @@ impl Settings {
         s.history.retain(text);
         s.recent_folders.retain(text);
         for group in s.favorites.iter_mut().chain(&mut s.removed_groups) { group.paths.retain(text); }
-        for pane in &mut s.panes {
-            for tab in &mut pane.tabs {
-                if tab.to_str().is_none() {
-                    *tab = tab.ancestors().find(|a| a.to_str().is_some()).unwrap_or(Path::new("")).to_path_buf();
-                }
-            }
+        for pane in s.panes.iter_mut().chain(s.profiles.iter_mut().flat_map(|p| p.panes.iter_mut())) {
+            pane.make_storable();
         }
         s
     }
@@ -428,6 +452,7 @@ mod tests {
         s.panes = vec![PaneSession { tabs: vec![PathBuf::from(r"\\server\share")], active: 0 }];
         s.tiles = Some(crate::tiles::Tile::Split { vertical: false, ratio: 0.5,
             a: Box::new(crate::tiles::Tile::Leaf(0)), b: Box::new(crate::tiles::Tile::Leaf(1)) });
+        s.profiles = vec![Profile { name: "Praca \"1\"".into(), panes: s.panes.clone(), tiles: s.tiles.clone(), active: 0 }];
         s.tags.insert("true".into(), 2);
         s.folder_sorting.insert(r"C:\Work".into(), Sorting::default());
         let expected = serde_json::to_value(&s).unwrap();
@@ -453,6 +478,15 @@ mod tests {
         for bad in ["return {", "return { dual = 'yes' }", "return {}; os.execute('x')", "while true do end", "return { font_size = 1 + 2 }"] {
             assert!(Settings::from_lua(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn settings_from_before_profiles_load_without_any() {
+        let s = Settings::from_lua("return { font_size = 14, sidebar_order = { 'Drives', 'History' } }").unwrap();
+        assert!(s.profiles.is_empty());
+        let s = Settings::from_lua("return { profiles = { { name = 'a', panes = { { tabs = { '/tmp' }, active = 0 } } } } }").unwrap();
+        assert_eq!(s.profiles[0].panes[0].tabs, [PathBuf::from("/tmp")]);
+        assert!(s.profiles[0].tiles.is_none());
     }
 
     #[test]

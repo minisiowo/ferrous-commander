@@ -279,6 +279,10 @@ impl App {
         let i = self.active;
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut items = Vec::new();
+        for (k, profile) in self.st.profiles.iter().enumerate() {
+            let detail = crate::ui::profile_summary(profile).replace('\n', " · ");
+            items.push(Item::new(profile.name.clone(), detail, "profile", Pick::Profile(k)).boost(90));
+        }
         let mut add = |item: Item, path: &Path| {
             if seen.insert(path.to_path_buf()) { items.push(item); }
         };
@@ -594,6 +598,7 @@ impl App {
                 icons::entry(&p, icon, fsx::Kind::from_ext(ext), ext, pal.dark, false);
             }
             Pick::Theme(_) => icons::face(&p, icon, "◑", 13.0, pal.text_weak),
+            Pick::Profile(_) => icons::face(&p, icon, "#dual", 14.0, pal.text_weak),
             Pick::Command(_) | Pick::Setting(_) | Pick::Sort(_) => icons::glyph(&p, icon, "next", pal.text_weak),
         }
         let small = FontId::proportional(11.0);
@@ -687,6 +692,7 @@ impl App {
                 }
             }
             Pick::Typed(text) => self.go_to_typed(i, &text, ctrl, shift),
+            Pick::Profile(k) => self.acts.push(Act::OpenProfile(k)),
             Pick::Command(command) => {
                 let page = ((self.panes[i].list_h / self.row_h()).floor() as usize).max(1);
                 self.run_command(i, command, false, None, false, page);

@@ -1999,15 +1999,15 @@ fn moving_a_group_skips_sections_that_are_hidden() {
     app.st.favorites = vec![FavGroup::new("One", vec![root.clone()])];
     app.st.show_cloud = false;
     app.st.show_history = false;
-    app.st.sidebar_order = vec![Drives, Cloud, Favorite(0), History];
+    app.st.sidebar_order = vec![Drives, Cloud, Favorite(0), History, Profiles];
     app.acts.push(crate::app::Act::MoveGroup(0, -1));
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
-    assert_eq!(app.st.sidebar_order, [Favorite(0), Cloud, Drives, History]);
+    assert_eq!(app.st.sidebar_order, [Favorite(0), Cloud, Drives, History, Profiles]);
     app.acts.push(crate::app::Act::MoveGroup(0, -1));
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
-    assert_eq!(app.st.sidebar_order, [Favorite(0), Cloud, Drives, History], "already first on screen");
+    assert_eq!(app.st.sidebar_order, [Favorite(0), Cloud, Drives, History, Profiles], "already first on screen");
     std::fs::remove_dir_all(root).unwrap();
 }
 
