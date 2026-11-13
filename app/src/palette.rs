@@ -75,7 +75,7 @@ pub fn split(text: &str) -> (Mode, &str) {
 /// A setting the palette changes itself, because no shortcut command does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Setting {
-    Extensions, AgeColors, Mebibytes, FoldersOnTop, Sidebar, PreviewPane, Tree, ColumnsLayout,
+    Extensions, AgeColors, Mebibytes, FoldersOnTop, Sidebar, PreviewPane, Tree,
     NeovimKeys, WhichKey, HistoryCard, Rounded, Outlines, FontLarger, FontSmaller,
     OpenSettings, OpenShortcuts, ConfigFolder,
     NewTheme, EditTheme, ImportTheme, ThemesFolder,

@@ -8,7 +8,6 @@ use crate::app::{Act, App, Dialog, DragPaths, DropTarget, Notice, ToastKind, is_
 use crate::chrome::{self, Icon, Panel};
 use crate::fsx;
 use crate::keymap::Command;
-use crate::settings::Layout;
 use crate::theme::hex;
 
 fn settings_section(ui: &mut egui::Ui, title: &str, accent: egui::Color32) {
@@ -23,7 +22,7 @@ const TRASH_NAME: &str = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
 
 /// Labels in the first column of the "Appearance & layout" grid; keep in step with it.
 const SETTINGS_GRID_LABELS: &[&str] = &[
-    "Theme", "Accent color", "Window layout", "Panels", "Font size", "Corners", "Outlines", "Window",
+    "Theme", "Accent color", "Panels", "Font size", "Corners", "Outlines", "Window",
 ];
 
 impl App {
@@ -422,12 +421,6 @@ impl App {
                     }
                 });
                 ui.end_row();
-                ui.label("Window layout");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.st.layout, Layout::Standard, "Standard");
-                    ui.selectable_value(&mut self.st.layout, Layout::Columns, "Columns");
-                });
-                ui.end_row();
                 ui.label("Panels");
                 ui.horizontal(|ui| {
                     ui.label(format!("{} open", self.panes.len()));
@@ -467,8 +460,6 @@ impl App {
             ui.checkbox(&mut self.st.mebibytes, "Use old definition of Megabyte (MiB, as in Windows Explorer)");
             ui.checkbox(&mut self.st.sorting.folders_on_top, "Keep folders above files");
             settings_section(ui, "Workspace", accent);
-            let label = self.tip("Show folder columns", Command::ToggleColumns);
-            ui.checkbox(&mut self.st.show_columns, label);
             ui.checkbox(&mut self.st.show_preview, "Show preview / file details pane");
             ui.checkbox(&mut self.st.show_sidebar, "Show sidebar");
             settings_section(ui, "Keyboard", accent);

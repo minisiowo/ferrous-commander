@@ -155,7 +155,7 @@ Space then stops opening the preview in this layer, and leader `u` `p` does that
 | `f` then `x` | Move to the trash |
 | `w` then `h` `j` `k` `l` / `w` | Panel in that direction, next panel |
 | `w` then `n` / `d` / `s` | New panel, close panel, flip split |
-| `u` then `h` / `c` / `p` | Hidden files, folder columns, preview |
+| `u` then `h` / `p` | Hidden files, preview |
 
 Changes are stored in `settings.lua` under `keymap`, only where they differ from the defaults. Each command
 takes one text, with shortcuts separated by commas, and an empty text removes its shortcuts:
@@ -179,7 +179,7 @@ shortcuts that open it can be changed like any other, under **View** in **Custom
 | Typed first | Lists |
 |---|---|
 | nothing | Folders visited lately, favorites, drives and the items of the current folder. From the second letter it also searches the folders below the current one, nearest first. A full path, or one that starts with `~`, is offered as it stands |
-| `>` | Commands with their shortcuts, and quick settings: themes, sorting, hidden files, sidebar, tree, columns, text size, Neovim-style keys. Ctrl+Shift+P opens the palette here. What you used last comes first |
+| `>` | Commands with their shortcuts, and quick settings: themes, sorting, hidden files, sidebar, tree, text size, Neovim-style keys. Ctrl+Shift+P opens the palette here. What you used last comes first |
 | `@` | The last 200 folders visited, the latest first |
 
 Letters need not be next to each other: `fcom` finds `ferrous-commander`, and `newtab` finds **New tab**.
@@ -261,7 +261,7 @@ Flatpak and Snap launchers, without changing file associations. Discovery honour
 application directories, desktop visibility, and user overrides. Launching uses `gio`
 (from GLib, typically `libglib2.0-bin` on Debian/Ubuntu) to handle launcher arguments,
 terminal applications and D-Bus activation correctly. Missing launchers report an error.
-On Linux, going up from `/` opens the device overview; the column strip includes it too.
+On Linux, going up from `/` opens the device overview; the breadcrumb includes it too.
 F10 supports Ghostty and Foot as well as the common GNOME, KDE and X11 terminals.
 Copying on Linux preserves symbolic links (including broken links) and directory permissions.
 
@@ -368,7 +368,7 @@ preference is saved; navigating to another folder clears that panel’s branches
 
 Right-click a folder in the file list or a shortcut in Favorites, Cloud or History
 and choose **Folder color**. The same saved path color appears in every panel,
-the sidebar, folder columns, tabs and preview. Choose **Clear color** to restore
+the sidebar, tabs and preview. Choose **Clear color** to restore
 the default folder icon. File-list color changes apply to the selected items;
 sidebar changes apply to that shortcut's folder, independently of file selection.
 Colors are saved in the existing `tags` table in settings.lua.

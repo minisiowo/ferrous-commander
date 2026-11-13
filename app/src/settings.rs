@@ -8,15 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::fsx::Sorting;
 use crate::theme::ThemeId;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
-pub enum Layout {
-    /// Column strip on top, file list below, details at the bottom.
-    #[default]
-    Standard,
-    /// Folder columns side by side, the current folder as the last column, preview at the right.
-    Columns,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SidebarSection {
     Drives,
@@ -111,14 +102,12 @@ pub(crate) struct ListingOptions {
 pub struct Settings {
     pub theme: ThemeId,
     pub accent: String,
-    pub layout: Layout,
     pub dual: bool,
     pub show_hidden: bool,
     pub show_extensions: bool,
     pub age_colors: bool,
     pub mebibytes: bool,
     pub tree_files: bool,
-    pub show_columns: bool,
     pub show_preview: bool,
     pub show_sidebar: bool,
     pub sorting: Sorting,
@@ -164,16 +153,13 @@ impl Default for Settings {
         Settings {
             theme: ThemeId::default(),
             accent: crate::defaults::ACCENT_RGB.into(),
-            layout: Layout::Standard,
             tree_files: false,
             dual: true,
             show_hidden: crate::defaults::SHOW_HIDDEN_FILES,
             show_extensions: crate::defaults::SHOW_FILE_EXTENSION,
             age_colors: crate::defaults::USE_FILE_AGE_COLOR,
             mebibytes: crate::defaults::USE_MEBIBYTES,
-            // Column strip and preview are collapsed in the person's window; ` and the
-            // settings bring them back.
-            show_columns: false,
+            // The preview is collapsed in the person's window; the settings bring it back.
             show_preview: false,
             show_sidebar: true,
             sorting: Sorting::default(),
@@ -467,6 +453,12 @@ mod tests {
         for bad in ["return {", "return { dual = 'yes' }", "return {}; os.execute('x')", "while true do end", "return { font_size = 1 + 2 }"] {
             assert!(Settings::from_lua(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn settings_from_versions_with_folder_columns_still_load() {
+        let s = Settings::from_lua("return { layout = 'Columns', show_columns = true, font_size = 14 }").unwrap();
+        assert_eq!(s.font_size, 14.0);
     }
 
     #[test]

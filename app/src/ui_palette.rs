@@ -14,7 +14,6 @@ use crate::icons;
 use crate::keymap::{COMMANDS, Chord, Command, Group, Layer, Matcher, Outcome, Target};
 use crate::ops;
 use crate::palette::{self, Item, Mode, Pick, Setting};
-use crate::settings::Layout;
 use crate::theme::blend;
 use crate::ui::fit_text;
 
@@ -315,7 +314,6 @@ impl App {
         for info in COMMANDS.iter().filter(|info| offered(info.command)) {
             let state = match info.command {
                 Command::ToggleHidden => Some(st.show_hidden),
-                Command::ToggleColumns => Some(st.show_columns),
                 _ => None,
             };
             let keys = self.key_hint(info.command).unwrap_or_default();
@@ -336,7 +334,6 @@ impl App {
             (Setting::Sidebar, "Sidebar", Some(st.show_sidebar)),
             (Setting::PreviewPane, "Preview and details pane", Some(st.show_preview)),
             (Setting::Tree, "Tree of files", Some(st.tree_files)),
-            (Setting::ColumnsLayout, "Columns layout", Some(st.layout == Layout::Columns)),
             (Setting::Extensions, "File extensions", Some(st.show_extensions)),
             (Setting::AgeColors, "Colours by file age", Some(st.age_colors)),
             (Setting::FoldersOnTop, "Folders above files", Some(st.sorting.folders_on_top)),
@@ -651,7 +648,7 @@ impl App {
         let keeps = |pick: &Pick| match pick {
             Pick::Theme(_) | Pick::Sort(_) => true,
             Pick::Setting(setting) => !matches!(setting, Setting::OpenSettings | Setting::OpenShortcuts | Setting::ConfigFolder),
-            Pick::Command(command) => matches!(command, Command::ToggleHidden | Command::ToggleColumns),
+            Pick::Command(command) => command == &Command::ToggleHidden,
             _ => false,
         };
         let hint = match palette.rows.get(palette.selected).map(|row| &row.item.pick) {
@@ -693,7 +690,7 @@ impl App {
             Pick::Command(command) => {
                 let page = ((self.panes[i].list_h / self.row_h()).floor() as usize).max(1);
                 self.run_command(i, command, false, None, false, page);
-                stays = ctrl && matches!(command, Command::ToggleHidden | Command::ToggleColumns);
+                stays = ctrl && command == Command::ToggleHidden;
             }
             Pick::Sort(by) => {
                 self.acts.push(Act::SetSort(i, by));
@@ -715,7 +712,6 @@ impl App {
                     Setting::Sidebar => st.show_sidebar = !st.show_sidebar,
                     Setting::PreviewPane => st.show_preview = !st.show_preview,
                     Setting::Tree => st.tree_files = !st.tree_files,
-                    Setting::ColumnsLayout => st.layout = if st.layout == Layout::Columns { Layout::Standard } else { Layout::Columns },
                     Setting::NeovimKeys => st.vim_keys = !st.vim_keys,
                     Setting::WhichKey => st.which_key = !st.which_key,
                     Setting::HistoryCard => st.show_history = !st.show_history,

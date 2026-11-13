@@ -14,7 +14,7 @@ use crate::preview::{Key as PreviewKey, PreviewContent, sound};
 use crate::fsx::{self, Entry, SortBy};
 use crate::icons;
 use crate::theme::{TAGS, blend, hex};
-use crate::ui::{chip, dismiss_chip, sort_chip, fit_text, icon_button, menu_entry, take_bottom, take_left, take_top};
+use crate::ui::{chip, dismiss_chip, sort_chip, fit_text, icon_button, menu_entry, take_left};
 
 thread_local! {
     static OPEN_WITH: std::cell::RefCell<std::collections::HashMap<String, AppMenu>> = Default::default();
@@ -463,7 +463,7 @@ impl App {
         let p = ui.painter_at(title_r);
         paint_path_icon(&p, title_r, pal.text_weak);
         let mut x = title_r.min.x + CRUMBS_LEFT;
-        let crumbs = self.column_chain(path);
+        let crumbs = self.path_chain(path);
         let cfont = FontId::proportional(12.0);
         let labels: Vec<String> = crumbs
             .iter()
@@ -1457,77 +1457,6 @@ impl App {
                     pal.text,
                 );
             }
-        }
-    }
-
-    pub fn preview_pane(&mut self, ui: &mut Ui, i: usize, r: Rect) {
-        let pal = self.pal;
-        ui.painter().line_segment(
-            [pos2(r.min.x, r.min.y + 8.0), pos2(r.min.x, r.max.y - 8.0)],
-            Stroke::new(1.0, pal.raised),
-        );
-        let e = self.focused_item(i);
-        if self.active == i {
-            self.want_preview(e.as_ref().map(PreviewKey::of), ui.ctx());
-        }
-        let mut rr = r.shrink(10.0);
-        let (n, sel, total) = self.counts(i);
-        let top = take_top(&mut rr, 40.0);
-        let p = ui.painter_at(top);
-        p.text(
-            top.left_top(),
-            Align2::LEFT_TOP,
-            format!("{n} items"),
-            FontId::proportional(14.0),
-            pal.text,
-        );
-        if sel > 0 {
-            p.text(
-                top.left_top() + vec2(0.0, 18.0),
-                Align2::LEFT_TOP,
-                format!("{sel} selected"),
-                FontId::proportional(12.0),
-                pal.text_important,
-            );
-        }
-        p.text(
-            top.right_top(),
-            Align2::RIGHT_TOP,
-            fsx::fmt_size(total, self.st.mebibytes),
-            FontId::proportional(12.0),
-            pal.text_weak,
-        );
-        let rows = e.as_ref().map(|e| self.details_rows(e)).unwrap_or_default();
-        let det_h = rows.len() as f32 * 15.0 + 8.0;
-        let dh = det_h.min(rr.height() * 0.5);
-        let det = take_bottom(&mut rr, dh);
-        if self.active == i && let Some(e) = &e {
-            self.sound_preview(e, ui.ctx());
-            if sound::playable(e.kind, e.ext()) {
-                let strip = take_bottom(&mut rr, sound::TRANSPORT_H);
-                self.sound_strip(ui, strip, e);
-                take_bottom(&mut rr, 8.0);
-            }
-        }
-        self.preview_box(ui, rr, e.as_ref());
-        let p = ui.painter_at(det);
-        let f = FontId::proportional(11.0);
-        for (k, (key, val)) in rows.iter().enumerate() {
-            let y = det.min.y + 4.0 + k as f32 * 15.0;
-            p.text(
-                pos2(det.min.x, y),
-                Align2::LEFT_TOP,
-                *key,
-                f.clone(),
-                pal.text_weak,
-            );
-            p.text(
-                pos2(det.min.x + 72.0, y),
-                Align2::LEFT_TOP,
-                fit_text(&p, val, &f, det.width() - 74.0),
-                f.clone(),
-                pal.text,
-            );
         }
     }
 

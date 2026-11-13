@@ -1,4 +1,4 @@
-//! Window frame: keyboard, sidebar, browser panes, tabs and folder columns.
+//! Window frame: keyboard, sidebar, browser panes and tabs.
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +11,7 @@ use crate::keymap::{self, Chord, Command, Input, Mode, Outcome, Target};
 use crate::app::{Act, App, CrumbDrag, Dialog, DragPaths, DropTarget, FavDrag, ToastKind, is_computer};
 use crate::fsx;
 use crate::icons;
-use crate::settings::{Layout, SidebarSection};
+use crate::settings::SidebarSection;
 use crate::theme::{Palette, blend, hex};
 
 // ---- sizes ----
@@ -31,11 +31,6 @@ pub(crate) fn sidebar_min() -> f32 {
 }
 pub const TOOLBAR_H: f32 = 36.0;
 pub const DETAILS_H: f32 = crate::defaults::DETAILS_HEIGHT;
-pub const PREVIEW_W: f32 = crate::defaults::PREVIEW_WIDTH;
-pub const COL_W: f32 = crate::defaults::COLUMN_WIDTH;
-pub const COL_SMALL_W: f32 = crate::defaults::COLUMN_SMALL_WIDTH;
-pub const COLS_H: f32 = crate::defaults::COLUMNS_HEIGHT;
-pub const CURRENT_COL_W: f32 = crate::defaults::CURRENT_COLUMN_WIDTH;
 pub const ITEM_PAD: f32 = crate::defaults::LIST_ITEM_PADDING;
 pub const TAB_H: f32 = 30.0;
 #[derive(Clone)]
@@ -569,7 +564,6 @@ impl App {
         let by = count.unwrap_or(1);
         let half = (page / 2).max(1).saturating_mul(by);
         let row = |count: usize| count.saturating_sub(1);
-        let columns = self.st.layout == Layout::Columns;
         let tree = self.st.tree_files;
         match command {
             Command::CursorDown => mv(self, cur.map_or(0, |c| c.saturating_add(by))),
@@ -585,8 +579,6 @@ impl App {
             Command::Forward => self.acts.push(Act::Forward(i)),
             Command::Right if tree => self.tree_right(i, page),
             Command::Left if tree => self.tree_left(i),
-            Command::Left if columns => self.acts.push(Act::Up(i)),
-            Command::Right if columns => self.enter_column(i),
             Command::Left | Command::Right => {}
             Command::FolderOut if visual => {}
             Command::FolderOut if tree => self.tree_left(i),
@@ -596,8 +588,6 @@ impl App {
                 let Some((dir, path)) = self.cursor_entry(i).map(|e| (e.is_dir, e.path.clone())) else { return };
                 if dir && tree {
                     self.tree_right(i, page);
-                } else if dir && columns {
-                    self.acts.push(Act::Navigate(i, path));
                 } else if dir || !repeat {
                     // Holding the key walks into folders but never opens file after file.
                     self.acts.push(Act::Open(i, path));
@@ -724,11 +714,6 @@ impl App {
                 self.panes[i].path_edit = Some(self.panes[i].path().display().to_string());
                 self.panes[i].path_select_all = true;
             }
-            // ` toggles columns navigation (resource ColumnsToggle_S)
-            Command::ToggleColumns => {
-                self.st.show_columns = !self.st.show_columns;
-                self.mark_dirty();
-            }
             // Space previews (setting PreviewShortcut)
             Command::TogglePreview => {
                 if self.preview_may_toggle() {
@@ -763,13 +748,6 @@ impl App {
         }
     }
 
-    fn enter_column(&mut self, i: usize) {
-        if let Some(e) = self.cursor_entry(i)
-            && e.is_dir {
-                self.acts.push(Act::Navigate(i, e.path.clone()));
-            }
-    }
-
     pub fn row_h(&self) -> f32 {
         (self.st.font_size + 2.0 * ITEM_PAD + 7.0).round()
     }
@@ -797,23 +775,6 @@ impl App {
                         .align(egui::RectAlign::TOP_START)
                         .gap(4.0)
                         .show(|ui| self.theme_menu(ui));
-                    let cols = self.st.layout == Layout::Columns;
-                    if icon_button(
-                        ui,
-                        "#layout",
-                        "Switch between Standard and Columns layouts",
-                        cols,
-                        &pal,
-                    )
-                    .clicked()
-                    {
-                        self.st.layout = if cols {
-                            Layout::Standard
-                        } else {
-                            Layout::Columns
-                        };
-                        self.mark_dirty();
-                    }
                     if icon_button(ui, "#tree", "Tree files: click arrows to expand, double-click folders to open", self.st.tree_files, &pal).clicked() {
                         self.st.tree_files = !self.st.tree_files;
                         for pane in &mut self.panes { pane.view_key = None; pane.view.clear(); }
@@ -1539,40 +1500,14 @@ impl App {
         let path = self.panes[i].path().to_path_buf();
         self.drop_zones.push((r, DropTarget::Folder(path)));
 
-        match self.st.layout {
-            Layout::Standard => {
-                if self.st.show_columns && r.height() > 260.0 {
-                    let h = COLS_H.min(r.height() * 0.38);
-                    let strip = take_top(&mut r, h);
-                    self.columns_strip(ui, i, strip, false);
-                }
-                let header = take_top(&mut r, HEADER_H);
-                self.header(ui, i, header);
-                if self.st.show_preview && r.height() > DETAILS_H + 120.0 {
-                    let det = take_bottom(&mut r, DETAILS_H);
-                    self.details_panel(ui, i, det);
-                }
-                if r.height() >= 24.0 {
-                    self.file_list(ui, i, r.shrink2(vec2(4.0, 0.0)));
-                }
-            }
-            Layout::Columns => {
-                let header = take_top(&mut r, HEADER_H);
-                self.header(ui, i, header);
-                if self.st.show_preview && r.width() > PREVIEW_W + 360.0 {
-                    let pv = take_right(&mut r, PREVIEW_W);
-                    self.preview_pane(ui, i, pv);
-                }
-                let main_w = CURRENT_COL_W.min(r.width());
-                let cols_w = r.width() - main_w;
-                if self.st.show_columns && cols_w > COL_SMALL_W {
-                    let strip = take_left(&mut r, cols_w);
-                    self.columns_strip(ui, i, strip, true);
-                }
-                if r.height() >= 24.0 {
-                    self.file_list(ui, i, r.shrink2(vec2(4.0, 0.0)));
-                }
-            }
+        let header = take_top(&mut r, HEADER_H);
+        self.header(ui, i, header);
+        if self.st.show_preview && r.height() > DETAILS_H + 120.0 {
+            let det = take_bottom(&mut r, DETAILS_H);
+            self.details_panel(ui, i, det);
+        }
+        if r.height() >= 24.0 {
+            self.file_list(ui, i, r.shrink2(vec2(4.0, 0.0)));
         }
         ui.set_clip_rect(outer_clip);
         self.status_bar(ui, i, status);
@@ -1733,233 +1668,5 @@ impl App {
         if presp.on_hover_text(self.tip("Create new tab", Command::NewTab)).clicked() {
             self.acts.push(Act::NewTab(i));
         }
-    }
-
-    /// Miller columns: one column per ancestor folder listing its sub-folders.
-    fn columns_strip(&mut self, ui: &mut Ui, i: usize, r: Rect, with_files: bool) {
-        let pal = self.pal;
-        let path = self.panes[i].path().to_path_buf();
-        let mut chain = self.column_chain(&path);
-        if with_files {
-            // in Columns layout the current folder is the main list, not a column
-            chain.pop();
-        }
-        if chain.is_empty() {
-            return;
-        }
-        // 200 each; shrink the left-most to 128; drop the left-most when still too wide
-        let n = chain.len();
-        let mut widths = vec![COL_W; n];
-        let mut k = 0;
-        while widths.iter().sum::<f32>() > r.width() && k < n.saturating_sub(1) {
-            widths[k] = COL_SMALL_W;
-            k += 1;
-        }
-        let mut first = 0;
-        while widths[first..].iter().sum::<f32>() > r.width() && first < n - 1 {
-            first += 1;
-        }
-        let mut x = r.min.x;
-        for c in first..n {
-            let w = widths[c].min(r.max.x - x);
-            if w < 40.0 {
-                break;
-            }
-            let cr = Rect::from_min_size(pos2(x, r.min.y), vec2(w, r.height()));
-            x += w;
-            let next = chain
-                .get(c + 1)
-                .cloned()
-                .or_else(|| if with_files { Some(path.clone()) } else { None });
-            let col = chain[c].clone();
-            self.column(ui, i, cr, &col, next.as_deref(), with_files);
-        }
-        let s = Stroke::new(1.0, pal.raised);
-        ui.painter().line_segment(
-            [pos2(r.min.x, r.max.y - 0.5), pos2(r.max.x, r.max.y - 0.5)],
-            s,
-        );
-    }
-
-    fn column(
-        &mut self,
-        ui: &mut Ui,
-        i: usize,
-        r: Rect,
-        dir: &Path,
-        highlight: Option<&Path>,
-        with_files: bool,
-    ) {
-        let pal = self.pal;
-        let p = ui.painter_at(r);
-        let inner = r.shrink2(vec2(3.0, 0.0));
-        p.line_segment(
-            [
-                pos2(r.max.x - 0.5, r.min.y + 6.0),
-                pos2(r.max.x - 0.5, r.max.y - 6.0),
-            ],
-            Stroke::new(1.0, pal.raised),
-        );
-        let title = if is_computer(dir) {
-            "This PC".to_string()
-        } else {
-            fsx::display_name(dir)
-        };
-        let tr = Rect::from_min_size(inner.min + vec2(4.0, 4.0), vec2(inner.width() - 8.0, 22.0));
-        // Hash the literal path: Path's component hash can collide for the
-        // empty "This PC" sentinel and a filesystem root such as `/`.
-        let tresp = ui.interact(
-            tr,
-            ui.scope_id().with(("coltitle", i, dir.as_os_str())),
-            Sense::click(),
-        );
-        let tf = FontId::proportional(14.0);
-        let tc = if tresp.hovered() {
-            pal.text_important
-        } else {
-            pal.text
-        };
-        p.text(
-            tr.left_center(),
-            Align2::LEFT_CENTER,
-            fit_text(&p, &title, &tf, tr.width()),
-            tf,
-            tc,
-        );
-        if tresp.clicked() {
-            self.acts.push(Act::Navigate(i, dir.to_path_buf()));
-        }
-        let list_r = Rect::from_min_max(pos2(inner.min.x, tr.max.y + 4.0), inner.max);
-        if is_computer(dir) {
-            let drives = self.drives.clone();
-            ui.scope_builder(UiBuilder::new().max_rect(list_r), |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt(("colpc", i))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        for d in &drives {
-                            let on = highlight.is_some_and(|h| h == d.path);
-                            let resp = self.drive_row(ui, d, false);
-                            self.eject_controls(ui, &resp, d);
-                            if on {
-                                ui.painter().rect_filled(
-                                    resp.rect,
-                                    pal.corner(),
-                                    pal.accent.gamma_multiply(0.2),
-                                );
-                            }
-                        }
-                    });
-            });
-            return;
-        }
-        let Some(l) = self.cache.get(dir) else { return };
-        let show_hidden = self.st.show_hidden;
-        // Positions only: this runs every frame, and only the visible rows need their text.
-        let items: Vec<usize> = l
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| (e.is_dir || with_files) && (show_hidden || !e.hidden))
-            .map(|(k, _)| k)
-            .collect();
-        let err = l.error.clone();
-        let rh = self.row_h();
-        let hl_idx = highlight.and_then(|h| items.iter().position(|&k| l.entries[k].path == h));
-        let key = (i, dir.to_path_buf());
-        let need_scroll =
-            highlight.is_some_and(|h| self.col_hl.get(&key).map(|p| p.as_path()) != Some(h));
-        if let Some(h) = highlight {
-            self.col_hl.insert(key, h.to_path_buf());
-        }
-        let font = FontId::proportional(self.st.font_size);
-        ui.scope_builder(UiBuilder::new().max_rect(list_r), |ui| {
-            let mut sa = egui::ScrollArea::vertical()
-                .id_salt(("col", i, dir.as_os_str()))
-                .auto_shrink([false, false]);
-            if let (true, Some(k)) = (need_scroll, hl_idx) {
-                sa = sa
-                    .vertical_scroll_offset((k as f32 * rh - list_r.height() / 2.0 + rh).max(0.0));
-            }
-            sa.show_rows(ui, rh, items.len(), |ui, range| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                for k in range {
-                    let Some(e) = self.cache.get(dir).and_then(|l| l.entries.get(items[k])) else { continue };
-                    let row = (e.path.clone(), e.name().to_string(), e.is_dir, e.kind, e.ext().to_string());
-                    let (path, name, is_dir, kind, ext) = &row;
-                    let (rr, resp) = ui.allocate_exact_size(
-                        vec2(ui.available_width(), rh),
-                        Sense::click_and_drag(),
-                    );
-                    let p = ui.painter();
-                    if hl_idx == Some(k) {
-                        p.rect_filled(rr, pal.corner(), pal.cursor(false));
-                    } else if resp.hovered() {
-                        p.rect_filled(rr, pal.corner(), pal.hover);
-                    }
-                    let ir = Rect::from_min_size(
-                        pos2(rr.min.x + 4.0, rr.center().y - 7.0),
-                        vec2(14.0, 14.0),
-                    );
-                    if *is_dir {
-                        icons::folder(p, ir, self.folder_color(path));
-                    } else {
-                        icons::entry(p, ir, *kind, ext, pal.dark, false);
-                    }
-                    let col = if *is_dir { pal.text } else { pal.text_weak };
-                    let t = fit_text(p, name, &font, rr.max.x - ir.max.x - 10.0);
-                    p.text(
-                        pos2(ir.max.x + 6.0, rr.center().y),
-                        Align2::LEFT_CENTER,
-                        t,
-                        font.clone(),
-                        col,
-                    );
-                    if resp.clicked() {
-                        if *is_dir {
-                            self.acts.push(Act::Navigate(i, path.clone()));
-                        } else {
-                            self.acts
-                                .push(Act::NavigateSelect(i, dir.to_path_buf(), path.clone()));
-                        }
-                    }
-                    if resp.double_clicked() && !*is_dir {
-                        self.acts.push(Act::Open(i, path.clone()));
-                    }
-                    if resp.middle_clicked() && *is_dir {
-                        self.acts.push(Act::OpenNewTab(i, path.clone(), false));
-                    }
-                    // The entries of This PC are drives, which are not moved around.
-                    if resp.drag_started() && !is_computer(dir) {
-                        egui::DragAndDrop::set_payload(ui.ctx(), DragPaths(vec![path.clone()]));
-                    }
-                    if *is_dir {
-                        self.drop_zones.push((rr, DropTarget::Folder(path.clone())));
-                    }
-                    resp.context_menu(|ui| {
-                        if *is_dir && ui.button("Open in new tab").clicked() {
-                            self.acts.push(Act::OpenNewTab(i, path.clone(), true));
-                            ui.close();
-                        }
-                        if ui.button("Copy as path").clicked() {
-                            ui.ctx().copy_text(path.display().to_string());
-                            ui.close();
-                        }
-                    });
-                }
-            });
-            if items.is_empty() {
-                let msg = err.unwrap_or_else(|| "Empty".into());
-                let pos = list_r.center_top() + vec2(0.0, 20.0);
-                ui.painter().text(
-                    pos,
-                    Align2::CENTER_CENTER,
-                    msg,
-                    FontId::proportional(12.0),
-                    pal.text_weak,
-                );
-            }
-        });
     }
 }

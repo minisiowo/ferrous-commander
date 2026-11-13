@@ -70,7 +70,7 @@ mod campaign_perf {
     /// `cargo test --release campaign_perf_selection -- --ignored --nocapture --test-threads=1`
     #[test]
     #[ignore = "Campaign: measures folders of up to 500 000 files"]
-    fn campaign_perf_selection_columns_and_sorting() {
+    fn campaign_perf_selection_and_sorting() {
         for n in [100_000usize, 500_000] {
             let dir = folder(n);
             let entries = crate::fsx::read_dir(&dir).unwrap();
@@ -93,9 +93,7 @@ mod campaign_perf {
             app.panes[0].selected = entries.iter().map(|e| e.path.clone()).collect();
             let selected = timed(&mut app);
             app.panes[0].selected.clear();
-            app.st.show_columns = true;
-            let columns = timed(&mut app);
-            eprintln!("[perf {n}] sort {:.1} ms; frame median/p99: plain {:.2}/{:.2}, all selected {:.2}/{:.2}, with columns {:.2}/{:.2}", median(sorts), plain.0, plain.1, selected.0, selected.1, columns.0, columns.1);
+            eprintln!("[perf {n}] sort {:.1} ms; frame median/p99: plain {:.2}/{:.2}, all selected {:.2}/{:.2}", median(sorts), plain.0, plain.1, selected.0, selected.1);
         }
     }
 
@@ -185,7 +183,7 @@ fn the_font_size_slider_stays_still_while_it_is_dragged() {
     for size in [crate::defaults::MIN_FONT_SIZE, crate::defaults::MAX_FONT_SIZE] {
         app.st.font_size = size;
         for _ in 0..4 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
-        controls_x.push(painted_text(&ctx, &mut app, "Standard").expect("the layout choice is painted").min.x);
+        controls_x.push(painted_text(&ctx, &mut app, "Square").expect("the corners choice is painted").min.x);
     }
     assert_eq!(controls_x[0], controls_x[1], "the settings controls must not move sideways with the font size");
 
@@ -373,68 +371,39 @@ fn key(ctx: &egui::Context, app: &mut App, k: Key, mods: Modifiers) {
 }
 
 #[test]
-fn folder_columns_have_distinct_widget_ids() {
-    let ctx = egui::Context::default();
-    let mut app = App::new(Some(std::env::temp_dir().join("unused-columns.png")));
-    app.st.show_columns = true;
-    for pane in &mut app.panes {
-        pane.tabs[pane.active].path = std::env::current_dir().unwrap();
-    }
-    for layout in [crate::settings::Layout::Standard, crate::settings::Layout::Columns] {
-        app.st.layout = layout;
-        for _ in 0..3 {
-            let mut output = ctx.run_ui(RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(3000.0, 900.0))),
-                ..Default::default()
-            }, |ui| app.draw(ui));
-            output.textures_delta.clear();
-            for shape in &output.shapes {
-                if let egui::epaint::Shape::Text(text) = &shape.shape {
-                    assert!(!text.galley.job.text.contains("use of widget ID"),
-                        "{}", text.galley.job.text);
-                }
-            }
-        }
-    }
-}
-
-#[test]
 fn short_stacked_panels_keep_summary_clear() {
     let ctx = egui::Context::default();
     let mut app = App::new(Some(std::env::temp_dir().join("unused_summary.png")));
     app.st.show_hidden = false;
-    for layout in [crate::settings::Layout::Standard, crate::settings::Layout::Columns] {
-        app.st.layout = layout;
-        for ratio in [0.12, 0.20, 0.88] {
-            app.tiles = crate::tiles::Tile::Split {
-                vertical: true, ratio,
-                a: Box::new(crate::tiles::Tile::Leaf(0)),
-                b: Box::new(crate::tiles::Tile::Leaf(1)),
-            };
-            let mut output = ctx.run_ui(RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))),
-                ..Default::default()
-            }, |ui| app.draw(ui));
-            output.textures_delta.clear();
-            for (_, pane) in &app.pane_rects {
-                let status = Rect::from_min_max(
-                    pos2(pane.min.x + 1.0, pane.max.y - 1.0 - crate::ui::STATUS_H),
-                    pane.max - vec2(1.0, 1.0),
-                );
-                let mut summaries = 0;
-                for shape in &output.shapes {
-                    if let egui::epaint::Shape::Text(text) = &shape.shape {
-                        let visible = Rect::from_min_size(text.pos, text.galley.size())
-                            .intersect(shape.clip_rect).intersect(status);
-                        if visible.is_positive() {
-                            assert!(text.galley.job.text.contains("items"),
-                                "control overlaps summary at ratio {ratio}: {}", text.galley.job.text);
-                            summaries += 1;
-                        }
+    for ratio in [0.12, 0.20, 0.88] {
+        app.tiles = crate::tiles::Tile::Split {
+            vertical: true, ratio,
+            a: Box::new(crate::tiles::Tile::Leaf(0)),
+            b: Box::new(crate::tiles::Tile::Leaf(1)),
+        };
+        let mut output = ctx.run_ui(RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))),
+            ..Default::default()
+        }, |ui| app.draw(ui));
+        output.textures_delta.clear();
+        for (_, pane) in &app.pane_rects {
+            let status = Rect::from_min_max(
+                pos2(pane.min.x + 1.0, pane.max.y - 1.0 - crate::ui::STATUS_H),
+                pane.max - vec2(1.0, 1.0),
+            );
+            let mut summaries = 0;
+            for shape in &output.shapes {
+                if let egui::epaint::Shape::Text(text) = &shape.shape {
+                    let visible = Rect::from_min_size(text.pos, text.galley.size())
+                        .intersect(shape.clip_rect).intersect(status);
+                    if visible.is_positive() {
+                        assert!(text.galley.job.text.contains("items"),
+                            "control overlaps summary at ratio {ratio}: {}", text.galley.job.text);
+                        summaries += 1;
                     }
                 }
-                assert_eq!(summaries, 1, "each panel retains its own visible summary");
             }
+            assert_eq!(summaries, 1, "each panel retains its own visible summary");
         }
     }
 }
@@ -1056,7 +1025,7 @@ fn linux_root_navigation_and_app_chooser_cancel() {
     app.panes[0].tab().path = "/".into();
     app.go_up(0);
     assert!(crate::app::is_computer(app.panes[0].path()));
-    assert!(crate::app::is_computer(&app.column_chain(std::path::Path::new("/tmp"))[0]));
+    assert!(crate::app::is_computer(&app.path_chain(std::path::Path::new("/tmp"))[0]));
     app.acts.push(crate::app::Act::OpenWith(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"), None));
     app.end_frame(&ctx);
     assert!(app.app_chooser.is_some());
@@ -1217,7 +1186,7 @@ fn tree_folders_only_expand_by_arrow_and_double_click_open() {
     assert_eq!(app.panes[0].path(), folder);
     assert!(app.panes[0].expanded.is_empty());
     // The actual toolbar toggle must safely change a populated view both ways.
-    let toggle = pos2(103.0, 732.0);
+    let toggle = pos2(75.0, 732.0);
     click(&ctx, &mut app, toggle, Modifiers::NONE);
     assert!(!app.st.tree_files);
     click(&ctx, &mut app, toggle, Modifiers::NONE);
@@ -1797,20 +1766,17 @@ fn music_goes_on_while_its_file_is_on_show_and_ends_when_the_cursor_leaves_it() 
     app.active = 0;
     app.panes[0].cursor = Some(0);
     assert_eq!(app.cursor_entry(0).map(|e| e.path.clone()), Some(song.clone()));
-    for layout in [crate::settings::Layout::Standard, crate::settings::Layout::Columns] {
-        app.st.layout = layout;
-        app.panes[0].cursor = Some(0);
-        frame(&ctx, &mut app, vec![], Modifiers::NONE);
-        assert_eq!(app.sound.status().state, State::Playing, "{layout:?}: preview starts automatically");
-        app.sound.toggle(&song, &ctx);
-        for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
-        assert_eq!(app.sound.status().state, State::Paused, "manual pause survives redraws");
-        app.sound.toggle(&song, &ctx);
-        for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
-        assert_eq!(app.sound.status().state, State::Playing, "{layout:?}: the pane shows the file");
-        key(&ctx, &mut app, Key::ArrowDown, Modifiers::NONE);
-        assert_eq!(app.sound.status().state, State::Idle, "{layout:?}: another file is on show");
-    }
+    app.panes[0].cursor = Some(0);
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    assert_eq!(app.sound.status().state, State::Playing, "preview starts automatically");
+    app.sound.toggle(&song, &ctx);
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.sound.status().state, State::Paused, "manual pause survives redraws");
+    app.sound.toggle(&song, &ctx);
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert_eq!(app.sound.status().state, State::Playing, "the pane shows the file");
+    key(&ctx, &mut app, Key::ArrowDown, Modifiers::NONE);
+    assert_eq!(app.sound.status().state, State::Idle, "another file is on show");
     app.panes[0].cursor = Some(0);
     app.st.show_preview = false;
     app.sound.toggle(&song, &ctx);
@@ -2108,7 +2074,6 @@ fn tabs_and_path_pieces_become_shortcuts_without_moving_anything() {
     std::fs::create_dir_all(&kept).unwrap();
     let ctx = egui::Context::default();
     let mut app = App::new(Some(root.join("unused.png")));
-    app.st.show_columns = false;
     app.st.favorites = vec![FavGroup::new("Beloved", vec![kept.clone()])];
     app.st.sidebar_order = vec![SidebarSection::Favorite(0), SidebarSection::Drives,
         SidebarSection::Cloud, SidebarSection::History];
@@ -2339,7 +2304,7 @@ fn neovim_l_held_down_never_opens_a_file() {
 }
 
 #[test]
-fn neovim_tree_and_columns_use_h_and_l() {
+fn neovim_tree_uses_h_and_l() {
     let (ctx, mut app, root) = neovim_app("tree");
     let first = root.join("dir00");
     word(&ctx, &mut app, "j");
@@ -2350,12 +2315,6 @@ fn neovim_tree_and_columns_use_h_and_l() {
     assert_eq!(app.panes[0].path(), root.as_path());
     word(&ctx, &mut app, "h");
     assert!(!app.panes[0].expanded.contains(&first), "h collapses");
-    app.st.tree_files = false;
-    app.st.layout = crate::settings::Layout::Columns;
-    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
-    word(&ctx, &mut app, "l");
-    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
-    assert_eq!(app.panes[0].path(), first.as_path());
     std::fs::remove_dir_all(root).unwrap();
 }
 

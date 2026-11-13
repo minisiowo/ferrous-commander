@@ -226,14 +226,6 @@ pub fn glyph(p: &Painter, r: Rect, name: &str, c: Color32) {
         }
         "prev" => chevron(p, r.center(), 4.0, false, s),
         "next" => chevron(p, r.center(), 4.0, true, s),
-        // Columns layout: three columns
-        "layout" => {
-            p.rect_stroke(b, CornerRadius::same(2), s, StrokeKind::Inside);
-            for k in 1..3 {
-                let x = b.min.x + b.width() * k as f32 / 3.0;
-                p.line_segment([pos2(x, b.min.y), pos2(x, b.max.y)], s);
-            }
-        }
         "tree" => {
             // From the trunk at the left edge to the squares that end at the right one, so
             // that what is drawn has its middle where the button has.

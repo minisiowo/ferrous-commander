@@ -10,7 +10,7 @@ use egui::Color32;
 use crate::fsx::{self, Entry, Sorting};
 use crate::ops::{self, Job, OpKind};
 use crate::preview::Preview;
-use crate::settings::{FavGroup, Layout, PaneSession, Settings};
+use crate::settings::{FavGroup, PaneSession, Settings};
 use crate::theme::{Palette, ThemeId, ThemeName, hex};
 use crate::user_theme::UserTheme;
 use crate::tiles::Tile;
@@ -481,8 +481,6 @@ pub struct App {
     /// The room the panels had in the last frame.
     pub panels_area: egui::Vec2,
     pub acts: Vec<Act>,
-    /// Last highlighted child per (pane, column) so a column scrolls to it once.
-    pub col_hl: HashMap<(usize, PathBuf), PathBuf>,
     /// The user has been told that settings cannot be saved.
     save_warned: bool,
 }
@@ -533,14 +531,11 @@ impl App {
             // A clean, deterministic first-start picture: start in the home folder.
             st.panes = Vec::new();
             st.tiles = None;
-            // For checking other looks: FC_SHOT=columns,light,dual,gruvbox,palette,commands,round,settings,themeeditor
+            // For checking other looks: FC_SHOT=light,dual,gruvbox,palette,commands,round,settings,themeeditor
             let look = std::env::var("FC_SHOT").unwrap_or_default();
             // The same picture on every system, whatever its default.
             st.rounded = look.contains("round");
             st.outlines = !look.contains("plain");
-            if look.contains("columns") {
-                st.layout = Layout::Columns;
-            }
             st.tree_files = look.contains("tree");
             if look.contains("light") {
                 st.theme = ThemeName::CatppuccinLatte.into();
@@ -561,7 +556,6 @@ impl App {
                 st.dual = false;
             }
             if look.contains("full") {
-                st.show_columns = true;
                 st.show_preview = true;
             }
             // FC_SHOT=settings or themeeditor opens that window.
@@ -771,7 +765,6 @@ impl App {
             panels_stacked: false,
             panels_area: egui::Vec2::ZERO,
             acts: Vec::new(),
-            col_hl: HashMap::new(),
         };
         app.reload_user_themes();
         app.settings_open = shown_windows.0;
@@ -872,7 +865,6 @@ impl App {
         };
         self.active = fix(self.prev_active).min(self.panes.len() - 1);
         self.prev_active = self.active;
-        self.col_hl.clear();
         // It may belong to the panel that is gone, and the numbers have shifted anyway.
         self.dialog = None;
         self.mark_dirty();
@@ -1026,11 +1018,6 @@ impl App {
 
         for i in 0..self.panes.len() {
             let p = self.panes[i].path().to_path_buf();
-            if self.st.show_columns || self.st.layout == Layout::Columns {
-                for a in self.column_chain(&p) {
-                    self.ensure(&a);
-                }
-            }
             self.ensure(&p);
             if self.st.tree_files {
                 self.build_tree(i, &p);
@@ -1132,11 +1119,9 @@ impl App {
         self.last_save = Instant::now();
     }
 
-    /// Folder columns shown left of / above the current folder: the computer level,
-    /// then every ancestor down to the current folder.
-    pub fn column_chain(&self, p: &Path) -> Vec<PathBuf> {
-        let mut v = Vec::new();
-        v.push(computer());
+    /// The breadcrumb's steps: the computer level, then every ancestor down to `p`.
+    pub fn path_chain(&self, p: &Path) -> Vec<PathBuf> {
+        let mut v = vec![computer()];
         if !is_computer(p) {
             v.extend(fsx::ancestors(p));
         }
@@ -1364,9 +1349,6 @@ impl App {
                     .filter(|e| e.is_dir && pane.expanded.contains(&e.path))
                     .map(|e| e.path.clone()));
             }
-            if self.st.show_columns || self.st.layout == Layout::Columns {
-                visible.extend(self.column_chain(pane.path()));
-            }
         }
         visible
     }
@@ -1395,8 +1377,6 @@ impl App {
                 }
             }
         }
-        self.col_hl
-            .retain(|(pane, p), _| *pane < self.panes.len() && visible.contains(p));
     }
 
     /// Flatten only expanded branches. Directory reads use the existing bounded worker.
@@ -2769,12 +2749,9 @@ mod performance_tests {
         app.cache.insert(active.clone(), listing(old));
         let abandoned = PathBuf::from("abandoned");
         app.cache.insert(abandoned.clone(), listing(old));
-        app.col_hl
-            .insert((0, abandoned.clone()), PathBuf::from("child"));
         app.evict();
         assert!(app.cache.contains_key(&active));
         assert!(!app.cache.contains_key(&abandoned));
-        assert!(app.col_hl.is_empty());
         for i in 0..100 {
             app.cache.insert(
                 PathBuf::from(format!("inactive-{i}")),

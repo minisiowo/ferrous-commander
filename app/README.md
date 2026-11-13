@@ -21,7 +21,7 @@
 | | |
 |---|---|
 | 🪟 **Tiled panels** | As many panels as you need, split either way, with tabs you can drag between them |
-| 🧭 **Navigation** | Folder columns, expandable tree, breadcrumbs, history, type to filter |
+| 🧭 **Navigation** | Expandable tree, breadcrumbs, history, type to filter |
 | ⭐ **Sidebar** | Favorites in groups, drives and pendrives with eject, cloud folders |
 | 👁️ **Preview and search** | Space opens a floating preview of PDFs, pictures, code, documents, spreadsheets, archives, audio, video and 3D models (STL, 3MF). Search, color tags for folders and files |
 | 📦 **Archives** | Unpack and create archives with nothing else to install |
@@ -70,7 +70,6 @@ No administrator rights are needed for the per-user install, which is also avail
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Quick palette: commands and settings |
 | <kbd>Ctrl</kbd>+<kbd>H</kbd> | Hidden files |
 | <kbd>Space</kbd> | Preview |
-| <kbd>`</kbd> | Folder columns |
 | <kbd>F5</kbd> / <kbd>F10</kbd> | Refresh, terminal |
 
 </td><td>
