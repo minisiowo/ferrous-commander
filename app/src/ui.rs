@@ -327,11 +327,11 @@ pub(crate) fn tab_widths(strip: f32, wanted: &[f32]) -> Vec<f32> {
     natural.iter().map(|w| w.min(low.floor())).collect()
 }
 
-/// What a profile opens, one panel to a line: its folders, the active one first.
-pub(crate) fn profile_summary(profile: &crate::settings::Profile) -> String {
-    let panels = profile.panes.len().max(1);
+/// What a layout opens, one panel to a line: its folders, the active one first.
+pub(crate) fn layout_summary(layout: &crate::settings::SavedLayout) -> String {
+    let panels = layout.panes.len().max(1);
     let mut lines = vec![if panels == 1 { "1 panel".to_string() } else { format!("{panels} panels") }];
-    for pane in &profile.panes {
+    for pane in &layout.panes {
         let mut tabs: Vec<String> = pane.tabs.iter().map(|t| t.display().to_string()).collect();
         if pane.active < tabs.len() { let active = tabs.remove(pane.active); tabs.insert(0, active); }
         lines.push(tabs.join(", "));
@@ -696,7 +696,7 @@ impl App {
             }
             // panels, Hyprland style
             Command::NewPanel => self.acts.push(Act::OpenPanel(i, None)),
-            Command::SaveProfile => self.dialog = Some(self.new_profile_dialog()),
+            Command::SaveLayout => self.dialog = Some(self.new_layout_dialog()),
             Command::NewGroup => self.dialog = Some(Dialog::NewGroup { name: String::new(), focus: true }),
             Command::ClosePanel => self.acts.push(Act::ClosePanel(i)),
             Command::ToggleSplit => self.acts.push(Act::ToggleSplit(i)),
@@ -833,7 +833,7 @@ impl App {
                             SidebarSection::Cloud => self.cloud_card(ui),
                             SidebarSection::Favorite(g) => self.fav_group(ui, g),
                             SidebarSection::History => self.history_card(ui),
-                            SidebarSection::Profiles => self.profiles_card(ui),
+                            SidebarSection::Layouts => self.layouts_card(ui),
                         });
                     }
                     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), self.row_h() + 4.0), Sense::hover());
@@ -844,9 +844,9 @@ impl App {
                     if self.add_button(ui, left, "+  New group", &group_tip).clicked() {
                         self.dialog = Some(Dialog::NewGroup { name: String::new(), focus: true });
                     }
-                    let tip = self.tip("Saves the open panels, their tabs and layout under a name", Command::SaveProfile);
-                    if self.add_button(ui, right, "+  New profile", &tip).clicked() {
-                        self.dialog = Some(self.new_profile_dialog());
+                    let tip = self.tip("Saves the open panels, their tabs and layout under a name", Command::SaveLayout);
+                    if self.add_button(ui, right, "+  New layout", &tip).clicked() {
+                        self.dialog = Some(self.new_layout_dialog());
                     }
                     ui.add_space(8.0);
                 });
@@ -867,10 +867,10 @@ impl App {
         resp.on_hover_text(tip)
     }
 
-    /// Asks for a profile's name, suggesting the active panel's folder.
-    pub(crate) fn new_profile_dialog(&self) -> Dialog {
+    /// Asks for a layout's name, suggesting the active panel's folder.
+    pub(crate) fn new_layout_dialog(&self) -> Dialog {
         let name = fsx::display_name(self.panes[self.active].path());
-        Dialog::NewProfile { name, focus: true }
+        Dialog::NewLayout { name, focus: true }
     }
 
     fn side_item(&mut self, ui: &mut Ui, path: &Path, label: &str) -> egui::Response {
@@ -1315,15 +1315,15 @@ impl App {
         self.sidebar_group_drop(ui, &r.response, SidebarSection::History);
     }
 
-    fn profiles_card(&mut self, ui: &mut Ui) {
+    fn layouts_card(&mut self, ui: &mut Ui) {
         let pal = self.pal;
-        let profiles = self.st.profiles.clone();
+        let layouts = self.st.layouts.clone();
         let r = card(ui, &pal, |ui| {
             ui.horizontal(|ui| {
-                Self::sidebar_heading(ui, &pal, "Profiles", SidebarSection::Profiles);
+                Self::sidebar_heading(ui, &pal, "Layouts", SidebarSection::Layouts);
             });
             ui.spacing_mut().item_spacing.y = 1.0;
-            for (k, profile) in profiles.iter().enumerate() {
+            for (k, layout) in layouts.iter().enumerate() {
                 let h = self.row_h() + 1.0;
                 let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
                 let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -1333,33 +1333,33 @@ impl App {
                 let ir = Rect::from_min_size(pos2(r.min.x + 4.0, r.center().y - 8.0), vec2(16.0, 16.0));
                 icons::face(ui.painter(), ir, "#layout", 14.0, pal.accent);
                 let font = FontId::proportional(self.st.font_size);
-                let t = fit_text(ui.painter(), &profile.name, &font, r.max.x - 4.0 - (ir.max.x + 6.0));
+                let t = fit_text(ui.painter(), &layout.name, &font, r.max.x - 4.0 - (ir.max.x + 6.0));
                 ui.painter().text(pos2(ir.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, t, font, pal.text);
                 if resp.clicked() {
-                    self.acts.push(Act::OpenProfile(k));
+                    self.acts.push(Act::OpenLayout(k));
                 }
-                resp.on_hover_text(profile_summary(profile)).context_menu(|ui| {
+                resp.on_hover_text(layout_summary(layout)).context_menu(|ui| {
                     if ui.button("Open").clicked() {
-                        self.acts.push(Act::OpenProfile(k));
+                        self.acts.push(Act::OpenLayout(k));
                         ui.close();
                     }
                     if ui.button("Update to current layout").clicked() {
-                        self.acts.push(Act::UpdateProfile(k));
+                        self.acts.push(Act::UpdateLayout(k));
                         ui.close();
                     }
                     if ui.button("Rename…").clicked() {
-                        self.dialog = Some(Dialog::RenameProfile { profile: k, name: profile.name.clone(), focus: true });
+                        self.dialog = Some(Dialog::RenameLayout { layout: k, name: layout.name.clone(), focus: true });
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Delete profile").clicked() {
-                        self.acts.push(Act::DeleteProfile(k));
+                    if ui.button("Delete layout").clicked() {
+                        self.acts.push(Act::DeleteLayout(k));
                         ui.close();
                     }
                 });
             }
         });
-        self.sidebar_group_drop(ui, &r.response, SidebarSection::Profiles);
+        self.sidebar_group_drop(ui, &r.response, SidebarSection::Layouts);
     }
 
     // ================================================================= browsers

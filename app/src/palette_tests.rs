@@ -281,21 +281,21 @@ fn paths(app: &App) -> Vec<Vec<std::path::PathBuf>> {
 }
 
 #[test]
-fn a_profile_brings_back_its_panels_from_alt_p() {
-    let (ctx, mut app, root) = palette_app("profiles");
-    assert!(!paints_text(&ctx, &mut app, "Profiles"), "no card while there are no profiles");
+fn a_layout_brings_back_its_panels_from_alt_p() {
+    let (ctx, mut app, root) = palette_app("layouts");
+    assert!(!paints_text(&ctx, &mut app, "Layouts"), "no card while there are no layouts");
     app.acts.push(crate::app::Act::OpenPanel(0, Some(root.join("dir03"))));
     settle(&ctx, &mut app);
     app.panes[0].tabs.push(crate::app::Tab::new(root.join("dir04")));
     let saved = paths(&app);
     let active = app.active;
-    app.acts.push(crate::app::Act::SaveProfile("work".into()));
+    app.acts.push(crate::app::Act::SaveLayout("work".into()));
     settle(&ctx, &mut app);
-    assert_eq!(app.st.profiles.len(), 1);
-    assert!(paints_text(&ctx, &mut app, "Profiles"), "the card shows once there is one");
-    app.acts.push(crate::app::Act::SaveProfile("work".into()));
+    assert_eq!(app.st.layouts.len(), 1);
+    assert!(paints_text(&ctx, &mut app, "Layouts"), "the card shows once there is one");
+    app.acts.push(crate::app::Act::SaveLayout("work".into()));
     settle(&ctx, &mut app);
-    assert_eq!(app.st.profiles.len(), 1, "a second profile cannot take the same name");
+    assert_eq!(app.st.layouts.len(), 1, "a second layout cannot take the same name");
 
     // Another layout: fewer panels, other folders.
     while app.panes.len() > 1 {
@@ -317,24 +317,24 @@ fn a_profile_brings_back_its_panels_from_alt_p() {
     app.tiles.leaves(&mut leaves);
     assert_eq!(leaves.len(), app.panes.len(), "the layout covers every panel");
 
-    app.acts.push(crate::app::Act::RenameProfile(0, "home".into()));
-    app.acts.push(crate::app::Act::DeleteProfile(0));
+    app.acts.push(crate::app::Act::RenameLayout(0, "home".into()));
+    app.acts.push(crate::app::Act::DeleteLayout(0));
     settle(&ctx, &mut app);
-    assert!(app.st.profiles.is_empty());
+    assert!(app.st.layouts.is_empty());
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn a_profile_whose_folder_is_gone_opens_on_what_is_left() {
-    let (ctx, mut app, root) = palette_app("profile_gone");
+fn a_layout_whose_folder_is_gone_opens_on_what_is_left() {
+    let (ctx, mut app, root) = palette_app("layout_gone");
     let gone = root.join("dir05/inner");
     app.panes[0].tabs = vec![crate::app::Tab::new(gone.clone())];
-    app.acts.push(crate::app::Act::SaveProfile("gone".into()));
+    app.acts.push(crate::app::Act::SaveLayout("gone".into()));
     settle(&ctx, &mut app);
     std::fs::remove_dir_all(&gone).unwrap();
     app.panes[0].tabs = vec![crate::app::Tab::new(root.clone())];
-    app.acts.push(crate::app::Act::OpenProfile(0));
-    app.acts.push(crate::app::Act::OpenProfile(7));
+    app.acts.push(crate::app::Act::OpenLayout(0));
+    app.acts.push(crate::app::Act::OpenLayout(7));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while app.panes[0].path() != root.join("dir05") {
         assert!(std::time::Instant::now() < deadline, "stayed on {}", app.panes[0].path().display());
@@ -350,7 +350,7 @@ fn the_sidebar_actions_and_every_on_off_setting_are_in_the_palette() {
     ctrl_shift_p(&ctx, &mut app);
     word(&ctx, &mut app, "new");
     let titles = palette(&app).titles();
-    for wanted in ["New profile from the current layout…", "New favorites group…"] {
+    for wanted in ["New layout from the current panels…", "New favorites group…"] {
         assert!(titles.contains(&wanted), "{wanted} in {titles:?}");
     }
     for toggle in crate::settings::TOGGLES.iter().filter(|t| t.here() && t.id != "WindowEffect") {

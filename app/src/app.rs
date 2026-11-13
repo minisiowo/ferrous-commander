@@ -10,7 +10,7 @@ use egui::Color32;
 use crate::fsx::{self, Entry, Sorting};
 use crate::ops::{self, Job, OpKind};
 use crate::preview::Preview;
-use crate::settings::{FavGroup, PaneSession, Profile, Settings};
+use crate::settings::{FavGroup, PaneSession, SavedLayout, Settings};
 use crate::theme::{Palette, ThemeId, ThemeName, hex};
 use crate::user_theme::UserTheme;
 use crate::tiles::Tile;
@@ -251,8 +251,8 @@ pub enum Dialog {
         name: String,
         focus: bool,
     },
-    NewProfile { name: String, focus: bool },
-    RenameProfile { profile: usize, name: String, focus: bool },
+    NewLayout { name: String, focus: bool },
+    RenameLayout { layout: usize, name: String, focus: bool },
     Compress {
         pane: usize,
         sources: Vec<PathBuf>,
@@ -354,13 +354,13 @@ pub enum Act {
     PlaceFavorites { group: usize, at: usize, paths: Vec<PathBuf> },
     DeleteGroup(usize),
     MoveGroup(usize, i32),
-    /// Keep the panels as they are now as a new profile with this name.
-    SaveProfile(String),
-    /// Put the panels as they are now in place of what the profile held.
-    UpdateProfile(usize),
-    RenameProfile(usize, String),
-    DeleteProfile(usize),
-    OpenProfile(usize),
+    /// Keep the panels as they are now as a new layout with this name.
+    SaveLayout(String),
+    /// Put the panels as they are now in place of what the layout held.
+    UpdateLayout(usize),
+    RenameLayout(usize, String),
+    DeleteLayout(usize),
+    OpenLayout(usize),
     Refresh,
     Terminal(PathBuf),
     SetSort(usize, fsx::SortBy),
@@ -852,7 +852,7 @@ impl App {
         match section {
             Cloud => self.st.show_cloud && !self.cloud.is_empty(),
             History => self.st.show_history,
-            Profiles => !self.st.profiles.is_empty(),
+            Layouts => !self.st.layouts.is_empty(),
             Drives | Favorite(_) => true,
         }
     }
@@ -1129,17 +1129,17 @@ impl App {
     }
 
     /// The panels as they are now, under a name.
-    pub fn snapshot_profile(&self, name: String) -> Profile {
-        Profile { name, panes: self.session(), tiles: Some(self.tiles.clone()), active: self.active }
+    pub fn snapshot_layout(&self, name: String) -> SavedLayout {
+        SavedLayout { name, panes: self.session(), tiles: Some(self.tiles.clone()), active: self.active }
     }
 
-    /// Replaces every panel with the ones a profile holds, laid out as it was saved.
-    pub fn apply_profile(&mut self, k: usize) {
-        let Some(profile) = self.st.profiles.get(k).cloned() else { return };
-        self.panes = panes_from(&profile.panes, 1);
+    /// Replaces every panel with the ones a layout holds, laid out as it was saved.
+    pub fn apply_layout(&mut self, k: usize) {
+        let Some(layout) = self.st.layouts.get(k).cloned() else { return };
+        self.panes = panes_from(&layout.panes, 1);
         let n = self.panes.len();
-        self.tiles = profile.tiles.unwrap_or(Tile::Leaf(0)).sanitize(n);
-        self.active = profile.active.min(n - 1);
+        self.tiles = layout.tiles.unwrap_or(Tile::Leaf(0)).sanitize(n);
+        self.active = layout.active.min(n - 1);
         self.prev_active = self.active;
         // Both may point at panels that are gone, and the numbers mean other panels now.
         self.dialog = None;
@@ -1147,7 +1147,7 @@ impl App {
         self.tab_rects.clear();
         self.drop_zones.clear();
         self.mark_dirty();
-        self.toast(ToastKind::Info, format!("Opened profile “{}”", profile.name));
+        self.toast(ToastKind::Info, format!("Opened layout “{}”", layout.name));
     }
 
     /// The breadcrumb's steps: the computer level, then every ancestor down to `p`.
@@ -2338,43 +2338,43 @@ impl App {
                 }
                 self.mark_dirty();
             }
-            Act::SaveProfile(name) => {
+            Act::SaveLayout(name) => {
                 let name = name.trim().to_string();
                 if name.is_empty() {
-                } else if self.st.profiles.iter().any(|p| p.name == name) {
-                    self.toast(ToastKind::Error, format!("A profile named “{name}” already exists"));
+                } else if self.st.layouts.iter().any(|p| p.name == name) {
+                    self.toast(ToastKind::Error, format!("A layout named “{name}” already exists"));
                 } else {
-                    let profile = self.snapshot_profile(name.clone());
-                    self.st.profiles.push(profile);
-                    self.toast(ToastKind::Info, format!("Saved profile “{name}”"));
+                    let layout = self.snapshot_layout(name.clone());
+                    self.st.layouts.push(layout);
+                    self.toast(ToastKind::Info, format!("Saved layout “{name}”"));
                     self.mark_dirty();
                 }
             }
-            Act::UpdateProfile(k) => {
-                if let Some(name) = self.st.profiles.get(k).map(|p| p.name.clone()) {
-                    self.st.profiles[k] = self.snapshot_profile(name.clone());
-                    self.toast(ToastKind::Info, format!("Profile “{name}” now holds these panels"));
+            Act::UpdateLayout(k) => {
+                if let Some(name) = self.st.layouts.get(k).map(|p| p.name.clone()) {
+                    self.st.layouts[k] = self.snapshot_layout(name.clone());
+                    self.toast(ToastKind::Info, format!("Layout “{name}” now holds these panels"));
                     self.mark_dirty();
                 }
             }
-            Act::RenameProfile(k, name) => {
+            Act::RenameLayout(k, name) => {
                 let name = name.trim().to_string();
-                if name.is_empty() || k >= self.st.profiles.len() {
-                } else if self.st.profiles.iter().enumerate().any(|(i, p)| i != k && p.name == name) {
-                    self.toast(ToastKind::Error, format!("A profile named “{name}” already exists"));
+                if name.is_empty() || k >= self.st.layouts.len() {
+                } else if self.st.layouts.iter().enumerate().any(|(i, p)| i != k && p.name == name) {
+                    self.toast(ToastKind::Error, format!("A layout named “{name}” already exists"));
                 } else {
-                    self.st.profiles[k].name = name;
+                    self.st.layouts[k].name = name;
                     self.mark_dirty();
                 }
             }
-            Act::DeleteProfile(k) => {
-                if k < self.st.profiles.len() {
-                    let removed = self.st.profiles.remove(k);
-                    self.toast(ToastKind::Info, format!("Deleted profile “{}”", removed.name));
+            Act::DeleteLayout(k) => {
+                if k < self.st.layouts.len() {
+                    let removed = self.st.layouts.remove(k);
+                    self.toast(ToastKind::Info, format!("Deleted layout “{}”", removed.name));
                     self.mark_dirty();
                 }
             }
-            Act::OpenProfile(k) => self.apply_profile(k),
+            Act::OpenLayout(k) => self.apply_layout(k),
             Act::MoveGroup(g, d) => {
                 self.st.normalize_sidebar();
                 let section = crate::settings::SidebarSection::Favorite(g);

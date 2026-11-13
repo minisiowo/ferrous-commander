@@ -279,9 +279,9 @@ impl App {
         let i = self.active;
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut items = Vec::new();
-        for (k, profile) in self.st.profiles.iter().enumerate() {
-            let detail = crate::ui::profile_summary(profile).replace('\n', " · ");
-            items.push(Item::new(profile.name.clone(), detail, "profile", Pick::Profile(k)).boost(90));
+        for (k, layout) in self.st.layouts.iter().enumerate() {
+            let detail = crate::ui::layout_summary(layout).replace('\n', " · ");
+            items.push(Item::new(layout.name.clone(), detail, "layout", Pick::Layout(k)).boost(90));
         }
         let mut add = |item: Item, path: &Path| {
             if seen.insert(path.to_path_buf()) { items.push(item); }
@@ -358,9 +358,9 @@ impl App {
             item.state = state;
             items.push(item);
         }
-        for (k, profile) in st.profiles.iter().enumerate() {
-            items.push(Item::new(format!("Open profile: {}", profile.name), "Profiles", "", Pick::Profile(k)));
-            items.push(Item::new(format!("Update profile {} to the current layout", profile.name), "Profiles", "", Pick::UpdateProfile(k)));
+        for (k, layout) in st.layouts.iter().enumerate() {
+            items.push(Item::new(format!("Open layout: {}", layout.name), "Layouts", "", Pick::Layout(k)));
+            items.push(Item::new(format!("Update layout {} to the current panels", layout.name), "Layouts", "", Pick::UpdateLayout(k)));
         }
         if self.selected_theme_file().is_some() {
             items.push(Item::new("Import selected file as a theme", "Settings", "", Pick::Setting(Setting::ImportTheme)));
@@ -599,7 +599,7 @@ impl App {
                 icons::entry(&p, icon, fsx::Kind::from_ext(ext), ext, pal.dark, false);
             }
             Pick::Theme(_) => icons::face(&p, icon, "◑", 13.0, pal.text_weak),
-            Pick::Profile(_) | Pick::UpdateProfile(_) => icons::face(&p, icon, "#layout", 14.0, pal.accent),
+            Pick::Layout(_) | Pick::UpdateLayout(_) => icons::face(&p, icon, "#layout", 14.0, pal.accent),
             Pick::Command(_) | Pick::Setting(_) | Pick::Sort(_) => icons::glyph(&p, icon, "next", pal.text_weak),
         }
         let small = FontId::proportional(11.0);
@@ -693,8 +693,8 @@ impl App {
                 }
             }
             Pick::Typed(text) => self.go_to_typed(i, &text, ctrl, shift),
-            Pick::Profile(k) => self.acts.push(Act::OpenProfile(k)),
-            Pick::UpdateProfile(k) => self.acts.push(Act::UpdateProfile(k)),
+            Pick::Layout(k) => self.acts.push(Act::OpenLayout(k)),
+            Pick::UpdateLayout(k) => self.acts.push(Act::UpdateLayout(k)),
             Pick::Command(command) => {
                 let page = ((self.panes[i].list_h / self.row_h()).floor() as usize).max(1);
                 self.run_command(i, command, false, None, false, page);

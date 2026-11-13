@@ -178,7 +178,7 @@ shortcuts that open it can be changed like any other, under **View** in **Custom
 
 | Typed first | Lists |
 |---|---|
-| nothing | Profiles, folders visited lately, favorites, drives and the items of the current folder. From the second letter it also searches the folders below the current one, nearest first. A full path, or one that starts with `~`, is offered as it stands |
+| nothing | Layouts, folders visited lately, favorites, drives and the items of the current folder. From the second letter it also searches the folders below the current one, nearest first. A full path, or one that starts with `~`, is offered as it stands |
 | `>` | Commands with their shortcuts, and quick settings: themes, sorting, hidden files, sidebar, tree, text size, Neovim-style keys. Ctrl+Shift+P opens the palette here. What you used last comes first |
 | `@` | The last 200 folders visited, the latest first |
 
@@ -290,17 +290,17 @@ controls its visibility. Use **Settings → Restore groups…** to restore Histo
 folders or a deleted group with its saved shortcuts. Closing History hides it
 without discarding its entries.
 
-### Profiles
+### Layouts
 
-A profile keeps the open panels under a name: each panel's tabs and active tab, how the
-panels are split and their sizes, and which panel is active. Save one with **+ New profile**
-at the foot of the sidebar or the **New profile from the current layout…** command (`>` in the quick
-palette; it has no shortcut until you give it one). The **Profiles** card appears in the
-sidebar once there is a profile; click one to replace the panels with it, or find it by name
-with Alt+P. Right-click a profile to update it to the current panels, rename or delete it; `>` in the quick
-palette also lists **Open profile** and **Update profile** for each one.
-A folder that is gone opens on its nearest parent. Profiles are saved in `settings.lua`
-under `profiles`.
+A layout keeps the open panels under a name: each panel's tabs and active tab, how the
+panels are split and their sizes, and which panel is active. Save one with **+ New layout**
+at the foot of the sidebar or the **New layout from the current panels…** command (`>` in the
+quick palette; it has no shortcut until you give it one). The **Layouts** card appears in the
+sidebar once there is a layout; click one to replace the panels with it, or find it by name
+with Alt+P. Right-click a layout to update it to the current panels, rename or delete it; `>` in
+the quick palette also lists **Open layout** and **Update layout** for each one.
+A folder that is gone opens on its nearest parent. Layouts are saved in `settings.lua`
+under `layouts`.
 
 Windows filesystem audit, tested behavior and remaining limits:
 [WINDOWS_FILESYSTEM_AUDIT.md](../WINDOWS_FILESYSTEM_AUDIT.md).

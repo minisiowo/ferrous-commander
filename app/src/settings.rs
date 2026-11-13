@@ -14,7 +14,9 @@ pub enum SidebarSection {
     Cloud,
     Favorite(usize),
     History,
-    Profiles,
+    /// Called Profiles while the feature was new.
+    #[serde(alias = "Profiles")]
+    Layouts,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -78,7 +80,7 @@ impl PaneSession {
 
 /// A named panel layout: every panel with its tabs, how they are split, and which is active.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Profile {
+pub struct SavedLayout {
     pub name: String,
     pub panes: Vec<PaneSession>,
     #[serde(default)]
@@ -151,7 +153,8 @@ pub struct Settings {
     /// Panel arrangement (tiling tree over `panes`).
     pub tiles: Option<crate::tiles::Tile>,
     /// Saved panel layouts, opened from the sidebar or the quick palette.
-    pub profiles: Vec<Profile>,
+    #[serde(alias = "profiles")]
+    pub layouts: Vec<SavedLayout>,
     pub tags: HashMap<String, u8>,
     pub font_size: f32,
     /// Keys work as in Neovim, on top of the standard shortcuts.
@@ -200,7 +203,7 @@ impl Default for Settings {
             removed_groups: Vec::new(),
             panes: Vec::new(),
             tiles: None,
-            profiles: Vec::new(),
+            layouts: Vec::new(),
             tags: HashMap::new(),
             font_size: crate::defaults::ITEM_FONT_SIZE,
             vim_keys: false,
@@ -324,7 +327,7 @@ impl Settings {
         let mut sections = vec![SidebarSection::Drives, SidebarSection::Cloud];
         sections.extend((0..self.favorites.len()).map(SidebarSection::Favorite));
         sections.push(SidebarSection::History);
-        sections.push(SidebarSection::Profiles);
+        sections.push(SidebarSection::Layouts);
         let mut seen = Vec::new();
         self.sidebar_order.retain(|s| {
             if sections.contains(s) && !seen.contains(s) { seen.push(*s); true } else { false }
@@ -440,7 +443,7 @@ impl Settings {
         s.history.retain(text);
         s.recent_folders.retain(text);
         for group in s.favorites.iter_mut().chain(&mut s.removed_groups) { group.paths.retain(text); }
-        for pane in s.panes.iter_mut().chain(s.profiles.iter_mut().flat_map(|p| p.panes.iter_mut())) {
+        for pane in s.panes.iter_mut().chain(s.layouts.iter_mut().flat_map(|p| p.panes.iter_mut())) {
             pane.make_storable();
         }
         s
@@ -527,7 +530,7 @@ mod tests {
         s.panes = vec![PaneSession { tabs: vec![PathBuf::from(r"\\server\share")], active: 0 }];
         s.tiles = Some(crate::tiles::Tile::Split { vertical: false, ratio: 0.5,
             a: Box::new(crate::tiles::Tile::Leaf(0)), b: Box::new(crate::tiles::Tile::Leaf(1)) });
-        s.profiles = vec![Profile { name: "Praca \"1\"".into(), panes: s.panes.clone(), tiles: s.tiles.clone(), active: 0 }];
+        s.layouts = vec![SavedLayout { name: "Praca \"1\"".into(), panes: s.panes.clone(), tiles: s.tiles.clone(), active: 0 }];
         s.tags.insert("true".into(), 2);
         s.folder_sorting.insert(r"C:\Work".into(), Sorting::default());
         let expected = serde_json::to_value(&s).unwrap();
@@ -598,12 +601,14 @@ mod tests {
     }
 
     #[test]
-    fn settings_from_before_profiles_load_without_any() {
+    fn settings_from_before_layouts_or_with_profiles_load() {
         let s = Settings::from_lua("return { font_size = 14, sidebar_order = { 'Drives', 'History' } }").unwrap();
-        assert!(s.profiles.is_empty());
-        let s = Settings::from_lua("return { profiles = { { name = 'a', panes = { { tabs = { '/tmp' }, active = 0 } } } } }").unwrap();
-        assert_eq!(s.profiles[0].panes[0].tabs, [PathBuf::from("/tmp")]);
-        assert!(s.profiles[0].tiles.is_none());
+        assert!(s.layouts.is_empty());
+        // Saved while layouts were called profiles.
+        let s = Settings::from_lua("return { sidebar_order = { 'Profiles', 'Drives' }, profiles = { { name = 'a', panes = { { tabs = { '/tmp' }, active = 0 } } } } }").unwrap();
+        assert_eq!(s.sidebar_order[0], SidebarSection::Layouts);
+        assert_eq!(s.layouts[0].panes[0].tabs, [PathBuf::from("/tmp")]);
+        assert!(s.layouts[0].tiles.is_none());
     }
 
     #[test]

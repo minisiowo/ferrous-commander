@@ -93,10 +93,10 @@ pub enum Pick {
     Setting(Setting),
     Theme(ThemeId),
     Sort(SortBy),
-    /// A saved panel layout, by its place among the profiles.
-    Profile(usize),
-    /// Put the panels as they are now in a profile, by its place among the profiles.
-    UpdateProfile(usize),
+    /// A saved panel layout, by its place among the layouts.
+    Layout(usize),
+    /// Put the panels as they are now in a layout, by its place among the layouts.
+    UpdateLayout(usize),
 }
 
 impl Pick {
@@ -108,7 +108,7 @@ impl Pick {
             Pick::Setting(setting) => format!("setting:{setting:?}"),
             Pick::Theme(theme) => format!("theme:{}", theme.key()),
             Pick::Sort(by) => format!("sort:{by:?}"),
-            Pick::Folder(_) | Pick::File(_) | Pick::Typed(_) | Pick::Profile(_) | Pick::UpdateProfile(_) => return None,
+            Pick::Folder(_) | Pick::File(_) | Pick::Typed(_) | Pick::Layout(_) | Pick::UpdateLayout(_) => return None,
         })
     }
 }
@@ -342,7 +342,7 @@ mod tests {
         }
         assert_eq!(Pick::Setting(Setting::Toggle(0)).id().as_deref(), Some("setting:Sidebar"));
         assert_eq!(Pick::Setting(Setting::FontLarger).id().as_deref(), Some("setting:FontLarger"));
-        assert_eq!(Pick::Profile(0).id(), None);
+        assert_eq!(Pick::Layout(0).id(), None);
         assert_eq!(Pick::Theme(ThemeName::Gruvbox.into()).id().as_deref(), Some("theme:Gruvbox"));
         assert_eq!(Pick::Theme(ThemeId::Custom("x".into())).id().as_deref(), Some("theme:custom:x"));
         assert_eq!(Pick::Folder("/a".into()).id(), None);
