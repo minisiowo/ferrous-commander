@@ -450,6 +450,12 @@ mod linux_names {
         }).max_by_key(|(_, mount, _)| mount.components().count())
     }
 
+    /// `/home` on the same device as `/`, as with Btrfs subvolumes or a single partition.
+    /// It would show the system disk a second time, with the same free space.
+    pub fn home_on_system_disk(mount: &Path, source: &std::ffi::OsStr, root_source: Option<&std::ffi::OsStr>) -> bool {
+        mount == Path::new("/home") && root_source == Some(source)
+    }
+
     pub fn title(mount: &Path, volume: Option<&str>, model: &str, removable: bool, network: bool) -> String {
         if mount == Path::new("/") { return "System disk".into(); }
         if mount == Path::new("/home") { return "Home".into(); }
@@ -468,6 +474,14 @@ mod linux_names {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn home_on_the_system_disk_is_not_a_second_device() {
+            let root = Some(std::ffi::OsStr::new("/dev/mapper/root"));
+            assert!(home_on_system_disk(Path::new("/home"), "/dev/mapper/root".as_ref(), root));
+            assert!(!home_on_system_disk(Path::new("/home"), "/dev/nvme0n1p3".as_ref(), root), "a separate partition stays");
+            assert!(!home_on_system_disk(Path::new("/"), "/dev/mapper/root".as_ref(), root));
+            assert!(!home_on_system_disk(Path::new("/home"), "/dev/sda2".as_ref(), None));
+        }
         #[test]
         fn readable_mounted_device_names() {
             assert_eq!(title(Path::new("/"), None, "", false, false), "System disk");
@@ -512,11 +526,13 @@ pub fn list() -> Vec<DriveInfo> {
     #[cfg(target_os = "linux")]
     let labels = linux_names::labels();
     if let Ok(disks) = sysinfo::Disks::new_with_refreshed_list() {
-        // Keep useful entry points, but suppress repeated Btrfs subvolumes/bind mounts.
+        // Keep / and a separate /home, but suppress repeated Btrfs subvolumes/bind mounts.
         #[cfg(target_os = "linux")]
         let primary_sources: std::collections::HashSet<_> = disks.iter()
             .filter(|d| matches!(d.mount_point().to_str(), Some("/" | "/home")))
             .map(|d| d.name().to_os_string()).collect();
+        #[cfg(target_os = "linux")]
+        let root_source = disks.iter().find(|d| d.mount_point() == std::path::Path::new("/")).map(|d| d.name());
         for d in disks.iter() {
             let mp = d.mount_point().to_path_buf();
             let s = mp.to_string_lossy().to_string();
@@ -529,6 +545,10 @@ pub fn list() -> Vec<DriveInfo> {
             let network = is_network_fs(&fs);
             #[cfg(target_os = "linux")]
             if fs == "btrfs" && primary_sources.contains(d.name()) && s != "/" && s != "/home" {
+                continue;
+            }
+            #[cfg(target_os = "linux")]
+            if linux_names::home_on_system_disk(&mp, d.name(), root_source) {
                 continue;
             }
             let source = d.name().to_string_lossy().into_owned();
