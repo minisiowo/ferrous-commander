@@ -148,6 +148,9 @@ pub struct Quick {
     shown: Option<Key>,
     revision: u32,
     path: Option<std::path::PathBuf>,
+    /// Whether the window has been asked for. Windows shows a new window before it moves it
+    /// into place, so there it is made hidden and shown one frame later.
+    made: bool,
 }
 
 /// About 70% × 80% of the screen the application is on.
@@ -309,6 +312,11 @@ impl App {
             .with_min_inner_size(if locked { quick.size } else { vec2(320.0, 240.0) })
             .with_max_inner_size(if locked { quick.size } else { quick.limit });
         if let Some(position) = quick.position { builder = builder.with_position(position); }
+        if cfg!(windows) {
+            builder = builder.with_visible(quick.made);
+            if !quick.made { ctx.request_repaint(); }
+        }
+        quick.made = true;
         let shared = quick.shared.clone();
         ctx.show_viewport_deferred(viewport(), builder, move |ui, class| {
             draw(ui, &mut shared.lock().unwrap(), class);
@@ -354,6 +362,7 @@ impl App {
                 shown: None,
                 revision: 0,
                 path: None,
+                made: false,
             }
         });
         let mut s = quick.shared.lock().unwrap();
