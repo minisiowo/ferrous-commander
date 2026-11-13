@@ -1025,7 +1025,7 @@ fn archive_view(ui: &mut Ui, s: &mut Shared, entries: &[ArchiveEntry], total: u6
                 icons::folder(&p, icon, Kind::Folder.color());
             } else {
                 let ext = fsx::split_ext(&entry.name, false);
-                icons::entry(&p, icon, Kind::from_ext(&ext), &ext, pal.dark, false);
+                icons::entry(&p, icon, Kind::from_ext(ext), ext, pal.dark, false);
             }
             let size = if entry.folder { String::new() } else { fsx::fmt_size(entry.size, s.mebibytes) };
             let size_rect = p.text(pos2(top.x + width - 16.0, y), Align2::RIGHT_CENTER, size, FontId::proportional(12.0), pal.text_weak);

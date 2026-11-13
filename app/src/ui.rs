@@ -920,8 +920,8 @@ impl App {
             icons::entry(
                 ui.painter(),
                 ir,
-                fsx::Kind::from_ext(&ext),
-                &ext,
+                fsx::Kind::from_ext(ext),
+                ext,
                 pal.dark,
                 false,
             );

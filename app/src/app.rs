@@ -1054,7 +1054,7 @@ impl App {
     pub(crate) fn sorting_for(&self, p: &Path) -> Sorting {
         self.st
             .folder_sorting
-            .get(&p.to_string_lossy().to_string())
+            .get(p.to_string_lossy().as_ref())
             .copied()
             .unwrap_or(self.st.sorting)
     }
@@ -1699,27 +1699,30 @@ impl App {
     fn finish_jobs(&mut self) {
         let mut finished = Vec::new();
         self.jobs.retain(|j| {
-            let p = j.progress.lock().unwrap();
-            if p.finished {
-                finished.push((
-                    j.kind,
-                    j.dest.clone(),
-                    p.done_items,
-                    p.errors.clone(),
-                    p.created.clone(),
-                    p.unrecoverable.clone(),
-                    p.locked.clone(),
-                ));
-                false
-            } else {
-                true
+            let mut p = j.progress.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !p.finished {
+                return true;
             }
+            // The job is gone after this, so its results are taken rather than copied.
+            finished.push((
+                j.kind,
+                j.dest.clone(),
+                p.done_items,
+                std::mem::take(&mut p.errors),
+                std::mem::take(&mut p.created),
+                std::mem::take(&mut p.unrecoverable),
+                std::mem::take(&mut p.locked),
+            ));
+            false
         });
+        if finished.is_empty() {
+            return;
+        }
+        self.reload_all();
+        for pane in &mut self.panes {
+            pane.view_key = None;
+        }
         for (kind, dest, n, errors, created, unrecoverable, locked) in finished {
-            self.reload_all();
-            for i in 0..self.panes.len() {
-                self.panes[i].view_key = None;
-            }
             let processed = n.saturating_sub(unrecoverable.len() + locked.len());
             self.locked.extend(locked.into_iter().map(|(archive, wrong)| (archive, dest.clone(), wrong)));
             if errors.iter().all(|e| e.ends_with("Cancelled")) && !errors.is_empty() {
@@ -1743,13 +1746,11 @@ impl App {
             }
             // Select what arrived in the destination pane.
             if let Some(d) = dest {
-                for i in 0..self.panes.len() {
-                    if self.panes[i].path() == d {
-                        self.panes[i].arriving = created.iter().cloned().collect();
-                        self.panes[i].selected = created.iter().cloned().collect();
-                        if let Some(first) = created.first() {
-                            self.panes[i].pending_select = Some(first.clone());
-                        }
+                for pane in self.panes.iter_mut().filter(|pane| pane.path() == d) {
+                    pane.arriving = created.iter().cloned().collect();
+                    pane.selected = pane.arriving.clone();
+                    if let Some(first) = created.first() {
+                        pane.pending_select = Some(first.clone());
                     }
                 }
             }
@@ -2309,7 +2310,7 @@ impl App {
         }
         self.st
             .tags
-            .get(&p.to_string_lossy().to_string())
+            .get(p.to_string_lossy().as_ref())
             .and_then(|&t| crate::theme::TAGS.get(t as usize))
             .map(|(_, c)| hex(c))
     }

@@ -566,14 +566,13 @@ pub fn list() -> Vec<DriveInfo> {
             total: 0, free: 0, network: false, remote: String::new(), eject: None });
     }
     // GNOME/GIO network mounts (smb://, sftp://, Google Drive…) live under $XDG_RUNTIME_DIR/gvfs
-    if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR") {
-        if let Ok(rd) = std::fs::read_dir(PathBuf::from(rt).join("gvfs")) {
+    if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR")
+        && let Ok(rd) = std::fs::read_dir(PathBuf::from(rt).join("gvfs")) {
             for de in rd.flatten() {
                 let name = de.file_name().to_string_lossy().into_owned();
                 out.push(DriveInfo { path: de.path(), name: name.clone(), label: String::new(), total: 0, free: 0, network: true, remote: name, eject: None });
             }
         }
-    }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }

@@ -155,9 +155,8 @@ fn look(triangles: &[Triangle], framing: &Framing, view: ModelView, side: f32, f
     let centre = [size[0] as f32 / 2.0 + view.pan[0] as f32 * shrink, size[1] as f32 / 2.0 + view.pan[1] as f32 * shrink];
     let camera = camera(TURN - view.turn as f32 / 10.0, TILT + view.tilt as f32 / 10.0);
     let picture = paint(triangles, framing, &camera, scale, centre, size, if view.fine { SAMPLES } else { 1 }, workers());
-    if !view.fine && let Some(times) = *PAINT_TIMES.lock().unwrap() {
-        if let Some(pace) = PACE.lock().unwrap().as_mut() { pace.learn(times.map(|t| t as f32)); }
-    }
+    if !view.fine && let Some(times) = *PAINT_TIMES.lock().unwrap()
+        && let Some(pace) = PACE.lock().unwrap().as_mut() { pace.learn(times.map(|t| t as f32)); }
     picture
 }
 
@@ -292,7 +291,7 @@ fn fill_band(parts: &[Part], band: usize, pixels: &mut [u8], first_row: usize, w
         }
     }
     for (y, row) in pixels.chunks_exact_mut(width * 4).enumerate() {
-        for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+        for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let (mut sum, mut covered) = (0u32, 0u32);
             for sy in 0..samples {
                 for sx in 0..samples {

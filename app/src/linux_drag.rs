@@ -13,9 +13,8 @@ pub fn handoff(app: &mut crate::app::App, ctx: &egui::Context, frame: &eframe::F
     if let Some(display) = wayland {
         // Bind before the first press: start_drag needs that press's serial.
         if let Err(e) = wayland::init(display, ctx) { log_once(e); }
-        if let Some(ok) = wayland::take_outcome() {
-            if ok { app.acts.push(crate::app::Act::Refresh); }
-        }
+        if let Some(ok) = wayland::take_outcome()
+            && ok { app.acts.push(crate::app::Act::Refresh); }
     }
     // Whether the window held the keyboard at some point of the drag in progress.
     static HAD_FOCUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -254,11 +253,9 @@ fn destination(c: &impl Connection, root: Window, aware: Atom) -> Result<(Window
     for _ in 0..64 {
         if current == NONE { break; }
         let property = c.get_property(false, current, aware, AtomEnum::ATOM, 0, 1)?.reply();
-        if let Ok(p) = property {
-            if let Some(version) = p.value32().and_then(|mut v| v.next()) {
-                if version >= 3 { found = (current, version.min(5)); }
-            }
-        }
+        if let Ok(p) = property
+            && let Some(version) = p.value32().and_then(|mut v| v.next())
+                && version >= 3 { found = (current, version.min(5)); }
         let Ok(p) = c.query_pointer(current)?.reply() else { break };
         current = p.child;
     }

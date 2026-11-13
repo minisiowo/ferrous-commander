@@ -55,9 +55,8 @@ fn parse_desktop(path: PathBuf, text: &str) -> Option<(AppEntry, Vec<String>)> {
     let mut in_entry = false;
     for line in text.lines().map(str::trim).filter(|l| !l.starts_with('#')) {
         if line.starts_with('[') { in_entry = line == "[Desktop Entry]"; continue; }
-        if in_entry {
-            if let Some((key, value)) = line.split_once('=') { fields.insert(key, value); }
-        }
+        if in_entry
+            && let Some((key, value)) = line.split_once('=') { fields.insert(key, value); }
     }
     if fields.get("Type") != Some(&"Application")
         || fields.get("Hidden") == Some(&"true") || fields.get("NoDisplay") == Some(&"true")
@@ -99,13 +98,12 @@ fn discover(roots: &[PathBuf]) -> Vec<(AppEntry, Vec<String>)> {
                 let id = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('/', "-");
                 // User overrides, including Hidden=true tombstones, shadow system launchers.
                 if !seen.insert(id) { continue; }
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    if let Some(app) = parse_desktop(path, &text) { apps.push(app); }
-                }
+                if let Ok(text) = std::fs::read_to_string(&path)
+                    && let Some(app) = parse_desktop(path, &text) { apps.push(app); }
             }
         }
     }
-    apps.sort_by(|(a, _), (b, _)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    apps.sort_by_cached_key(|(a, _)| a.name.to_lowercase());
     apps
 }
 
