@@ -293,8 +293,8 @@ without discarding its entries.
 ### Layouts
 
 A layout keeps the open panels under a name: each panel's tabs and active tab, how the
-panels are split and their sizes, and which panel is active. Save one with **+ New layout**
-at the foot of the sidebar or the **New layout from the current panels…** command (`>` in the
+panels are split and their sizes, and which panel is active. Save one with **+ Save layout**
+at the foot of the sidebar or the **Save layout…** command (`>` in the
 quick palette; it has no shortcut until you give it one). The **Layouts** card appears in the
 sidebar once there is a layout; click one to replace the panels with it, or find it by name
 with Alt+P. Right-click a layout to update it to the current panels, rename or delete it; `>` in

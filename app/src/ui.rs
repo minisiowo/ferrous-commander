@@ -856,7 +856,7 @@ impl App {
                         self.dialog = Some(Dialog::NewGroup { name: String::new(), focus: true });
                     }
                     let tip = self.tip("Saves the open panels, their tabs and layout under a name", Command::SaveLayout);
-                    if self.add_button(ui, right, "New layout", &tip).clicked() {
+                    if self.add_button(ui, right, "Save layout", &tip).clicked() {
                         self.dialog = Some(self.new_layout_dialog());
                     }
                     ui.add_space(8.0);

@@ -348,10 +348,11 @@ fn a_layout_whose_folder_is_gone_opens_on_what_is_left() {
 fn the_sidebar_actions_and_every_on_off_setting_are_in_the_palette() {
     let (ctx, mut app, root) = palette_app("palette_complete");
     ctrl_shift_p(&ctx, &mut app);
-    word(&ctx, &mut app, "new");
-    let titles = palette(&app).titles();
-    for wanted in ["New layout from the current panels…", "New favorites group…"] {
-        assert!(titles.contains(&wanted), "{wanted} in {titles:?}");
+    for (typed, wanted) in [("save lay", "Save layout…"), ("new", "New favorites group…")] {
+        key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+        ctrl_shift_p(&ctx, &mut app);
+        word(&ctx, &mut app, typed);
+        assert!(palette(&app).titles().contains(&wanted), "{wanted} in {:?}", palette(&app).titles());
     }
     for toggle in crate::settings::TOGGLES.iter().filter(|t| t.here() && t.id != "WindowEffect") {
         key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
