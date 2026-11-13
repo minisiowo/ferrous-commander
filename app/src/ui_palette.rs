@@ -238,7 +238,9 @@ fn offered(command: Command) -> bool {
         && !matches!(command, Command::Open | Command::OpenNewTab | Command::FolderIn | Command::FolderOut
             | Command::Left | Command::Right | Command::ParentOrErase | Command::Escape | Command::Filter
             | Command::Visual | Command::VisualCopy | Command::VisualCut | Command::EditPathSelected
-            | Command::Palette | Command::PaletteCommands)
+            | Command::Palette | Command::PaletteCommands
+            // The "Sidebar" setting stands for it, with its state and this shortcut.
+            | Command::ToggleSidebar)
         && (command != Command::Properties || cfg!(target_os = "linux"))
 }
 
@@ -341,7 +343,8 @@ impl App {
         let no_effect = true;
         for (k, toggle) in crate::settings::TOGGLES.iter().enumerate() {
             if !toggle.here() || (toggle.id == "WindowEffect" && no_effect) { continue; }
-            items.push(Item::new(toggle.title, "Settings", "", Pick::Setting(Setting::Toggle(k))).state(toggle.get(st)));
+            let keys = if toggle.id == "Sidebar" { self.key_hint(Command::ToggleSidebar).unwrap_or_default() } else { String::new() };
+            items.push(Item::new(toggle.title, "Settings", keys, Pick::Setting(Setting::Toggle(k))).state(toggle.get(st)));
         }
         let settings = [
             (Setting::FontLarger, "Larger text", None),

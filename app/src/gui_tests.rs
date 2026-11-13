@@ -1949,6 +1949,36 @@ fn a_hidden_sidebar_section_leaves_no_extra_gap() {
 }
 
 #[test]
+fn the_sidebar_moves_to_the_right_with_the_same_gaps_and_hides_by_shortcut() {
+    use crate::app::DropTarget;
+    use crate::settings::{FavGroup, SidebarSection};
+    let root = std::env::temp_dir().join(format!("fc_sidebar_right_{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(root.join("unused.png")));
+    app.st.favorites = vec![FavGroup::new("One", vec![root.clone()]), FavGroup::new("Two", vec![root.clone()])];
+    app.st.sidebar_order = vec![SidebarSection::Favorite(0), SidebarSection::Favorite(1)];
+    app.st.sidebar_right = true;
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    let cards: Vec<Rect> = app.drop_zones.iter()
+        .filter_map(|(r, t)| matches!(t, DropTarget::Favorites { .. }).then_some(*r)).collect();
+    assert_eq!(cards.len(), 2);
+    let panes_right = app.pane_rects.iter().map(|(_, r)| r.max.x).fold(f32::NEG_INFINITY, f32::max);
+    let panes_left = app.pane_rects.iter().map(|(_, r)| r.min.x).fold(f32::INFINITY, f32::min);
+    assert!(cards[0].min.x > panes_right, "the sidebar is right of the file panels");
+    assert_eq!(cards[0].min.x - panes_right, cards[1].min.y - cards[0].max.y, "the same gap as between the cards");
+    assert_eq!(panes_left, f32::from(crate::ui::SIDEBAR_GAP), "the window's left edge keeps the outer gap");
+
+    key(&ctx, &mut app, Key::B, Modifiers::COMMAND | Modifiers::SHIFT);
+    assert!(!app.st.show_sidebar, "Ctrl+Shift+B hides it");
+    for _ in 0..2 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    assert!(!app.drop_zones.iter().any(|(_, t)| matches!(t, DropTarget::Favorites { .. })));
+    key(&ctx, &mut app, Key::B, Modifiers::COMMAND | Modifiers::SHIFT);
+    assert!(app.st.show_sidebar, "and brings it back");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn closing_a_panel_closes_a_dialog_that_could_point_at_it() {
     let (ctx, mut app, root) = neovim_app("close_panel");
     app.open_panel(0, None);

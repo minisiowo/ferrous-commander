@@ -150,7 +150,7 @@ pub enum Command {
     Delete, DeleteForever, NewFile, NewFolder, Refresh, Terminal, Properties,
     NewTab, CloseTab, ReopenTab, NextTab, PrevTab,
     NewPanel, ClosePanel, ToggleSplit, FocusLeft, FocusRight, FocusUp, FocusDown, NextPanel, PrevPanel, SaveLayout, NewGroup,
-    Escape, ToggleHidden, TogglePreview, Palette, PaletteCommands,
+    Escape, ToggleHidden, TogglePreview, ToggleSidebar, Palette, PaletteCommands,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -244,6 +244,7 @@ pub const COMMANDS: &[Info] = &[
     c(K::Escape, "escape", "Clear filter, then selection", View, &["escape"], &[], false),
     c(K::ToggleHidden, "toggle_hidden", "Hidden files", View, &["ctrl+h"], &["leader u h"], false),
     c(K::TogglePreview, "toggle_preview", "Preview", View, &["space"], &["leader u p"], false),
+    c(K::ToggleSidebar, "toggle_sidebar", "Sidebar", View, &["ctrl+shift+b"], &["leader e"], false),
     c(K::Palette, "palette", "Quick palette: go to a folder or file", View, &["alt+p"], &[], false),
     c(K::PaletteCommands, "palette_commands", "Quick palette: commands and settings", View, &["ctrl+shift+p"], &[], false),
 ];
@@ -1102,6 +1103,8 @@ mod tests {
         assert_eq!(last(&map, Mode::Normal, "ctrl+b f x"), run(Command::Delete));
         assert_eq!(last(&map, Mode::Normal, "ctrl+o"), run(Command::Back));
         assert_eq!(last(&map, Mode::Normal, "ctrl+i"), run(Command::Forward));
+        assert_eq!(last(&map, Mode::Normal, "ctrl+b e"), run(Command::ToggleSidebar));
+        assert_eq!(last(&map, Mode::Standard, "ctrl+shift+b"), run(Command::ToggleSidebar));
     }
 
     #[test]
@@ -1112,7 +1115,8 @@ mod tests {
         assert_eq!(last(&map, Mode::Normal, "ctrl+b z"), Outcome::Cancelled);
         assert_eq!(last(&map, Mode::Standard, "ctrl+b"), Outcome::Unbound, "only in the Neovim layer");
         assert_eq!(hints(&map, Mode::Normal, "ctrl+b"), [
-            ("b".to_string(), "+Tabs".to_string()), ("f".to_string(), "+Files".to_string()),
+            ("b".to_string(), "+Tabs".to_string()), ("e".to_string(), "Sidebar".to_string()),
+            ("f".to_string(), "+Files".to_string()),
             ("u".to_string(), "+View".to_string()), ("w".to_string(), "+Panels".to_string()),
         ]);
     }

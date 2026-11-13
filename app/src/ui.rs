@@ -18,16 +18,16 @@ use crate::theme::{Palette, blend, hex};
 pub const SIDEBAR_W: f32 = crate::defaults::SIDEBAR_WIDTH;
 /// The space around every block, square or round: the sidebar's cards and the file panels,
 /// between one another and from the window's edges.
-const SIDEBAR_GAP: i8 = 8;
-/// The part of that space beside the file panels which belongs to them.
-const PANELS_LEFT: i8 = 2;
+pub(crate) const SIDEBAR_GAP: i8 = 8;
+/// The part of that space between the sidebar and the file panels which belongs to the panels.
+const PANELS_SIDE: i8 = 2;
 /// The row of tools at the sidebar's foot: seven buttons 26 wide, 2 apart. It cannot narrow.
 const SIDEBAR_TOOLS_W: f32 = 7.0 * 26.0 + 6.0 * 2.0;
 
 /// The narrowest the sidebar goes: its tools and the room around them. Asking egui for
 /// less would let the edge be dragged further than the sidebar can follow.
 pub(crate) fn sidebar_min() -> f32 {
-    SIDEBAR_TOOLS_W + f32::from(SIDEBAR_GAP + SIDEBAR_GAP - PANELS_LEFT)
+    SIDEBAR_TOOLS_W + f32::from(SIDEBAR_GAP + SIDEBAR_GAP - PANELS_SIDE)
 }
 pub const TOOLBAR_H: f32 = 36.0;
 pub const DETAILS_H: f32 = crate::defaults::DETAILS_HEIGHT;
@@ -373,16 +373,22 @@ impl App {
 
         // The same gap lies around the blocks as between the sidebar's cards.
         let around = SIDEBAR_GAP;
-        let panels_left = if self.st.show_sidebar { PANELS_LEFT } else { SIDEBAR_GAP };
+        let right = self.st.sidebar_right;
+        // The panels own only part of the gap on the sidebar's side; the sidebar has the rest.
+        let beside = if self.st.show_sidebar { PANELS_SIDE } else { SIDEBAR_GAP };
+        let (panels_left, panels_right) = if right { (around, beside) } else { (beside, around) };
         if self.st.show_sidebar {
-            egui::Panel::left("sidebar")
+            // One id on both sides, so the sidebar keeps its width when it moves.
+            let panel = if right { egui::Panel::right("sidebar") } else { egui::Panel::left("sidebar") };
+            let (outer, inner) = (SIDEBAR_GAP, SIDEBAR_GAP - beside);
+            panel
                 .resizable(true)
                 .default_size(SIDEBAR_W)
                 .size_range(sidebar_min()..=420.0)
                 .show_separator_line(false)
                 .frame(Frame::NONE.fill(pal.backdrop()).inner_margin(Margin {
-                    left: SIDEBAR_GAP,
-                    right: SIDEBAR_GAP - panels_left,
+                    left: if right { inner } else { outer },
+                    right: if right { outer } else { inner },
                     // Level with the file panels.
                     top: around,
                     bottom: 0,
@@ -392,7 +398,7 @@ impl App {
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(pal.backdrop()).inner_margin(Margin {
                 left: panels_left,
-                right: around,
+                right: panels_right,
                 top: around,
                 bottom: around,
             }))
@@ -734,6 +740,10 @@ impl App {
                     self.preview_window = !self.preview_window;
                 }
             }
+            Command::ToggleSidebar => {
+                self.st.show_sidebar = !self.st.show_sidebar;
+                self.mark_dirty();
+            }
             Command::Palette => self.open_palette(crate::palette::Mode::Places),
             Command::PaletteCommands => self.open_palette(crate::palette::Mode::Commands),
         }
@@ -786,7 +796,8 @@ impl App {
                     let button = icon_button(ui, "◑", "Theme", open, &pal);
                     egui::Popup::menu(&button)
                         .id(menu_id)
-                        .align(egui::RectAlign::TOP_START)
+                        // Opening towards the window's middle, whichever side the sidebar is on.
+                        .align(if self.st.sidebar_right { egui::RectAlign::TOP_END } else { egui::RectAlign::TOP_START })
                         .gap(4.0)
                         .show(|ui| self.theme_menu(ui));
                     if icon_button(ui, "#tree", "Tree files: click arrows to expand, double-click folders to open", self.st.tree_files, &pal).clicked() {

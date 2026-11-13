@@ -136,6 +136,8 @@ pub struct Settings {
     pub tree_files: bool,
     pub show_preview: bool,
     pub show_sidebar: bool,
+    /// The sidebar sits on the window's right instead of its left.
+    pub sidebar_right: bool,
     pub sorting: Sorting,
     /// Per-folder sorting.
     pub folder_sorting: HashMap<String, Sorting>,
@@ -191,6 +193,7 @@ impl Default for Settings {
             // The preview is collapsed in the person's window; the settings bring it back.
             show_preview: false,
             show_sidebar: true,
+            sidebar_right: false,
             sorting: Sorting::default(),
             folder_sorting: HashMap::new(),
             favorites: default_favorites(),
@@ -300,6 +303,7 @@ pub const TOGGLES: &[Toggle] = {
     use ToggleSection::*;
     &[
         Toggle::new("Sidebar", "Sidebar", "Show sidebar", Workspace, |s| &mut s.show_sidebar),
+        Toggle::new("SidebarRight", "Sidebar on the right", "Show sidebar on the right", Workspace, |s| &mut s.sidebar_right),
         Toggle::new("PreviewPane", "Preview and details pane", "Show preview / file details pane", Workspace, |s| &mut s.show_preview),
         Toggle::new("Tree", "Tree of files", "Tree of files: expand folders in place with their arrows", Files, |s| &mut s.tree_files),
         Toggle::new("Extensions", "File extensions", "Show file extensions", Files, |s| &mut s.show_extensions),
