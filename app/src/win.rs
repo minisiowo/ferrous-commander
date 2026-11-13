@@ -14,6 +14,15 @@ unsafe extern "system" {
     fn QueryDosDeviceW(name: *const u16, target: *mut u16, max: u32) -> u32;
     fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
     fn SetDefaultDllDirectories(flags: u32) -> i32;
+    fn GetCurrentThread() -> isize;
+    fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+}
+
+/// Lowers the calling thread's CPU and disk priority, for long work nobody waits for.
+pub fn background_thread() {
+    const THREAD_MODE_BACKGROUND_BEGIN: i32 = 0x0001_0000;
+    // SAFETY: the pseudo handle of the current thread is always valid.
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN); }
 }
 #[link(name = "user32")]
 unsafe extern "system" {

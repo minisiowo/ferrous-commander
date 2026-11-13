@@ -384,7 +384,7 @@ pub struct App {
     pub cache: HashMap<PathBuf, Listing>,
     folders: FolderLoader,
     /// Lets background threads wake the window as soon as a result is ready.
-    wake: Wake,
+    pub(crate) wake: Wake,
     pub drives: Vec<DriveInfo>,
     drives_at: Option<Instant>,
     pub clip: Option<(std::sync::Arc<[PathBuf]>, bool)>,
@@ -393,6 +393,8 @@ pub struct App {
     pub jobs: Vec<Job>,
     pub toasts: Vec<Toast>,
     open_with_pending: Vec<(PathBuf, Task<Result<(), String>>)>,
+    /// The names below home, for the quick palette.
+    pub index: crate::index::Service,
     /// Drives being ejected: mount point and name, and the eventual outcome.
     pub ejecting: Vec<((PathBuf, String), Task<Result<String, String>>)>,
     pub dialog: Option<Dialog>,
@@ -571,6 +573,8 @@ impl App {
             jobs: Vec::new(),
             toasts: Vec::new(),
             open_with_pending: Vec::new(),
+            // Tests index only the folders they name, never the real home.
+            index: if cfg!(test) { crate::index::Service::new(None, None) } else { crate::index::Service::for_home() },
             ejecting: Vec::new(),
             dialog: None,
             locked: VecDeque::new(),
@@ -817,6 +821,8 @@ impl App {
         for ((mount, name), result) in take_finished(&mut self.ejecting) {
             self.finish_eject(&mount, &name, result.unwrap_or_else(|| Err("Ejecting stopped unexpectedly".into())));
         }
+        self.index.sync(self.st.index_home, &self.st.index_roots, &self.st.index_exclude, &self.wake);
+        self.index.poll(&self.wake);
         for (path, result) in take_finished(&mut self.open_with_pending) {
             self.report_opened(&path, result.unwrap_or_else(|| Err("Application handler stopped unexpectedly".into())));
         }

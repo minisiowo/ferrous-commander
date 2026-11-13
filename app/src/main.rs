@@ -9,6 +9,7 @@ mod compress;
 mod drives;
 mod folder_loader;
 mod fsx;
+mod index;
 #[cfg(windows)]
 mod file_transfer;
 mod icons;

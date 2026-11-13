@@ -194,6 +194,17 @@ impl Default for Sorting {
     }
 }
 
+/// Whether a name alone makes an item hidden, as `make_entry` decides it before attributes.
+pub fn hidden_by_name(name: &str, is_dir: bool) -> bool {
+    is_hidden_by_rule(name, split_ext(name, is_dir))
+}
+
+/// The hidden attribute Windows keeps apart from the name.
+#[cfg(windows)]
+pub fn hidden_by_attribute(md: &std::fs::Metadata) -> bool {
+    attr_flags(md).0
+}
+
 fn is_hidden_by_rule(name: &str, ext: &str) -> bool {
     let l = name.to_lowercase();
     if HIDDEN_NAMES.iter().any(|n| n.eq_ignore_ascii_case(&l))

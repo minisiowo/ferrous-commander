@@ -385,3 +385,133 @@ fn a_file_opened_before_is_offered_from_any_folder() {
     assert_eq!(palette(&app).titles()[0], "budget.ods", "found without searching below the folder");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Indexes `root` as if it were home, and waits until the index is there.
+fn index_root(ctx: &egui::Context, app: &mut App, root: &std::path::Path) {
+    app.st.index_roots = vec![root.to_path_buf()];
+    let generation = app.index.generation;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.index.generation == generation {
+        assert!(std::time::Instant::now() < deadline, "the index was never built");
+        frame(ctx, app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn wait_for_index_answer(ctx: &egui::Context, app: &mut App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !palette(app).index_answered() {
+        assert!(std::time::Instant::now() < deadline, "the index never answered");
+        frame(ctx, app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    settle(ctx, app);
+}
+
+#[test]
+fn the_index_finds_what_lies_outside_the_folder_in_view() {
+    let (ctx, mut app, root) = palette_app("palette_index");
+    let far = root.join("dir05").join("inner").join("far-away notes.txt");
+    std::fs::write(&far, b"x").unwrap();
+    app.navigate(0, root.join("dir09"), None);
+    index_root(&ctx, &mut app, &root);
+    alt_p(&ctx, &mut app);
+    word(&ctx, &mut app, "far-away");
+    wait_for_palette(&ctx, &mut app, "far-away notes.txt");
+    key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !app.panes[0].selected.contains(&far) {
+        assert!(std::time::Instant::now() < deadline, "the file was never selected");
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn what_is_below_the_folder_in_view_comes_before_the_same_name_elsewhere() {
+    let (ctx, mut app, root) = palette_app("palette_index_rank");
+    for dir in ["dir05", "dir09"] {
+        std::fs::write(root.join(dir).join("inner").join("budget.txt"), b"x").unwrap();
+    }
+    app.navigate(0, root.join("dir09"), None);
+    index_root(&ctx, &mut app, &root);
+    alt_p(&ctx, &mut app);
+    word(&ctx, &mut app, "budget");
+    wait_for_index_answer(&ctx, &mut app);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while palette(&app).searching() {
+        assert!(std::time::Instant::now() < deadline, "the search never ended");
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    settle(&ctx, &mut app);
+    assert_eq!(palette(&app).titles(), ["budget.txt", "budget.txt"]);
+    key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
+    settle(&ctx, &mut app);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.panes[0].selected.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "nothing was selected");
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(app.panes[0].selected.contains(&root.join("dir09").join("inner").join("budget.txt")));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn what_was_deleted_since_indexing_is_not_offered() {
+    let (ctx, mut app, root) = palette_app("palette_index_gone");
+    let gone = root.join("dir05").join("inner").join("deleted-report.txt");
+    std::fs::write(&gone, b"x").unwrap();
+    app.navigate(0, root.join("dir09"), None);
+    index_root(&ctx, &mut app, &root);
+    std::fs::remove_file(&gone).unwrap();
+    alt_p(&ctx, &mut app);
+    word(&ctx, &mut app, "deleted-report");
+    wait_for_index_answer(&ctx, &mut app);
+    assert!(palette(&app).titles().is_empty(), "{:?}", palette(&app).titles());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_place_gone_since_it_was_listed_is_reported_and_not_gone_to() {
+    let (ctx, mut app, root) = palette_app("palette_index_vanish");
+    let gone = root.join("dir05").join("inner").join("vanishing.txt");
+    std::fs::write(&gone, b"x").unwrap();
+    app.navigate(0, root.join("dir09"), None);
+    index_root(&ctx, &mut app, &root);
+    alt_p(&ctx, &mut app);
+    word(&ctx, &mut app, "vanishing");
+    wait_for_palette(&ctx, &mut app, "vanishing.txt");
+    std::fs::remove_file(&gone).unwrap();
+    key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
+    settle(&ctx, &mut app);
+    assert_eq!(app.panes[0].path(), root.join("dir09").as_path());
+    assert!(app.toasts.iter().any(|t| t.text.contains("no longer exists")));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn with_the_index_off_only_the_folder_in_view_is_searched() {
+    let (ctx, mut app, root) = palette_app("palette_index_off");
+    std::fs::write(root.join("dir05").join("inner").join("elsewhere.txt"), b"x").unwrap();
+    app.navigate(0, root.join("dir09"), None);
+    index_root(&ctx, &mut app, &root);
+    app.st.index_home = false;
+    settle(&ctx, &mut app);
+    assert!(app.index.index().is_none(), "turning it off lets the index go");
+    alt_p(&ctx, &mut app);
+    word(&ctx, &mut app, "elsewhere");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    while palette(&app).searching() {
+        assert!(std::time::Instant::now() < deadline, "the search never ended");
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    settle(&ctx, &mut app);
+    assert!(palette(&app).titles().is_empty(), "{:?}", palette(&app).titles());
+    std::fs::remove_dir_all(root).unwrap();
+}

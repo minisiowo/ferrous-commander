@@ -3,6 +3,8 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use egui::text::{CCursor, CCursorRange, CharIndex, LayoutJob, TextFormat, TextWrapping};
@@ -37,6 +39,55 @@ const DEEP_REFRESH: Duration = Duration::from_millis(250);
 const DEEP_MAX_AGE: Duration = Duration::from_secs(2);
 /// A folder larger than this is left to the search below it, which is limited.
 const HERE_MAX: usize = 20_000;
+/// A pause in typing before the index is searched: short, as it answers at once.
+const INDEX_DELAY: Duration = Duration::from_millis(60);
+/// Items taken from the index for the palette to rank.
+const INDEX_RESULTS_MAX: usize = 500;
+/// The best of them are looked up on the disk, so that what was deleted is not offered.
+const INDEX_CHECKED: usize = 30;
+
+/// An item the index found.
+#[derive(Clone)]
+struct Indexed {
+    path: PathBuf,
+    name: String,
+    is_dir: bool,
+    /// How far below its indexed folder.
+    depth: u8,
+}
+
+/// A search of the index for the text it was started with.
+struct Global {
+    needle: String,
+    hidden: bool,
+    /// The index it was made on.
+    generation: u64,
+    task: Option<(crate::background::Task<Vec<Indexed>>, Arc<AtomicBool>)>,
+    found: Vec<Indexed>,
+    /// Counts the results taken, so the items are made again only when they change.
+    version: u64,
+}
+
+impl Drop for Global {
+    fn drop(&mut self) {
+        if let Some((_, cancel)) = &self.task { cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
+    }
+}
+
+/// Searches `index` on another thread, then drops what no longer exists among the best.
+fn search_index(index: Arc<crate::index::Index>, needle: String, hidden: bool, wake: &crate::background::Wake) -> (crate::background::Task<Vec<Indexed>>, Arc<AtomicBool>) {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stop = cancel.clone();
+    let task = crate::background::Task::spawn(wake, move || {
+        let found = index.search(&needle, hidden, INDEX_RESULTS_MAX, &stop);
+        found.into_iter().enumerate()
+            .map(|(k, f)| (k, Indexed { path: index.path(f.node), name: index.name(f.node).into_owned(), is_dir: index.is_dir(f.node), depth: index.depth(f.node) }))
+            .filter(|(k, item)| *k >= INDEX_CHECKED || std::fs::symlink_metadata(&item.path).is_ok())
+            .map(|(_, item)| item)
+            .collect()
+    });
+    (task, cancel)
+}
 
 /// A search of the folders below the active one, for the text it was started with.
 struct Deep {
@@ -130,11 +181,12 @@ pub struct PaletteUi {
     gathered_len: usize,
     /// The paths of the items gathered, which the search must not list again.
     known: HashSet<PathBuf>,
-    /// How much of the search's results the items hold: found now, and kept from before.
-    deep_shown: (usize, usize),
     /// The text the rows were ranked for.
     ranked: Option<String>,
     deep: Option<Deep>,
+    global: Option<Global>,
+    /// What the items after those gathered were made from: the search below, and the index.
+    extra_shown: ((usize, usize), u64),
     /// When the text last changed.
     changed: Instant,
     /// The selected row must be scrolled into view.
@@ -155,9 +207,10 @@ impl PaletteUi {
             gathered: None,
             gathered_len: 0,
             known: HashSet::new(),
-            deep_shown: (0, 0),
             ranked: None,
             deep: None,
+            global: None,
+            extra_shown: ((0, 0), 0),
             changed: Instant::now(),
             reveal: false,
             cursor_to_end: true,
@@ -179,6 +232,12 @@ impl PaletteUi {
     #[cfg(test)]
     pub fn titles(&self) -> Vec<&str> {
         self.rows.iter().map(|row| row.item.title.as_str()).collect()
+    }
+
+    /// Whether the index has answered for the text as it is.
+    #[cfg(test)]
+    pub fn index_answered(&self) -> bool {
+        self.global.as_ref().is_some_and(|g| g.task.is_none() && g.needle == palette::split(&self.query).1)
     }
 
     #[cfg(test)]
@@ -249,6 +308,74 @@ impl PaletteUi {
     }
 }
 
+impl PaletteUi {
+    /// Starts, keeps or drops the search of the index, and takes its results when they come.
+    fn search_index(&mut self, mode: Mode, needle: &str, hidden: bool, service: &crate::index::Service, wake: &crate::background::Wake, ctx: &egui::Context) {
+        let wanted = mode == Mode::Places && needle.chars().count() >= 2 && !crate::ui_list::typed_path(needle).is_absolute();
+        let Some(index) = service.index().filter(|_| wanted) else {
+            self.global = None;
+            return;
+        };
+        let current = self.global.as_ref().is_some_and(|g| g.needle == needle && g.hidden == hidden && g.generation == service.generation);
+        if !current {
+            let waited = self.changed.elapsed();
+            if waited < INDEX_DELAY {
+                ctx.request_repaint_after(INDEX_DELAY - waited);
+            } else {
+                // What the last search found stays listed until this one answers; ranking
+                // leaves out what does not match the new text.
+                let (found, version) = self.global.as_mut().map_or((Vec::new(), 0), |old| (std::mem::take(&mut old.found), old.version));
+                let task = search_index(index.clone(), needle.to_string(), hidden, wake);
+                self.global = Some(Global { needle: needle.to_string(), hidden, generation: service.generation, task: Some(task), found, version });
+            }
+        }
+        if let Some(global) = &mut self.global && let Some((task, _)) = &global.task {
+            match task.poll() {
+                crate::background::Polled::Running => {}
+                crate::background::Polled::Done(found) => {
+                    global.found = found;
+                    global.version += 1;
+                    global.task = None;
+                }
+                crate::background::Polled::Lost => global.task = None,
+            }
+        }
+    }
+}
+
+/// Adds what the index found to `items`, but for what they already hold. Items below the
+/// folder in view or a recent one come first; deeper ones later.
+fn add_global_items(found: &[Indexed], here: &Path, recent: &[&Path], items: &mut Vec<Item>) {
+    let listed: HashSet<PathBuf> = items.iter().filter_map(|item| match &item.pick {
+        Pick::Folder(path) | Pick::File(path) => Some(path.clone()),
+        Pick::Typed(text) => Some(PathBuf::from(text)),
+        _ => None,
+    }).collect();
+    let home = dirs::home_dir();
+    for f in found {
+        if listed.contains(&f.path) { continue; }
+        let near = if !is_computer(here) && f.path.starts_with(here) {
+            30
+        } else if recent.iter().any(|folder| f.path.starts_with(folder)) {
+            15
+        } else {
+            0
+        };
+        let pick = if f.is_dir { Pick::Folder(f.path.clone()) } else { Pick::File(f.path.clone()) };
+        let detail = f.path.parent().map_or_else(String::new, |parent| tilde(parent, home.as_deref()));
+        items.push(Item::new(f.name.clone(), detail, "", pick).boost(-40 + near - 8 * f.depth.min(8) as i32));
+    }
+}
+
+/// A path below home written from `~`, as shells do.
+fn tilde(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 /// What happened in the palette this frame, acted on once it has been drawn.
 enum Verdict {
     Close,
@@ -296,6 +423,7 @@ fn parent_text(path: &Path) -> String {
 
 impl App {
     pub(crate) fn open_palette(&mut self, mode: Mode) {
+        self.index.freshen(&self.wake);
         self.palette = Some(PaletteUi::new(mode));
     }
 
@@ -426,6 +554,7 @@ impl App {
         let here = self.panes[self.active].path().to_path_buf();
         let listing = self.cache.get(&here).map_or(0, |l| l.generation);
         palette.search_below(mode, needle, &here, self.st.show_hidden, listing, ctx);
+        palette.search_index(mode, needle, self.st.show_hidden, &self.index, &self.wake, ctx);
         let key = (mode, here, listing);
         let mut gathered = palette.gathered.as_ref() == Some(&key);
         if !gathered {
@@ -435,15 +564,21 @@ impl App {
                 Mode::History => (self.history_items(), HashSet::new()),
             };
             palette.gathered_len = palette.items.len();
-            palette.deep_shown = (0, 0);
+            palette.extra_shown = ((0, 0), 0);
             palette.gathered = Some(key);
         }
-        // Only what the search found is made again as it finds more: the folder can be large.
+        // Only what the searches found is made again as they find more: the folder can be large.
         let deep_now = palette.deep.as_ref().map_or((0, 0), |deep| (deep.found.len(), deep.before.len()));
-        if palette.deep_shown != deep_now {
+        let extra_now = (deep_now, palette.global.as_ref().map_or(0, |global| global.version));
+        if palette.extra_shown != extra_now {
             palette.items.truncate(palette.gathered_len);
             if let Some(deep) = &palette.deep { add_deep_items(deep, &palette.known, &mut palette.items); }
-            palette.deep_shown = deep_now;
+            if let Some(global) = &palette.global {
+                let here = self.panes[self.active].path();
+                let recent: Vec<&Path> = self.visited().take(20).map(PathBuf::as_path).collect();
+                add_global_items(&global.found, here, &recent, &mut palette.items);
+            }
+            palette.extra_shown = extra_now;
             gathered = false;
         }
         let typed = palette.ranked.as_deref() != Some(query.as_str());
@@ -699,8 +834,16 @@ impl App {
             None => "",
         };
         let small = FontId::proportional(11.0);
+        let indexing = match self.index.state() {
+            crate::index::State::Building(count) if palette.mode() == Mode::Places => {
+                ui.ctx().request_repaint_after(Duration::from_millis(250));
+                Some(count)
+            }
+            _ => None,
+        };
         let status = match &palette.deep {
             Some(deep) if deep.run.is_some() => "Searching… · ".to_string(),
+            _ if let Some(count) = indexing => format!("Indexing {count} items… · "),
             Some(deep) if deep.limited => "More found than listed, type more · ".to_string(),
             Some(deep) if deep.skipped == 1 => "1 folder could not be read · ".to_string(),
             Some(deep) if deep.skipped > 1 => format!("{} folders could not be read · ", deep.skipped),
@@ -722,6 +865,15 @@ impl App {
             self.mark_dirty();
         }
         let mut stays = false;
+        if let Pick::Folder(path) | Pick::File(path) = &pick && std::fs::symlink_metadata(path).is_err() {
+            // Found earlier, by the index or as recent: it has gone since.
+            self.toast(crate::app::ToastKind::Error, format!("{} no longer exists", fsx::display_name(path)));
+            self.st.recent_files.retain(|f| f != path);
+            self.st.recent_folders.retain(|f| f != path);
+            self.mark_dirty();
+            self.index.invalidate(&self.wake);
+            return false;
+        }
         match pick {
             Pick::Folder(path) if ctrl => self.acts.push(Act::OpenNewTab(i, path, true)),
             Pick::Folder(path) if shift => self.acts.push(Act::OpenOtherPane(i, path)),

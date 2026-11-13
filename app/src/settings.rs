@@ -149,6 +149,12 @@ pub struct Settings {
     pub recent_files: Vec<PathBuf>,
     /// Commands and settings last used from the quick palette, by their ids.
     pub palette_recent: Vec<String>,
+    /// Alt+P finds items anywhere below the home folder from an index of their names.
+    pub index_home: bool,
+    /// Folders indexed besides home.
+    pub index_roots: Vec<PathBuf>,
+    /// Folder names whose contents are not indexed, besides node_modules and __pycache__.
+    pub index_exclude: Vec<String>,
     pub show_history: bool,
     pub show_cloud: bool,
     pub sidebar_order: Vec<SidebarSection>,
@@ -203,6 +209,9 @@ impl Default for Settings {
             recent_folders: Vec::new(),
             recent_files: Vec::new(),
             palette_recent: Vec::new(),
+            index_home: true,
+            index_roots: Vec::new(),
+            index_exclude: Vec::new(),
             show_history: true,
             show_cloud: true,
             sidebar_order: Vec::new(),
@@ -313,6 +322,8 @@ pub const TOGGLES: &[Toggle] = {
         Toggle::new("AgeColors", "Colours by file age", "Color the Age column by file age", Files, |s| &mut s.age_colors),
         Toggle::new("FoldersOnTop", "Folders above files", "Keep folders above files", Files, |s| &mut s.sorting.folders_on_top),
         Toggle::new("Mebibytes", "Sizes in MiB, as in Windows Explorer", "Use old definition of Megabyte (MiB, as in Windows Explorer)", Files, |s| &mut s.mebibytes),
+        Toggle::new("IndexHome", "Index the home folder for Alt+P", "Index file names in the home folder, so Alt+P finds them anywhere", Files, |s| &mut s.index_home)
+            .hint("Names only, kept in the cache folder. Hidden folders, caches and node_modules are left out."),
         Toggle::new("HistoryCard", "History in the sidebar", "Show History", Sidebar, |s| &mut s.show_history),
         Toggle::new("CloudCard", "Cloud folders in the sidebar", "Show automatically detected Cloud folders", Sidebar, |s| &mut s.show_cloud)
             .hint("Cloud lists local sync folders, detected from OneDrive settings and folder names in your home directory."),
@@ -450,6 +461,7 @@ impl Settings {
         s.history.retain(text);
         s.recent_folders.retain(text);
         s.recent_files.retain(text);
+        s.index_roots.retain(text);
         for group in s.favorites.iter_mut().chain(&mut s.removed_groups) { group.paths.retain(text); }
         for pane in s.panes.iter_mut().chain(s.layouts.iter_mut().flat_map(|p| p.panes.iter_mut())) {
             pane.make_storable();
