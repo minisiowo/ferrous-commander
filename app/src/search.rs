@@ -52,6 +52,8 @@ pub struct Criteria {
     pub modified_before: Option<SystemTime>,
     pub excluded_dirs: Vec<String>,
     pub limit: usize,
+    /// Stay on the file system of the root: no other disks, network mounts or `/proc`.
+    pub same_device: bool,
 }
 
 impl Default for Criteria {
@@ -69,6 +71,7 @@ impl Default for Criteria {
             modified_before: None,
             excluded_dirs: Vec::new(),
             limit: RESULTS_MAX,
+            same_device: false,
         }
     }
 }
@@ -234,7 +237,8 @@ impl Filter {
             })
     }
 
-    fn matches(&self, e: &Entry) -> bool {
+    /// `parent` is the folder of `e` below the root, as the words are written.
+    fn matches(&self, e: &Entry, parent: &str) -> bool {
         let c = &self.criteria;
         let kind_matches = match c.file_type {
             FileType::All => true,
@@ -274,8 +278,42 @@ impl Filter {
         } else {
             e.lname()
         };
-        self.words.iter().all(|word| name.contains(word))
+        words_match(&self.words, name, parent)
     }
+
+    /// The folder below the root, in the case the words are written in.
+    fn parent_text(&self, folder: &Path, root: &Path) -> String {
+        let text = folder.strip_prefix(root).unwrap_or(folder).to_string_lossy();
+        if self.criteria.case_sensitive { text.into_owned() } else { text.to_lowercase() }
+    }
+}
+
+/// Whether every word is in the name or in the folders above it, and one of them at least in
+/// the name, so that a word matching a folder does not list everything inside it.
+pub fn words_match<S: AsRef<str>>(words: &[S], name: &str, parent: &str) -> bool {
+    let mut in_name = words.is_empty();
+    for word in words {
+        let word = word.as_ref();
+        if name.contains(word) {
+            in_name = true;
+        } else if !parent.contains(word) {
+            return false;
+        }
+    }
+    in_name
+}
+
+/// The device a folder lies on, where the system tells it cheaply.
+#[cfg(unix)]
+fn device(md: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(md.dev())
+}
+
+/// Windows reaches other volumes only through mount points, which are links and never walked.
+#[cfg(not(unix))]
+fn device(_md: &std::fs::Metadata) -> Option<u64> {
+    None
 }
 
 fn problem(progress: &Mutex<Progress>, path: PathBuf, error: std::io::Error) {
@@ -307,6 +345,11 @@ pub fn start(root: PathBuf, criteria: Criteria, ctx: egui::Context) -> Result<Se
         let mut last = Instant::now();
         let mut outcome = Outcome::Complete;
         let mut limit_reason = None;
+        let root_device = if filter.criteria.same_device {
+            std::fs::metadata(&root).ok().as_ref().and_then(device)
+        } else {
+            None
+        };
         'walk: while let Some(folder) = folders.pop_front() {
             if cancel.load(Ordering::Relaxed) {
                 outcome = Outcome::Cancelled;
@@ -320,6 +363,7 @@ pub fn start(root: PathBuf, criteria: Criteria, ctx: egui::Context) -> Result<Se
                     continue;
                 }
             };
+            let parent = filter.parent_text(&folder, &root);
             for entry in entries {
                 if cancel.load(Ordering::Relaxed) {
                     outcome = Outcome::Cancelled;
@@ -353,11 +397,12 @@ pub fn start(root: PathBuf, criteria: Criteria, ctx: egui::Context) -> Result<Se
                 } else {
                     metadata
                 };
+                let elsewhere = root_device.is_some() && device(&metadata) != root_device;
                 let e = fsx::make_entry(path, &metadata);
                 if (!filter.criteria.hidden && e.hidden) || filter.excluded(&e, &root) {
                     continue;
                 }
-                if e.is_dir && !link && filter.criteria.recursive {
+                if e.is_dir && !link && !elsewhere && filter.criteria.recursive {
                     if folders.len() >= FOLDERS_MAX {
                         outcome = Outcome::Limited;
                         limit_reason = Some("Too many pending folders; narrow the search scope");
@@ -365,7 +410,7 @@ pub fn start(root: PathBuf, criteria: Criteria, ctx: egui::Context) -> Result<Se
                     }
                     folders.push_back(e.path.clone());
                 }
-                if filter.matches(&e) {
+                if filter.matches(&e, &parent) {
                     let mut found = results.lock().unwrap();
                     found.push(e);
                     if found.len() >= filter.criteria.limit {
@@ -407,13 +452,15 @@ pub fn search_within(
     limit: Option<usize>,
     ctx: egui::Context,
 ) -> Search {
-    // These callers supply plain text and a fixed, valid limit.
+    // These callers supply plain text and a fixed, valid limit. A quick search stays on the
+    // disk it starts on: other disks are listed but not walked.
     start(
         root,
         Criteria {
             name: query,
             hidden,
             limit: limit.unwrap_or(RESULTS_MAX),
+            same_device: true,
             ..Default::default()
         },
         ctx,

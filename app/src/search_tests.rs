@@ -205,3 +205,48 @@ fn sizes_accept_decimal_and_binary_units() {
         assert!(parse_size(bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn words_may_name_the_folders_above_but_one_must_name_the_item() {
+    let root = Fixture::new();
+    let wanted = root.file("Projekt/src/main.rs", 1);
+    root.file("other/src/main.rs", 1);
+    root.file("Projekt/notes.txt", 1);
+    let run = search(root.0.clone(), "projekt main".into(), false, egui::Context::default());
+    assert_eq!(wait(&run).0, [wanted], "a word may match a folder above");
+    let run = search(root.0.clone(), "projekt".into(), false, egui::Context::default());
+    assert_eq!(wait(&run).0, [root.0.join("Projekt")], "a folder's name alone does not list its contents");
+    // Only the folders below the root count: the root's own path does not match anything.
+    let name = root.0.file_name().unwrap().to_string_lossy().to_lowercase();
+    let run = search(root.0.clone(), format!("{name} main"), false, egui::Context::default());
+    assert!(wait(&run).0.is_empty());
+    let run = start(
+        root.0.clone(),
+        Criteria { name: "PROJEKT main".into(), case_sensitive: true, ..Default::default() },
+        egui::Context::default(),
+    )
+    .unwrap();
+    assert!(wait(&run).0.is_empty(), "case counts in the folder too when asked");
+}
+
+#[test]
+fn staying_on_one_device_still_walks_the_whole_tree_on_it() {
+    let root = Fixture::new();
+    let deep = root.file("a/b/c/deep.txt", 1);
+    let run = start(
+        root.0.clone(),
+        Criteria { name: "deep".into(), same_device: true, ..Default::default() },
+        egui::Context::default(),
+    )
+    .unwrap();
+    assert_eq!(wait(&run).0, [deep]);
+}
+
+#[test]
+fn words_match_needs_every_word_and_one_in_the_name() {
+    assert!(words_match(&["a", "b"], "ab", ""));
+    assert!(words_match(&["src", "main"], "main.rs", "proj/src"));
+    assert!(!words_match(&["src"], "main.rs", "proj/src"));
+    assert!(!words_match(&["x", "main"], "main.rs", "proj/src"));
+    assert!(words_match::<&str>(&[], "anything", ""));
+}

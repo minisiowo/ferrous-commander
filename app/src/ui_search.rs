@@ -124,6 +124,8 @@ impl Inputs {
                     .map(String::from)
                     .collect(),
                 limit: self.limit,
+                // The search window goes wherever its folder leads, mounted disks too.
+                same_device: false,
             },
         ))
     }

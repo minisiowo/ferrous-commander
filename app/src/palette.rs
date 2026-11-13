@@ -219,7 +219,10 @@ fn find(word: &[char], text: &[char]) -> Option<(i32, Vec<usize>)> {
     find_run(word, text).or_else(|| find_scattered(word, text))
 }
 
-/// Every word must be found: in the title, or failing that as a run in the detail.
+/// Every word must be found: in the title, or failing that as a run in the detail. Where the
+/// detail is the folder of a place, one word at least must be in the name, as in the search
+/// below the folder (`search::words_match`): a word matching only the folder would otherwise
+/// list everything in it.
 fn matched(item: &Item, words: &[Box<[char]>]) -> Option<(i32, Vec<usize>, Vec<usize>)> {
     let (mut score, mut title, mut detail) = (item.boost, Vec::new(), Vec::new());
     for word in words {
@@ -232,6 +235,8 @@ fn matched(item: &Item, words: &[Box<[char]>]) -> Option<(i32, Vec<usize>, Vec<u
             detail.extend(places);
         }
     }
+    let place = matches!(item.pick, Pick::Folder(_) | Pick::File(_) | Pick::Typed(_));
+    if place && title.is_empty() { return None; }
     Some((score, title, detail))
 }
 
@@ -308,6 +313,7 @@ mod tests {
         assert_eq!((hit.item, hit.title.as_slice()), (0, &[0, 1, 2][..]));
         assert_eq!(hit.detail, (9..16).collect::<Vec<_>>(), "the run in the folder is marked");
         assert!(titles(&items, "src fro").is_empty(), "in the folder the letters must be together");
+        assert!(titles(&items, "home").is_empty(), "the folder alone does not list what is in it");
     }
 
     #[test]

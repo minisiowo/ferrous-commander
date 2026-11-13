@@ -27,7 +27,8 @@ pub const RECENT_FOLDERS_MAX: usize = 200;
 const RECENT_PICKS_MAX: usize = 8;
 /// A pause in typing before the folders below the current one are searched.
 const DEEP_DELAY: Duration = Duration::from_millis(140);
-const DEEP_RESULTS_MAX: usize = 300;
+/// Enough that a deep match is not lost behind shallow ones; the list shows the best of them.
+const DEEP_RESULTS_MAX: usize = 2000;
 /// How often what the search has found joins the list while it runs, so rows do not shuffle on every find.
 const DEEP_REFRESH: Duration = Duration::from_millis(250);
 /// Reuse a completed search while typing quickly, then recheck the disk on the next query.
@@ -44,6 +45,10 @@ struct Deep {
     /// When the disk was last searched; narrowing must not renew this timestamp.
     completed: Instant,
     complete: bool,
+    /// It stopped at `DEEP_RESULTS_MAX`, so more would match.
+    limited: bool,
+    /// Folders it could not read.
+    skipped: usize,
     /// `None` once it has ended and `found` holds all of its results.
     run: Option<ops::Search>,
     found: Vec<Entry>,
@@ -75,6 +80,8 @@ impl Deep {
         if done {
             let progress = run.progress.lock().unwrap();
             self.complete = progress.outcome == crate::search::Outcome::Complete && progress.skipped == 0;
+            self.limited = progress.outcome == crate::search::Outcome::Limited;
+            self.skipped = progress.skipped;
             drop(progress);
             self.completed = Instant::now();
             self.before.clear();
@@ -86,6 +93,21 @@ impl Deep {
     fn whole(&self) -> bool {
         self.complete && self.run.is_none() && self.found.len() < DEEP_RESULTS_MAX
     }
+
+    /// Whether `e` is what a search for `words` below the root would find.
+    fn finds(&self, e: &Entry, words: &[String]) -> bool {
+        let parent = e.path.parent().map(|p| p.strip_prefix(&self.root).unwrap_or(p).to_string_lossy().to_lowercase()).unwrap_or_default();
+        crate::search::words_match(words, e.lname(), &parent)
+    }
+}
+
+/// Whether every result of a search for `now` is among those of a search for `was`. Each new
+/// word must contain an old one, so a word found in the name or folder means the old one was
+/// too, and each old word must be in a new one, so that nothing old is left unmatched.
+fn narrows(was: &[String], now: &[String]) -> bool {
+    !was.is_empty()
+        && now.iter().all(|word| was.iter().any(|old| word.contains(old.as_str())))
+        && was.iter().all(|old| now.iter().any(|word| word.contains(old.as_str())))
 }
 
 /// An item as listed, with the characters of its title that matched what was typed.
@@ -190,14 +212,18 @@ impl PaletteUi {
                 // Text that only narrows a search that ended needs no second walk of the disk:
                 // what it would find is among what was found.
                 let narrowed = old.as_ref().is_some_and(|old| {
-                    old.whole() && old.generation == generation && old.completed.elapsed() < DEEP_MAX_AGE && search_words(&old.needle).iter().all(|was| words.iter().any(|word| word.contains(was.as_str())))
+                    old.whole() && old.generation == generation && old.completed.elapsed() < DEEP_MAX_AGE && narrows(&search_words(&old.needle), &words)
                 });
                 // The same rule as the search's own, so nothing kept is what it would not find.
                 let completed = old.as_ref().map_or_else(Instant::now, |old| old.completed);
                 let mut seen = HashSet::new();
-                let kept: Vec<Entry> = old.map(|old| old.found.into_iter().chain(old.before)
-                        .filter(|e| words.iter().all(|word| e.lname().contains(word.as_str())) && seen.insert(e.path.clone()))
-                        .collect())
+                let kept: Vec<Entry> = old.map(|old| {
+                        let finds: Vec<bool> = old.found.iter().chain(&old.before).map(|e| old.finds(e, &words)).collect();
+                        old.found.into_iter().chain(old.before).zip(finds)
+                            .filter(|(e, finds)| *finds && seen.insert(e.path.clone()))
+                            .map(|(e, _)| e)
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let (run, found, before) = if narrowed {
                     (None, kept, Vec::new())
@@ -205,7 +231,7 @@ impl PaletteUi {
                     let run = ops::search_within(root.to_path_buf(), needle.to_string(), show_hidden, Some(DEEP_RESULTS_MAX), ctx.clone());
                     (Some(run), Vec::new(), kept)
                 };
-                self.deep = Some(Deep { needle: needle.to_string(), root: root.to_path_buf(), hidden: show_hidden, generation, completed, complete: narrowed, run, found, before, taken: Instant::now() });
+                self.deep = Some(Deep { needle: needle.to_string(), root: root.to_path_buf(), hidden: show_hidden, generation, completed, complete: narrowed, limited: false, skipped: 0, run, found, before, taken: Instant::now() });
             }
         }
         if let Some(deep) = &mut self.deep && let Some(run) = &deep.run {
@@ -668,8 +694,14 @@ impl App {
             None => "",
         };
         let small = FontId::proportional(11.0);
-        let searching = palette.deep.as_ref().is_some_and(|deep| deep.run.is_some());
-        let next = format!("{}Tab {} · Esc close", if searching { "Searching… · " } else { "" }, palette.mode().next(false).label().to_lowercase());
+        let status = match &palette.deep {
+            Some(deep) if deep.run.is_some() => "Searching… · ".to_string(),
+            Some(deep) if deep.limited => "More found than listed, type more · ".to_string(),
+            Some(deep) if deep.skipped == 1 => "1 folder could not be read · ".to_string(),
+            Some(deep) if deep.skipped > 1 => format!("{} folders could not be read · ", deep.skipped),
+            _ => String::new(),
+        };
+        let next = format!("{status}Tab {} · Esc close", palette.mode().next(false).label().to_lowercase());
         let drawn = p.text(pos2(r.max.x - 12.0, r.center().y), Align2::RIGHT_CENTER, next, small.clone(), pal.text_weak);
         let hint = fit_text(&p, hint, &small, drawn.min.x - r.min.x - 28.0);
         p.text(pos2(r.min.x + 12.0, r.center().y), Align2::LEFT_CENTER, hint, small, pal.text_weak);
@@ -771,6 +803,32 @@ mod tests {
             assert!(Instant::now() < deadline, "search did not finish");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn only_text_that_cannot_find_more_reuses_a_search() {
+        let w = |text: &str| search_words(text);
+        assert!(narrows(&w("re"), &w("rep")));
+        assert!(narrows(&w("re port"), &w("rep porter")));
+        assert!(!narrows(&w("re"), &w("re main")), "a new word may match the folder of what was not found");
+        assert!(!narrows(&w("rep"), &w("re")));
+        assert!(!narrows(&w(""), &w("re")));
+    }
+
+    #[test]
+    fn a_word_for_the_folder_finds_what_is_inside_it() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("fc_palette_path_{}_{stamp}", std::process::id()));
+        std::fs::create_dir_all(root.join("Projekt/src")).unwrap();
+        std::fs::create_dir_all(root.join("other")).unwrap();
+        std::fs::write(root.join("Projekt/src/main.rs"), b"x").unwrap();
+        std::fs::write(root.join("other/main.rs"), b"x").unwrap();
+        let ctx = egui::Context::default();
+        let mut palette = PaletteUi::new(Mode::Places);
+        finish(&mut palette, &root, "projekt main", 1, &ctx);
+        let found: Vec<_> = palette.deep.as_ref().unwrap().found.iter().map(|e| e.path.clone()).collect();
+        assert_eq!(found, [root.join("Projekt/src/main.rs")]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
