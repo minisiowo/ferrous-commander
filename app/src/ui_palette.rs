@@ -23,7 +23,7 @@ use crate::ui::fit_text;
 const ROWS_MAX: usize = 100;
 /// How many rows show without scrolling.
 const ROWS_SHOWN: usize = 10;
-/// Space between the list and the lines above and below it.
+/// Space between the list and the footer's line, so that a lit row does not touch it.
 const LIST_GAP: f32 = 5.0;
 /// Folders visited, kept for the palette's history. The sidebar shows only the latest few.
 pub const RECENT_FOLDERS_MAX: usize = 200;
@@ -698,10 +698,6 @@ impl App {
                         }));
                         if palette.query != before { palette.changed = Instant::now(); }
                         self.palette_rows(&mut palette, ui.ctx());
-                        let line = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover()).0;
-                        ui.painter().rect_filled(line, CornerRadius::ZERO, pal.border);
-                        // Room between the lines and the rows, so that a lit row does not touch them.
-                        ui.add_space(LIST_GAP);
                         let gutter = ui.spacing().scroll.allocated_width().max(6.0);
                         let list_width = width - gutter;
                         egui::ScrollArea::vertical().max_height(row_h * ROWS_SHOWN as f32).show(ui, |ui| {
@@ -715,12 +711,13 @@ impl App {
                                 }
                                 // The rows scrolled out of sight cost their text's layout for nothing.
                                 if !ui.is_rect_visible(r) { continue; }
-                                // Match the scrollbar gutter on the left, with or without rounded corners.
-                                let lit = Rect::from_min_max(r.min + vec2(gutter, 0.0), r.max);
-                                if selected {
-                                    ui.painter().rect_filled(lit, pal.corner(), pal.selection());
-                                } else if response.hovered() {
-                                    ui.painter().rect_filled(lit, pal.corner(), pal.hover);
+                                let fill = if selected { Some(pal.selection()) } else if response.hovered() { Some(pal.hover) } else { None };
+                                if let Some(fill) = fill {
+                                    // Across the scrollbar's gutter too, up to the window's edge.
+                                    let lit = Rect::from_min_size(r.min, vec2(width, r.height()));
+                                    let mut painter = ui.painter().clone();
+                                    painter.set_clip_rect(Rect::from_x_y_ranges(lit.x_range(), ui.clip_rect().y_range()));
+                                    painter.rect_filled(lit, CornerRadius::ZERO, fill);
                                 }
                                 self.palette_row(ui, r, &palette.rows[n], selected);
                                 if response.clicked() {
