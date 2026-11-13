@@ -23,6 +23,8 @@ use crate::ui::fit_text;
 const ROWS_MAX: usize = 100;
 /// How many rows show without scrolling.
 const ROWS_SHOWN: usize = 10;
+/// Space between the list and the lines above and below it.
+const LIST_GAP: f32 = 5.0;
 /// Folders visited, kept for the palette's history. The sidebar shows only the latest few.
 pub const RECENT_FOLDERS_MAX: usize = 200;
 /// Files opened, kept for the palette.
@@ -698,6 +700,8 @@ impl App {
                         self.palette_rows(&mut palette, ui.ctx());
                         let line = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover()).0;
                         ui.painter().rect_filled(line, CornerRadius::ZERO, pal.border);
+                        // Room between the lines and the rows, so that a lit row does not touch them.
+                        ui.add_space(LIST_GAP);
                         let gutter = ui.spacing().scroll.allocated_width().max(6.0);
                         let list_width = width - gutter;
                         egui::ScrollArea::vertical().max_height(row_h * ROWS_SHOWN as f32).show(ui, |ui| {
@@ -730,6 +734,7 @@ impl App {
                                 ui.painter().text(pos2(r.min.x + 38.0, r.center().y), Align2::LEFT_CENTER, text, FontId::proportional(self.st.font_size), pal.text_weak);
                             }
                         });
+                        ui.add_space(LIST_GAP);
                         self.palette_footer(ui, width, &palette);
                     });
             });
