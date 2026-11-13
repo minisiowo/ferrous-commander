@@ -2,17 +2,21 @@
 
 use std::time::Duration;
 
-use egui::{Align2, Button, Event, Frame, Margin, RichText, Stroke, TextEdit, vec2};
+use egui::{Align2, Button, Event, FontId, Frame, Margin, RichText, Stroke, TextEdit, vec2};
 
 use crate::app::{App, is_computer};
 use crate::chrome::{self, Icon, Panel};
 use crate::keymap::{self, COMMANDS, Chord, Command, FolderKey, Group, Info, Input, Layer, MAX_KEYS, Mode, Target};
-use crate::theme::hex;
+use crate::theme::{blend, hex};
 use crate::ui::symbol_button;
 
 /// How long an unfinished shortcut waits before its next keys are shown, so that
 /// typing a familiar sequence quickly never flashes a panel.
 pub const WHICH_KEY_DELAY: Duration = Duration::from_millis(300);
+
+fn key_font() -> FontId {
+    FontId::monospace(12.0)
+}
 
 /// A command of the user's own: a folder and where it opens.
 pub struct FolderForm {
@@ -149,33 +153,51 @@ impl App {
         let hints = self.keys.hints(self.key_mode(self.active), self.matcher.keys());
         if hints.is_empty() { return; }
         let pal = self.pal;
-        const COLUMN: f32 = 230.0;
         let screen = ctx.input(|i| i.content_rect());
-        let columns = (((screen.width() - 60.0) / COLUMN).floor() as usize).clamp(1, 2).min(hints.len());
-        let rows = hints.len().div_ceil(columns);
         let pending = self.matcher.pending();
+        let measure = |text: &str, font: FontId| ctx.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font, pal.text).size().x);
+        // Every key and every label takes the widest one's room, so the columns line up.
+        let key_w = hints.iter().map(|h| measure(&h.key.label(), key_font())).fold(0.0, f32::max);
+        let label_w = hints.iter().map(|h| measure(&h.label, FontId::proportional(12.0))).fold(0.0, f32::max);
+        const GAP: f32 = 8.0;
+        const COLUMN_GAP: f32 = 20.0;
+        let cell_w = key_w + GAP + label_w;
+        let columns = (((screen.width() - 60.0 + COLUMN_GAP) / (cell_w + COLUMN_GAP)).floor() as usize).clamp(1, 3).min(hints.len());
+        let rows = hints.len().div_ceil(columns);
         egui::Area::new(egui::Id::unique("which_key"))
             .anchor(Align2::RIGHT_BOTTOM, vec2(-10.0, -34.0))
             .order(egui::Order::Foreground)
             .interactable(false)
             .show(ctx, |ui| {
-                Frame::NONE.fill(pal.panel).corner_radius(pal.corner_large())
-                    .stroke(Stroke::new(1.0, pal.border)).inner_margin(Margin::symmetric(12, 8))
+                Frame::NONE.fill(pal.content_fill()).corner_radius(pal.corner_large())
+                    .stroke(Stroke::new(1.0, blend(pal.panel, pal.text_weak, 0.2))).inner_margin(Margin::symmetric(10, 7))
                     .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.set_width(columns as f32 * cell_w + (columns - 1) as f32 * COLUMN_GAP);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(pending).monospace().color(pal.text_weak));
-                            ui.label(RichText::new("Esc cancels").size(11.0).color(pal.text_weak));
+                            ui.label(RichText::new(pending).font(key_font()).color(pal.accent));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new("esc").size(11.0).color(pal.text_weak));
+                            });
                         });
-                        ui.add_space(4.0);
-                        egui::Grid::new("which_key_grid").num_columns(columns * 2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
+                        ui.add_space(3.0);
+                        egui::Grid::new("which_key_grid").num_columns(columns).spacing(vec2(COLUMN_GAP, 2.0))
+                            .min_col_width(cell_w).show(ui, |ui| {
                             for row in 0..rows {
                                 for column in 0..columns {
                                     match hints.get(row + column * rows) {
                                         Some(hint) => {
-                                            ui.label(RichText::new(hint.key.label()).monospace().color(pal.text));
-                                            ui.add(egui::Label::new(RichText::new(&hint.label).color(pal.text_weak)).wrap_mode(egui::TextWrapMode::Extend));
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = GAP;
+                                                let key = RichText::new(hint.key.label()).font(key_font()).color(pal.text_important);
+                                                ui.add_sized(vec2(key_w, 16.0), egui::Label::new(key));
+                                                // A key that leads on to more keys stands out from one that runs a command.
+                                                let text = RichText::new(&hint.label).size(12.0)
+                                                    .color(if hint.more { pal.accent } else { pal.text_weak });
+                                                ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend));
+                                            });
                                         }
-                                        None => { ui.label(""); ui.label(""); }
+                                        None => { ui.label(""); }
                                     }
                                 }
                                 ui.end_row();

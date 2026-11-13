@@ -560,11 +560,11 @@ impl Keymap {
                 let key = binding.keys[prefix.len()];
                 if hints.iter().any(|h| h.key == key) { continue; }
                 let same: Vec<&&Binding> = next.iter().filter(|b| b.keys[prefix.len()] == key).collect();
-                let label = match same.as_slice() {
-                    [only] if only.keys.len() == prefix.len() + 1 => only.target.short_label(),
-                    many => self.group_name(mode, prefix, key).map_or_else(|| format!("+{} more", many.len()), str::to_string),
+                let (label, more) = match same.as_slice() {
+                    [only] if only.keys.len() == prefix.len() + 1 => (only.target.short_label(), false),
+                    many => (self.group_name(mode, prefix, key).map_or_else(|| format!("+{} more", many.len()), str::to_string), true),
                 };
-                hints.push(Hint { key, label });
+                hints.push(Hint { key, label, more });
             }
             hints.sort_by_key(|h| h.key.label().to_lowercase());
             return hints;
@@ -621,6 +621,8 @@ pub enum Outcome {
 pub struct Hint {
     pub key: Chord,
     pub label: String,
+    /// The key starts longer shortcuts rather than finishing one.
+    pub more: bool,
 }
 
 /// How far a sequence of keys has got in the active layers.
