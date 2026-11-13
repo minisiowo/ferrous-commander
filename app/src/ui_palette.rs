@@ -43,8 +43,6 @@ const HERE_MAX: usize = 20_000;
 const INDEX_DELAY: Duration = Duration::from_millis(60);
 /// Items taken from the index for the palette to rank.
 const INDEX_RESULTS_MAX: usize = 500;
-/// The best of them are looked up on the disk, so that what was deleted is not offered.
-const INDEX_CHECKED: usize = 30;
 
 /// An item the index found.
 #[derive(Clone)]
@@ -74,16 +72,16 @@ impl Drop for Global {
     }
 }
 
-/// Searches `index` on another thread, then drops what no longer exists among the best.
+/// Searches `index` on another thread, then drops what no longer exists: a look-up each, cheap
+/// beside the typing it follows, and any of them may end up at the top of the list.
 fn search_index(index: Arc<crate::index::Index>, needle: String, hidden: bool, wake: &crate::background::Wake) -> (crate::background::Task<Vec<Indexed>>, Arc<AtomicBool>) {
     let cancel = Arc::new(AtomicBool::new(false));
     let stop = cancel.clone();
     let task = crate::background::Task::spawn(wake, move || {
         let found = index.search(&needle, hidden, INDEX_RESULTS_MAX, &stop);
-        found.into_iter().enumerate()
-            .map(|(k, f)| (k, Indexed { path: index.path(f.node), name: index.name(f.node).into_owned(), is_dir: index.is_dir(f.node), depth: index.depth(f.node) }))
-            .filter(|(k, item)| *k >= INDEX_CHECKED || std::fs::symlink_metadata(&item.path).is_ok())
-            .map(|(_, item)| item)
+        found.into_iter()
+            .map(|f| Indexed { path: index.path(f.node), name: index.name(f.node).into_owned(), is_dir: index.is_dir(f.node), depth: index.depth(f.node) })
+            .filter(|item| !stop.load(std::sync::atomic::Ordering::Relaxed) && std::fs::symlink_metadata(&item.path).is_ok())
             .collect()
     });
     (task, cancel)
@@ -841,12 +839,12 @@ impl App {
             }
             _ => None,
         };
-        let status = match &palette.deep {
-            Some(deep) if deep.run.is_some() => "Searching… · ".to_string(),
-            _ if let Some(count) = indexing => format!("Indexing {count} items… · "),
-            Some(deep) if deep.limited => "More found than listed, type more · ".to_string(),
-            Some(deep) if deep.skipped == 1 => "1 folder could not be read · ".to_string(),
-            Some(deep) if deep.skipped > 1 => format!("{} folders could not be read · ", deep.skipped),
+        let status = match (&palette.deep, indexing) {
+            (Some(deep), _) if deep.run.is_some() => "Searching… · ".to_string(),
+            (_, Some(count)) => format!("Indexing {count} items… · "),
+            (Some(deep), _) if deep.limited => "More found than listed, type more · ".to_string(),
+            (Some(deep), _) if deep.skipped == 1 => "1 folder could not be read · ".to_string(),
+            (Some(deep), _) if deep.skipped > 1 => format!("{} folders could not be read · ", deep.skipped),
             _ => String::new(),
         };
         let next = format!("{status}Tab {} · Esc close", palette.mode().next(false).label().to_lowercase());
@@ -865,11 +863,12 @@ impl App {
             self.mark_dirty();
         }
         let mut stays = false;
-        if let Pick::Folder(path) | Pick::File(path) = &pick && std::fs::symlink_metadata(path).is_err() {
+        if let Pick::Folder(path) | Pick::File(path) = &pick && !is_computer(path) && std::fs::symlink_metadata(path).is_err() {
             // Found earlier, by the index or as recent: it has gone since.
             self.toast(crate::app::ToastKind::Error, format!("{} no longer exists", fsx::display_name(path)));
             self.st.recent_files.retain(|f| f != path);
             self.st.recent_folders.retain(|f| f != path);
+            self.st.history.retain(|f| f != path);
             self.mark_dirty();
             self.index.invalidate(&self.wake);
             return false;

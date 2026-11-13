@@ -47,7 +47,7 @@ struct Node {
 /// What is left out of the index, beyond links, hidden folders and caches.
 #[derive(Clone, Debug)]
 pub struct Rules {
-    /// Folder names, in lower case, whose contents are not indexed.
+    /// Folder names, in lower case, whose contents are not indexed, besides hidden and dot ones.
     pub exclude: Vec<String>,
     /// Stay on the disk of each root: no other disks, network mounts or `/proc`.
     pub same_device: bool,
@@ -398,7 +398,8 @@ fn list(job: &Job, rules: &Rules) -> Listing {
         let hidden = crate::fsx::hidden_by_name(name, is_dir);
         #[cfg(windows)]
         let hidden = hidden || entry.metadata().is_ok_and(|md| crate::fsx::hidden_by_attribute(&md));
-        let mut descend = is_dir && !link && !hidden && !rules.excluded(name);
+        // Dot folders hold tools' own files (.git, .cargo, .rustup) even where Windows shows them.
+        let mut descend = is_dir && !link && !hidden && !name.starts_with('.') && !rules.excluded(name);
         if descend && rules.same_device && job.device.is_some() {
             descend = entry.metadata().ok().as_ref().and_then(device) == job.device;
         }
@@ -408,14 +409,23 @@ fn list(job: &Job, rules: &Rules) -> Listing {
     listing
 }
 
+/// The roots an index is built for: absolute, stored as text, each once.
+fn usable_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut usable: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        if root.is_absolute() && root.to_str().is_some() && !usable.contains(root) { usable.push(root.clone()); }
+    }
+    usable
+}
+
 /// Indexes everything below `roots` by the rules, on several threads at low priority. `count`
 /// follows the items indexed so far. `None` when cancelled.
 pub fn build(roots: &[PathBuf], rules: &Rules, cancel: &AtomicBool, count: &AtomicUsize) -> Option<Index> {
     let mut index = Index::empty();
     let queue = Arc::new(Queue::default());
     let mut outstanding = 0usize;
-    for root in roots {
-        if root.to_str().is_none() || index.roots.contains(root) || !root.is_absolute() { continue; }
+    for root in usable_roots(roots) {
+        let root = &root;
         let device = std::fs::metadata(root).ok().as_ref().and_then(device);
         let node = index.push_root(root);
         queue.add(vec![Job { node, depth: 0, path: root.clone(), device }]);
@@ -635,7 +645,7 @@ impl Service {
     }
 
     fn roots(&self) -> Vec<PathBuf> {
-        self.home.iter().chain(&self.extra_roots).cloned().collect()
+        usable_roots(&self.home.iter().chain(&self.extra_roots).cloned().collect::<Vec<_>>())
     }
 
     fn rules(&self) -> Rules {
@@ -755,7 +765,8 @@ impl Service {
         let task = Task::spawn(wake, move || {
             let index = build(&roots, &rules, &stop, &counted)?;
             // Saving can fail on a full or read-only disk; the index in memory still serves.
-            if let Some(file) = file { let _ = index.save(&file); }
+            // Turned off meanwhile, it must not leave the file behind.
+            if let Some(file) = file && !stop.load(Ordering::Relaxed) { let _ = index.save(&file); }
             Some(index)
         });
         self.work = Some(Work::Build { task, cancel, count });
@@ -951,6 +962,28 @@ mod tests {
         Index::load(&file).unwrap();
         println!("saved in {saved:?}, loaded in {:?}", started.elapsed());
         std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn the_service_takes_an_index_of_roots_named_twice_and_lets_it_go_when_off() {
+        let tree = Tree::new("service");
+        tree.file("kept.txt");
+        let wake = Wake::default();
+        // Home also among the added folders, as a user might write it, and a relative one.
+        let mut service = Service::new(Some(tree.0.clone()), None);
+        service.sync(true, &[tree.0.clone(), PathBuf::from("relative")], &[], &wake);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !service.poll(&wake) {
+            assert!(std::time::Instant::now() < deadline, "the index never came");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(service.state(), State::Ready);
+        let index = service.index().unwrap();
+        assert_eq!(index.roots(), std::slice::from_ref(&tree.0));
+        assert_eq!(paths(index, "kept", false), [tree.0.join("kept.txt")]);
+        service.sync(false, &[], &[], &wake);
+        assert!(service.index().is_none());
+        assert_eq!(service.state(), State::Off);
     }
 
     #[test]
