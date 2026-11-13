@@ -294,10 +294,11 @@ without discarding its entries.
 
 A profile keeps the open panels under a name: each panel's tabs and active tab, how the
 panels are split and their sizes, and which panel is active. Save one with **+ New profile**
-at the foot of the sidebar or the **Save layout as profile…** command (`>` in the quick
+at the foot of the sidebar or the **New profile from the current layout…** command (`>` in the quick
 palette; it has no shortcut until you give it one). The **Profiles** card appears in the
 sidebar once there is a profile; click one to replace the panels with it, or find it by name
-with Alt+P. Right-click a profile to update it to the current panels, rename or delete it.
+with Alt+P. Right-click a profile to update it to the current panels, rename or delete it; `>` in the quick
+palette also lists **Open profile** and **Update profile** for each one.
 A folder that is gone opens on its nearest parent. Profiles are saved in `settings.lua`
 under `profiles`.
 

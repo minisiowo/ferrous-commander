@@ -149,7 +149,7 @@ pub enum Command {
     SelectAll, Visual, VisualCopy, VisualCut, Copy, Cut, Paste, CopyPath, Rename, Duplicate,
     Delete, DeleteForever, NewFile, NewFolder, Refresh, Terminal, Properties,
     NewTab, CloseTab, ReopenTab, NextTab, PrevTab,
-    NewPanel, ClosePanel, ToggleSplit, FocusLeft, FocusRight, FocusUp, FocusDown, NextPanel, PrevPanel, SaveProfile,
+    NewPanel, ClosePanel, ToggleSplit, FocusLeft, FocusRight, FocusUp, FocusDown, NextPanel, PrevPanel, SaveProfile, NewGroup,
     Escape, ToggleHidden, TogglePreview, Palette, PaletteCommands,
 }
 
@@ -238,7 +238,8 @@ pub const COMMANDS: &[Info] = &[
     c(K::FocusDown, "focus_down", "Panel below", Panels, &["ctrl+alt+down"], &["leader w j", "ctrl+w j"], true),
     c(K::NextPanel, "next_panel", "Next panel", Panels, &["tab"], &["leader w w", "ctrl+w w"], true),
     c(K::PrevPanel, "prev_panel", "Previous panel", Panels, &["shift+tab"], &[], true),
-    c(K::SaveProfile, "save_profile", "Save layout as profile…", Panels, &[], &[], false),
+    c(K::SaveProfile, "save_profile", "New profile from the current layout…", Panels, &[], &[], false),
+    c(K::NewGroup, "new_group", "New favorites group…", Folders, &[], &[], false),
 
     c(K::Escape, "escape", "Clear filter, then selection", View, &["escape"], &[], false),
     c(K::ToggleHidden, "toggle_hidden", "Hidden files", View, &["ctrl+h"], &["leader u h"], false),

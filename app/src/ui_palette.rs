@@ -334,19 +334,16 @@ impl App {
             };
             items.push(Item::new(format!("Sort by {name}"), "This folder", badge, Pick::Sort(by)));
         }
+        // This Windows may have no material to show behind the window.
+        #[cfg(windows)]
+        let no_effect = self.effect_unavailable;
+        #[cfg(not(windows))]
+        let no_effect = true;
+        for (k, toggle) in crate::settings::TOGGLES.iter().enumerate() {
+            if !toggle.here() || (toggle.id == "WindowEffect" && no_effect) { continue; }
+            items.push(Item::new(toggle.title, "Settings", "", Pick::Setting(Setting::Toggle(k))).state(toggle.get(st)));
+        }
         let settings = [
-            (Setting::Sidebar, "Sidebar", Some(st.show_sidebar)),
-            (Setting::PreviewPane, "Preview and details pane", Some(st.show_preview)),
-            (Setting::Tree, "Tree of files", Some(st.tree_files)),
-            (Setting::Extensions, "File extensions", Some(st.show_extensions)),
-            (Setting::AgeColors, "Colours by file age", Some(st.age_colors)),
-            (Setting::FoldersOnTop, "Folders above files", Some(st.sorting.folders_on_top)),
-            (Setting::Mebibytes, "Sizes in MiB, as in Windows Explorer", Some(st.mebibytes)),
-            (Setting::HistoryCard, "History in the sidebar", Some(st.show_history)),
-            (Setting::Rounded, "Rounded corners", Some(st.rounded)),
-            (Setting::Outlines, "Outlines around panels and cards", Some(st.outlines)),
-            (Setting::NeovimKeys, "Neovim-style keys", Some(st.vim_keys)),
-            (Setting::WhichKey, "Hints for the next key of a sequence", Some(st.which_key)),
             (Setting::FontLarger, "Larger text", None),
             (Setting::FontSmaller, "Smaller text", None),
             (Setting::OpenSettings, "Open settings", None),
@@ -360,6 +357,10 @@ impl App {
             let mut item = Item::new(title, "Settings", "", Pick::Setting(setting));
             item.state = state;
             items.push(item);
+        }
+        for (k, profile) in st.profiles.iter().enumerate() {
+            items.push(Item::new(format!("Open profile: {}", profile.name), "Profiles", "", Pick::Profile(k)));
+            items.push(Item::new(format!("Update profile {} to the current layout", profile.name), "Profiles", "", Pick::UpdateProfile(k)));
         }
         if self.selected_theme_file().is_some() {
             items.push(Item::new("Import selected file as a theme", "Settings", "", Pick::Setting(Setting::ImportTheme)));
@@ -598,7 +599,7 @@ impl App {
                 icons::entry(&p, icon, fsx::Kind::from_ext(ext), ext, pal.dark, false);
             }
             Pick::Theme(_) => icons::face(&p, icon, "◑", 13.0, pal.text_weak),
-            Pick::Profile(_) => icons::face(&p, icon, "#layout", 14.0, pal.accent),
+            Pick::Profile(_) | Pick::UpdateProfile(_) => icons::face(&p, icon, "#layout", 14.0, pal.accent),
             Pick::Command(_) | Pick::Setting(_) | Pick::Sort(_) => icons::glyph(&p, icon, "next", pal.text_weak),
         }
         let small = FontId::proportional(11.0);
@@ -693,6 +694,7 @@ impl App {
             }
             Pick::Typed(text) => self.go_to_typed(i, &text, ctrl, shift),
             Pick::Profile(k) => self.acts.push(Act::OpenProfile(k)),
+            Pick::UpdateProfile(k) => self.acts.push(Act::UpdateProfile(k)),
             Pick::Command(command) => {
                 let page = ((self.panes[i].list_h / self.row_h()).floor() as usize).max(1);
                 self.run_command(i, command, false, None, false, page);
@@ -711,18 +713,12 @@ impl App {
                 let st = &mut self.st;
                 stays = ctrl;
                 match setting {
-                    Setting::Extensions => st.show_extensions = !st.show_extensions,
-                    Setting::AgeColors => st.age_colors = !st.age_colors,
-                    Setting::Mebibytes => st.mebibytes = !st.mebibytes,
-                    Setting::FoldersOnTop => st.sorting.folders_on_top = !st.sorting.folders_on_top,
-                    Setting::Sidebar => st.show_sidebar = !st.show_sidebar,
-                    Setting::PreviewPane => st.show_preview = !st.show_preview,
-                    Setting::Tree => st.tree_files = !st.tree_files,
-                    Setting::NeovimKeys => st.vim_keys = !st.vim_keys,
-                    Setting::WhichKey => st.which_key = !st.which_key,
-                    Setting::HistoryCard => st.show_history = !st.show_history,
-                    Setting::Rounded => st.rounded = !st.rounded,
-                    Setting::Outlines => st.outlines = !st.outlines,
+                    Setting::Toggle(k) => {
+                        if let Some(toggle) = crate::settings::TOGGLES.get(k) {
+                            let field = (toggle.field)(st);
+                            *field = !*field;
+                        }
+                    }
                     Setting::FontLarger => st.font_size = (st.font_size + 1.0).min(crate::defaults::MAX_FONT_SIZE),
                     Setting::FontSmaller => st.font_size = (st.font_size - 1.0).max(crate::defaults::MIN_FONT_SIZE),
                     Setting::OpenSettings => {

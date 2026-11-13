@@ -697,6 +697,7 @@ impl App {
             // panels, Hyprland style
             Command::NewPanel => self.acts.push(Act::OpenPanel(i, None)),
             Command::SaveProfile => self.dialog = Some(self.new_profile_dialog()),
+            Command::NewGroup => self.dialog = Some(Dialog::NewGroup { name: String::new(), focus: true }),
             Command::ClosePanel => self.acts.push(Act::ClosePanel(i)),
             Command::ToggleSplit => self.acts.push(Act::ToggleSplit(i)),
             Command::FocusLeft => self.focus_dir(-1.0, 0.0),
@@ -839,7 +840,8 @@ impl App {
                     let half = (row.width() - 2.0) / 2.0;
                     let left = Rect::from_min_size(row.min, vec2(half, row.height()));
                     let right = Rect::from_min_size(pos2(row.max.x - half, row.min.y), vec2(half, row.height()));
-                    if self.add_button(ui, left, "+  New group", "Creates new Favorite group and adds current folder").clicked() {
+                    let group_tip = self.tip("Creates new Favorite group and adds current folder", Command::NewGroup);
+                    if self.add_button(ui, left, "+  New group", &group_tip).clicked() {
                         self.dialog = Some(Dialog::NewGroup { name: String::new(), focus: true });
                     }
                     let tip = self.tip("Saves the open panels, their tabs and layout under a name", Command::SaveProfile);

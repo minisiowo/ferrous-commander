@@ -343,3 +343,28 @@ fn a_profile_whose_folder_is_gone_opens_on_what_is_left() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn the_sidebar_actions_and_every_on_off_setting_are_in_the_palette() {
+    let (ctx, mut app, root) = palette_app("palette_complete");
+    ctrl_shift_p(&ctx, &mut app);
+    word(&ctx, &mut app, "new");
+    let titles = palette(&app).titles();
+    for wanted in ["New profile from the current layout…", "New favorites group…"] {
+        assert!(titles.contains(&wanted), "{wanted} in {titles:?}");
+    }
+    for toggle in crate::settings::TOGGLES.iter().filter(|t| t.here() && t.id != "WindowEffect") {
+        key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+        ctrl_shift_p(&ctx, &mut app);
+        word(&ctx, &mut app, toggle.title);
+        assert_eq!(palette(&app).titles()[0], toggle.title);
+    }
+    key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    let before = app.st.show_cloud;
+    ctrl_shift_p(&ctx, &mut app);
+    word(&ctx, &mut app, "cloud folders");
+    key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
+    settle(&ctx, &mut app);
+    assert_eq!(app.st.show_cloud, !before, "Enter flips it");
+    std::fs::remove_dir_all(root).unwrap();
+}

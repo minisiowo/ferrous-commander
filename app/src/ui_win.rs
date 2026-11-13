@@ -1,5 +1,6 @@
 //! Floating windows: dialogs, preview, search, settings, notifications, drag label, screenshot.
 
+use crate::settings::{TOGGLES, ToggleSection};
 use std::sync::atomic::Ordering;
 
 use egui::{Align2, Frame, Key, Margin, Rect, RichText, Sense, Stroke, pos2, vec2};
@@ -364,6 +365,17 @@ impl App {
         }
     }
 
+    /// The checkboxes of one section, from the list the quick palette shares.
+    fn toggles(&mut self, ui: &mut egui::Ui, section: ToggleSection) {
+        let weak = self.pal.text_weak;
+        for toggle in TOGGLES.iter().filter(|t| t.section == section && t.here() && !t.label.is_empty()) {
+            ui.checkbox((toggle.field)(&mut self.st), toggle.label);
+            if !toggle.hint.is_empty() {
+                ui.label(RichText::new(toggle.hint).color(weak).size(11.0));
+            }
+        }
+    }
+
     pub fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
             return;
@@ -466,17 +478,11 @@ impl App {
             settings_section(ui, "Files & folders", accent);
             let label = self.tip("Show hidden files and folders", Command::ToggleHidden);
             ui.checkbox(&mut self.st.show_hidden, label);
-            ui.checkbox(&mut self.st.show_extensions, "Show file extensions");
-            ui.checkbox(&mut self.st.age_colors, "Color the Age column by file age");
-            ui.checkbox(&mut self.st.mebibytes, "Use old definition of Megabyte (MiB, as in Windows Explorer)");
-            ui.checkbox(&mut self.st.sorting.folders_on_top, "Keep folders above files");
+            self.toggles(ui, ToggleSection::Files);
             settings_section(ui, "Workspace", accent);
-            ui.checkbox(&mut self.st.show_preview, "Show preview / file details pane");
-            ui.checkbox(&mut self.st.show_sidebar, "Show sidebar");
+            self.toggles(ui, ToggleSection::Workspace);
             settings_section(ui, "Keyboard", accent);
-            ui.checkbox(&mut self.st.vim_keys, "Neovim-style keys");
-            ui.label(RichText::new("j, k, h, l move, / filters, and letters no longer filter as you type.").color(weak).size(11.0));
-            ui.checkbox(&mut self.st.which_key, "Show which keys can come next in a key sequence");
+            self.toggles(ui, ToggleSection::Keyboard);
             let palette = [("Quick palette", Command::Palette), ("its commands and settings", Command::PaletteCommands)]
                 .map(|(text, command)| self.tip(text, command)).join(", ");
             ui.label(RichText::new(format!("{palette}: go anywhere and run anything from the keyboard.")).color(weak).size(11.0));
@@ -485,8 +491,7 @@ impl App {
                 self.shortcuts = Some(crate::ui_keys::ShortcutsWindow::new(layer));
             }
             settings_section(ui, "Sidebar groups", accent);
-            ui.checkbox(&mut self.st.show_cloud, "Show automatically detected Cloud folders");
-            ui.label(RichText::new("Cloud lists local sync folders, detected from OneDrive settings and folder names in your home directory.").color(weak).size(11.0));
+            self.toggles(ui, ToggleSection::Sidebar);
             ui.label(RichText::new("Drag group headings to reorder. Use + to add a local or network path.").color(weak).size(11.0));
                     ui.menu_button("Restore groups…", |ui| {
                         if ui.button("History").clicked() {

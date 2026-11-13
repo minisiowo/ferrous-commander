@@ -240,6 +240,81 @@ fn default_favorites() -> Vec<FavGroup> {
     vec![FavGroup::new(user, paths)]
 }
 
+/// Where an on/off setting sits in the settings window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToggleSection {
+    /// Drawn by hand in the window's first grid.
+    Appearance,
+    Files,
+    Workspace,
+    Keyboard,
+    Sidebar,
+}
+
+/// A setting that is on or off. Listed here once, it shows both in the settings window
+/// and among the quick palette's settings; a test fails for an on/off field missing here.
+pub struct Toggle {
+    /// Names it among the palette's recently used items, so it must never change.
+    pub id: &'static str,
+    /// Short, for the quick palette.
+    pub title: &'static str,
+    /// For the settings window. Empty for a setting the window draws by hand.
+    pub label: &'static str,
+    /// Said quietly below the window's checkbox.
+    pub hint: &'static str,
+    pub section: ToggleSection,
+    pub windows_only: bool,
+    pub field: fn(&mut Settings) -> &mut bool,
+}
+
+impl Toggle {
+    const fn new(id: &'static str, title: &'static str, label: &'static str, section: ToggleSection, field: fn(&mut Settings) -> &mut bool) -> Toggle {
+        Toggle { id, title, label, hint: "", section, windows_only: false, field }
+    }
+
+    const fn hint(mut self, hint: &'static str) -> Toggle {
+        self.hint = hint;
+        self
+    }
+
+    const fn windows_only(mut self) -> Toggle {
+        self.windows_only = true;
+        self
+    }
+
+    /// Whether this system has it at all.
+    pub fn here(&self) -> bool {
+        !self.windows_only || cfg!(windows)
+    }
+
+    pub fn get(&self, st: &Settings) -> bool {
+        *(self.field)(&mut st.clone())
+    }
+}
+
+/// Every on/off setting, in the palette's order.
+pub const TOGGLES: &[Toggle] = {
+    use ToggleSection::*;
+    &[
+        Toggle::new("Sidebar", "Sidebar", "Show sidebar", Workspace, |s| &mut s.show_sidebar),
+        Toggle::new("PreviewPane", "Preview and details pane", "Show preview / file details pane", Workspace, |s| &mut s.show_preview),
+        Toggle::new("Tree", "Tree of files", "Tree of files: expand folders in place with their arrows", Files, |s| &mut s.tree_files),
+        Toggle::new("Extensions", "File extensions", "Show file extensions", Files, |s| &mut s.show_extensions),
+        Toggle::new("AgeColors", "Colours by file age", "Color the Age column by file age", Files, |s| &mut s.age_colors),
+        Toggle::new("FoldersOnTop", "Folders above files", "Keep folders above files", Files, |s| &mut s.sorting.folders_on_top),
+        Toggle::new("Mebibytes", "Sizes in MiB, as in Windows Explorer", "Use old definition of Megabyte (MiB, as in Windows Explorer)", Files, |s| &mut s.mebibytes),
+        Toggle::new("HistoryCard", "History in the sidebar", "Show History", Sidebar, |s| &mut s.show_history),
+        Toggle::new("CloudCard", "Cloud folders in the sidebar", "Show automatically detected Cloud folders", Sidebar, |s| &mut s.show_cloud)
+            .hint("Cloud lists local sync folders, detected from OneDrive settings and folder names in your home directory."),
+        Toggle::new("Rounded", "Rounded corners", "", Appearance, |s| &mut s.rounded),
+        Toggle::new("Outlines", "Outlines around panels and cards", "", Appearance, |s| &mut s.outlines),
+        Toggle::new("WindowEffect", "Mica: the desktop shows through the window", "", Appearance, |s| &mut s.window_effect).windows_only(),
+        Toggle::new("NeovimKeys", "Neovim-style keys", "Neovim-style keys", Keyboard, |s| &mut s.vim_keys)
+            .hint("j, k, h, l move, / filters, and letters no longer filter as you type."),
+        Toggle::new("WhichKey", "Hints for the next key of a sequence", "Show which keys can come next in a key sequence", Keyboard, |s| &mut s.which_key),
+    ]
+};
+
 pub fn config_directory() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("ferrous"))
 }
@@ -478,6 +553,48 @@ mod tests {
         for bad in ["return {", "return { dual = 'yes' }", "return {}; os.execute('x')", "while true do end", "return { font_size = 1 + 2 }"] {
             assert!(Settings::from_lua(bad).is_err(), "{bad}");
         }
+    }
+
+    /// The paths of every on/off value, as `a.b` for a nested one.
+    fn bool_paths(value: &serde_json::Value, at: &str, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Bool(_) => out.push(at.to_string()),
+            serde_json::Value::Object(map) => for (k, v) in map {
+                bool_paths(v, &if at.is_empty() { k.clone() } else { format!("{at}.{k}") }, out);
+            },
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn every_on_off_setting_is_in_the_settings_window_and_the_palette() {
+        // Changed elsewhere, on purpose: say where when adding one.
+        const ELSEWHERE: &[&str] = &[
+            "show_hidden",       // the Toggle hidden files command, in the palette with its state
+            "sorting.ascending", // the palette's Sort by items and the column headers
+            "dual",              // only how many panels the very first start opens
+            "window.maximized",  // how the window was left
+        ];
+        let base = serde_json::to_value(Settings::default()).unwrap();
+        let mut wanted = Vec::new();
+        bool_paths(&base, "", &mut wanted);
+        let mut listed = Vec::new();
+        for toggle in TOGGLES {
+            let mut s = Settings::default();
+            let field = (toggle.field)(&mut s);
+            *field = !*field;
+            let flipped = serde_json::to_value(&s).unwrap();
+            let at = |v: &serde_json::Value, p: &str| v.pointer(&format!("/{}", p.replace('.', "/"))).cloned();
+            let changed: Vec<String> = wanted.iter().filter(|p| at(&base, p) != at(&flipped, p)).cloned().collect();
+            assert_eq!(changed.len(), 1, "{} changes one setting", toggle.id);
+            assert!(!listed.contains(&changed[0]), "{} is listed twice", changed[0]);
+            listed.push(changed[0].clone());
+            assert!(!toggle.title.is_empty(), "{} has a title", toggle.id);
+            assert!(!toggle.label.is_empty() || toggle.section == ToggleSection::Appearance, "{} is drawn in the window", toggle.id);
+            assert_eq!(TOGGLES.iter().filter(|t| t.id == toggle.id).count(), 1, "{} is a unique id", toggle.id);
+        }
+        let missing: Vec<&String> = wanted.iter().filter(|p| !listed.contains(p) && !ELSEWHERE.contains(&p.as_str())).collect();
+        assert!(missing.is_empty(), "add these to TOGGLES, or to ELSEWHERE saying where they change: {missing:?}");
     }
 
     #[test]

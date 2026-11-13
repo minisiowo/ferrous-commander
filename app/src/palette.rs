@@ -75,8 +75,9 @@ pub fn split(text: &str) -> (Mode, &str) {
 /// A setting the palette changes itself, because no shortcut command does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Setting {
-    Extensions, AgeColors, Mebibytes, FoldersOnTop, Sidebar, PreviewPane, Tree,
-    NeovimKeys, WhichKey, HistoryCard, Rounded, Outlines, FontLarger, FontSmaller,
+    /// An on/off setting, by its place in `settings::TOGGLES`.
+    Toggle(usize),
+    FontLarger, FontSmaller,
     OpenSettings, OpenShortcuts, ConfigFolder,
     NewTheme, EditTheme, ImportTheme, ThemesFolder,
 }
@@ -94,6 +95,8 @@ pub enum Pick {
     Sort(SortBy),
     /// A saved panel layout, by its place among the profiles.
     Profile(usize),
+    /// Put the panels as they are now in a profile, by its place among the profiles.
+    UpdateProfile(usize),
 }
 
 impl Pick {
@@ -101,10 +104,11 @@ impl Pick {
     pub fn id(&self) -> Option<String> {
         Some(match self {
             Pick::Command(command) => command.info().id.to_string(),
+            Pick::Setting(Setting::Toggle(k)) => format!("setting:{}", crate::settings::TOGGLES.get(*k)?.id),
             Pick::Setting(setting) => format!("setting:{setting:?}"),
             Pick::Theme(theme) => format!("theme:{}", theme.key()),
             Pick::Sort(by) => format!("sort:{by:?}"),
-            Pick::Folder(_) | Pick::File(_) | Pick::Typed(_) | Pick::Profile(_) => return None,
+            Pick::Folder(_) | Pick::File(_) | Pick::Typed(_) | Pick::Profile(_) | Pick::UpdateProfile(_) => return None,
         })
     }
 }
@@ -332,7 +336,13 @@ mod tests {
     #[test]
     fn recent_ids_exist_only_for_commands_and_settings() {
         assert_eq!(Pick::Command(Command::NewTab).id().as_deref(), Some("new_tab"));
-        assert_eq!(Pick::Setting(Setting::Sidebar).id().as_deref(), Some("setting:Sidebar"));
+        // Ids saved by versions with one variant per setting still name the same ones.
+        for (k, toggle) in crate::settings::TOGGLES.iter().enumerate() {
+            assert_eq!(Pick::Setting(Setting::Toggle(k)).id(), Some(format!("setting:{}", toggle.id)));
+        }
+        assert_eq!(Pick::Setting(Setting::Toggle(0)).id().as_deref(), Some("setting:Sidebar"));
+        assert_eq!(Pick::Setting(Setting::FontLarger).id().as_deref(), Some("setting:FontLarger"));
+        assert_eq!(Pick::Profile(0).id(), None);
         assert_eq!(Pick::Theme(ThemeName::Gruvbox.into()).id().as_deref(), Some("theme:Gruvbox"));
         assert_eq!(Pick::Theme(ThemeId::Custom("x".into())).id().as_deref(), Some("theme:custom:x"));
         assert_eq!(Pick::Folder("/a".into()).id(), None);
