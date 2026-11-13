@@ -1290,7 +1290,7 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, e)| (show_hidden || !e.hidden) && (f.is_empty() || e.lname().contains(&f)
-                || e.path.ancestors().skip(1).any(|p| matching_folders.contains(p))))
+                || (!matching_folders.is_empty() && e.path.ancestors().skip(1).any(|p| matching_folders.contains(p)))))
             .map(|(k, _)| k)
             .collect();
         // Keep the cursor on the same item; after a navigation, put it on the item asked for.
