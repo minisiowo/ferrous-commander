@@ -20,6 +20,7 @@ mod linux_properties;
 #[cfg(target_os = "linux")]
 mod linux_drag;
 mod keymap;
+mod launch;
 mod lua_config;
 mod omarchy;
 mod openwith;
