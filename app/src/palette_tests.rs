@@ -320,7 +320,7 @@ fn a_profile_brings_back_its_panels_from_alt_p() {
     app.acts.push(crate::app::Act::RenameProfile(0, "home".into()));
     app.acts.push(crate::app::Act::DeleteProfile(0));
     settle(&ctx, &mut app);
-    assert!(app.st.profiles.is_empty() && app.open_profile.is_none());
+    assert!(app.st.profiles.is_empty());
     std::fs::remove_dir_all(root).unwrap();
 }
 

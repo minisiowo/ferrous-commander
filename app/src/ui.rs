@@ -1324,13 +1324,12 @@ impl App {
             for (k, profile) in profiles.iter().enumerate() {
                 let h = self.row_h() + 1.0;
                 let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
-                if self.open_profile == Some(k) {
-                    ui.painter().rect_filled(r, pal.corner(), pal.selection());
-                } else if resp.hovered() {
+                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.hovered() {
                     ui.painter().rect_filled(r, pal.corner(), pal.hover);
                 }
                 let ir = Rect::from_min_size(pos2(r.min.x + 4.0, r.center().y - 8.0), vec2(16.0, 16.0));
-                icons::face(ui.painter(), ir, "#dual", 14.0, pal.text_weak);
+                icons::face(ui.painter(), ir, "#layout", 14.0, pal.accent);
                 let font = FontId::proportional(self.st.font_size);
                 let t = fit_text(ui.painter(), &profile.name, &font, r.max.x - 4.0 - (ir.max.x + 6.0));
                 ui.painter().text(pos2(ir.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, t, font, pal.text);

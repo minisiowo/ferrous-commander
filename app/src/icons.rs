@@ -243,6 +243,16 @@ pub fn glyph(p: &Painter, r: Rect, name: &str, c: Color32) {
             p.rect_stroke(l, CornerRadius::same(2), s, StrokeKind::Inside);
             p.rect_stroke(rr, CornerRadius::same(2), s, StrokeKind::Inside);
         }
+        // A saved layout: a window tiled into one panel on the left and two on the right.
+        "layout" => {
+            let w = Rect::from_center_size(r.center(), vec2(14.0, 12.0)).round_to_pixels(p.pixels_per_point());
+            p.rect_filled(w, CornerRadius::same(2), c.gamma_multiply(0.18));
+            p.rect_stroke(w, CornerRadius::same(2), s, StrokeKind::Inside);
+            let x = (w.center().x - 1.0).round_to_pixel_center(p.pixels_per_point());
+            let y = w.center().y.round_to_pixel_center(p.pixels_per_point());
+            p.line_segment([pos2(x, w.min.y), pos2(x, w.max.y)], Stroke::new(1.0, c));
+            p.line_segment([pos2(x, y), pos2(w.max.x, y)], Stroke::new(1.0, c));
+        }
         // Flip split direction: a pane cut top/bottom with a turn arrow
         "flip" => {
             p.rect_stroke(b, CornerRadius::same(2), s, StrokeKind::Inside);

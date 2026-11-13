@@ -492,8 +492,6 @@ pub struct App {
     pub acts: Vec<Act>,
     /// The user has been told that settings cannot be saved.
     save_warned: bool,
-    /// The profile opened last in this run, marked in the sidebar.
-    pub open_profile: Option<usize>,
 }
 
 /// Checks visible folders on its own timer, so that an idle window does not redraw
@@ -732,7 +730,6 @@ impl App {
             }).into_iter().collect(),
             closing: false,
             save_warned: false,
-            open_profile: None,
             #[cfg(target_os = "linux")]
             properties: None,
             #[cfg(not(windows))]
@@ -1149,7 +1146,6 @@ impl App {
         self.pane_rects.clear();
         self.tab_rects.clear();
         self.drop_zones.clear();
-        self.open_profile = Some(k);
         self.mark_dirty();
         self.toast(ToastKind::Info, format!("Opened profile “{}”", profile.name));
     }
@@ -2350,7 +2346,6 @@ impl App {
                 } else {
                     let profile = self.snapshot_profile(name.clone());
                     self.st.profiles.push(profile);
-                    self.open_profile = Some(self.st.profiles.len() - 1);
                     self.toast(ToastKind::Info, format!("Saved profile “{name}”"));
                     self.mark_dirty();
                 }
@@ -2358,7 +2353,6 @@ impl App {
             Act::UpdateProfile(k) => {
                 if let Some(name) = self.st.profiles.get(k).map(|p| p.name.clone()) {
                     self.st.profiles[k] = self.snapshot_profile(name.clone());
-                    self.open_profile = Some(k);
                     self.toast(ToastKind::Info, format!("Profile “{name}” now holds these panels"));
                     self.mark_dirty();
                 }
@@ -2376,11 +2370,6 @@ impl App {
             Act::DeleteProfile(k) => {
                 if k < self.st.profiles.len() {
                     let removed = self.st.profiles.remove(k);
-                    self.open_profile = match self.open_profile {
-                        Some(o) if o == k => None,
-                        Some(o) if o > k => Some(o - 1),
-                        o => o,
-                    };
                     self.toast(ToastKind::Info, format!("Deleted profile “{}”", removed.name));
                     self.mark_dirty();
                 }

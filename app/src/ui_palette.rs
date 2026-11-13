@@ -598,7 +598,7 @@ impl App {
                 icons::entry(&p, icon, fsx::Kind::from_ext(ext), ext, pal.dark, false);
             }
             Pick::Theme(_) => icons::face(&p, icon, "◑", 13.0, pal.text_weak),
-            Pick::Profile(_) => icons::face(&p, icon, "#dual", 14.0, pal.text_weak),
+            Pick::Profile(_) => icons::face(&p, icon, "#layout", 14.0, pal.accent),
             Pick::Command(_) | Pick::Setting(_) | Pick::Sort(_) => icons::glyph(&p, icon, "next", pal.text_weak),
         }
         let small = FontId::proportional(11.0);
