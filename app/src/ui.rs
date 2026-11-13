@@ -835,31 +835,34 @@ impl App {
                             SidebarSection::Profiles => self.profiles_card(ui),
                         });
                     }
-                    ui.vertical_centered(|ui| {
-                        let b =
-                            egui::Button::new(RichText::new("+  New group").color(pal.text_weak))
-                                .frame(false);
-                        if ui
-                            .add(b)
-                            .on_hover_text("Creates new Favorite group and adds current folder")
-                            .clicked()
-                        {
-                            self.dialog = Some(Dialog::NewGroup {
-                                name: String::new(),
-                                focus: true,
-                            });
-                        }
-                    });
-                    ui.vertical_centered(|ui| {
-                        let b = egui::Button::new(RichText::new("+  New profile").color(pal.text_weak)).frame(false);
-                        let tip = self.tip("Saves the open panels, their tabs and layout under a name", Command::SaveProfile);
-                        if ui.add(b).on_hover_text(tip).clicked() {
-                            self.dialog = Some(self.new_profile_dialog());
-                        }
-                    });
+                    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), self.row_h() + 4.0), Sense::hover());
+                    let half = (row.width() - 2.0) / 2.0;
+                    let left = Rect::from_min_size(row.min, vec2(half, row.height()));
+                    let right = Rect::from_min_size(pos2(row.max.x - half, row.min.y), vec2(half, row.height()));
+                    if self.add_button(ui, left, "+  New group", "Creates new Favorite group and adds current folder").clicked() {
+                        self.dialog = Some(Dialog::NewGroup { name: String::new(), focus: true });
+                    }
+                    let tip = self.tip("Saves the open panels, their tabs and layout under a name", Command::SaveProfile);
+                    if self.add_button(ui, right, "+  New profile", &tip).clicked() {
+                        self.dialog = Some(self.new_profile_dialog());
+                    }
                     ui.add_space(8.0);
                 });
         });
+    }
+
+    /// A quiet button at the sidebar's foot that lights up like a row under the pointer.
+    fn add_button(&self, ui: &mut Ui, r: Rect, text: &str, tip: &str) -> egui::Response {
+        let pal = self.pal;
+        let resp = ui.interact(r, ui.scope_id().with(text), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.hovered() {
+            ui.painter().rect_filled(r, pal.corner(), pal.hover);
+        }
+        let font = FontId::proportional(13.0);
+        let label = fit_text(ui.painter(), text, &font, r.width() - 8.0);
+        let color = if resp.hovered() { pal.text } else { pal.text_weak };
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, label, font, color);
+        resp.on_hover_text(tip)
     }
 
     /// Asks for a profile's name, suggesting the active panel's folder.
