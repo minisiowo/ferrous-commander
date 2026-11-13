@@ -713,11 +713,17 @@ impl App {
                                 if !ui.is_rect_visible(r) { continue; }
                                 let fill = if selected { Some(pal.selection()) } else if response.hovered() { Some(pal.hover) } else { None };
                                 if let Some(fill) = fill {
-                                    // Across the scrollbar's gutter too, up to the window's edge.
-                                    let lit = Rect::from_min_size(r.min, vec2(width, r.height()));
-                                    let mut painter = ui.painter().clone();
-                                    painter.set_clip_rect(Rect::from_x_y_ranges(lit.x_range(), ui.clip_rect().y_range()));
-                                    painter.rect_filled(lit, CornerRadius::ZERO, fill);
+                                    if pal.round {
+                                        // Rounded, it sits inside: as far from the left as the scrollbar's gutter is on the right.
+                                        let lit = Rect::from_min_max(r.min + vec2(gutter, 0.0), r.max);
+                                        ui.painter().rect_filled(lit, pal.corner(), fill);
+                                    } else {
+                                        // Square, it runs across the scrollbar's gutter too, up to the palette's edges.
+                                        let lit = Rect::from_min_size(r.min, vec2(width, r.height()));
+                                        let mut painter = ui.painter().clone();
+                                        painter.set_clip_rect(Rect::from_x_y_ranges(lit.x_range(), ui.clip_rect().y_range()));
+                                        painter.rect_filled(lit, CornerRadius::ZERO, fill);
+                                    }
                                 }
                                 self.palette_row(ui, r, &palette.rows[n], selected);
                                 if response.clicked() {
