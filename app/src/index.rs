@@ -851,7 +851,10 @@ mod tests {
         tree.file("node_modules/pkg/skipped-module.js");
         tree.file("target/CACHEDIR.TAG");
         tree.file("target/debug/skipped-build.o");
-        tree.file(".hidden-file");
+        let hidden_file = tree.file(".hidden-file");
+        // Windows hides by attribute, not by a leading dot.
+        #[cfg(windows)]
+        assert!(std::process::Command::new("attrib").arg("+h").arg(&hidden_file).status().unwrap().success());
         let kept = tree.file("src/kept.rs");
         let index = tree.index();
         let all = all(&index);
@@ -863,7 +866,7 @@ mod tests {
         }
         assert!(all.contains(&kept));
         assert!(paths(&index, "hidden", false).is_empty(), "hidden items need the setting");
-        assert_eq!(paths(&index, "hidden", true), [tree.0.join(".hidden-file")]);
+        assert_eq!(paths(&index, "hidden", true), [hidden_file]);
     }
 
     #[cfg(unix)]

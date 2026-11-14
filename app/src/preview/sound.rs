@@ -892,7 +892,6 @@ mod tests {
         (sound, ctx)
     }
 
-    #[cfg(target_os = "linux")]
     fn wait_for(sound: &Sound, state: State) {
         let until = Instant::now() + Duration::from_secs(10);
         while sound.status().state != state {
@@ -928,7 +927,6 @@ mod tests {
     /// The real helper on the real sound device, three seconds of silence:
     /// `cargo build --release`, then with `FERROUS_HELPER_EXE=target/release/ferrous-commander`
     /// `cargo test --release sound_through_the_real_helper -- --ignored --nocapture`.
-    #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "needs the release program, named by FERROUS_HELPER_EXE, and a sound device"]
     fn sound_through_the_real_helper() {
@@ -945,10 +943,13 @@ mod tests {
         sound.play(&file, &ctx);
         wait_for(&sound, State::Playing);
         println!("playing after {} ms", started.elapsed().as_millis());
-        let child = sound.link.as_ref().unwrap().child.as_ref().unwrap().id();
         std::thread::sleep(Duration::from_millis(1000));
-        let rollup = std::fs::read_to_string(format!("/proc/{child}/smaps_rollup")).unwrap();
-        for line in rollup.lines().filter(|line| line.starts_with("Pss") || line.starts_with("Rss")) { println!("helper {line}"); }
+        #[cfg(target_os = "linux")]
+        {
+            let child = sound.link.as_ref().unwrap().child.as_ref().unwrap().id();
+            let rollup = std::fs::read_to_string(format!("/proc/{child}/smaps_rollup")).unwrap();
+            for line in rollup.lines().filter(|line| line.starts_with("Pss") || line.starts_with("Rss")) { println!("helper {line}"); }
+        }
         sound.toggle(&file, &ctx);
         wait_for(&sound, State::Paused);
         // The helper's own word on where it stopped replaces the estimate.

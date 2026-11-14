@@ -1841,6 +1841,26 @@ fn paints_text(ctx: &egui::Context, app: &mut App, wanted: &str) -> bool {
         && s.clip_rect.contains(Rect::from_min_size(t.pos, t.galley.size()).center())))
 }
 
+/// Whether this exact text is painted in the next frame, even where its field clips it.
+fn paints_text_clipped_or_not(ctx: &egui::Context, app: &mut App, wanted: &str) -> bool {
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+    output.textures_delta.clear();
+    output.shapes.iter().any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.job.text == wanted))
+}
+
+/// Waits for a suggestion that a long temporary path may push past the end of its field.
+fn wait_for_suggestion(ctx: &egui::Context, app: &mut App, wanted: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !paints_text_clipped_or_not(ctx, app, wanted) {
+        assert!(std::time::Instant::now() < deadline, "{wanted} was never offered");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 fn wait_for_text(ctx: &egui::Context, app: &mut App, wanted: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !paints_text(ctx, app, wanted) {
@@ -2664,7 +2684,7 @@ fn the_other_path_fields_complete_folders_as_the_path_bar_does() {
     let field = painted_at(&ctx, &mut app, "/path/to/folder", screen());
     click(&ctx, &mut app, field, Modifiers::NONE);
     frame(&ctx, &mut app, vec![Event::Text(typed.clone())], Modifiers::NONE);
-    wait_for_text(&ctx, &mut app, &format!("0{sep}"));
+    wait_for_suggestion(&ctx, &mut app, &format!("0{sep}"));
     key(&ctx, &mut app, Key::Tab, Modifiers::NONE);
     match &app.shortcuts.as_ref().unwrap().capture.as_ref().unwrap().subject {
         Subject::Folder(form) => assert_eq!(form.path, done),
@@ -2674,7 +2694,7 @@ fn the_other_path_fields_complete_folders_as_the_path_bar_does() {
 
     // The path of a location added to the sidebar.
     app.dialog = Some(Dialog::AddLocation { group: 0, name: typed, focus: true });
-    wait_for_text(&ctx, &mut app, &format!("0{sep}"));
+    wait_for_suggestion(&ctx, &mut app, &format!("0{sep}"));
     key(&ctx, &mut app, Key::ArrowRight, Modifiers::NONE);
     match &app.dialog {
         Some(Dialog::AddLocation { name, .. }) => assert_eq!(*name, done),
