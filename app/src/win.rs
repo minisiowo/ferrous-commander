@@ -2,15 +2,16 @@
 
 #![cfg(windows)]
 
-use std::cmp::Ordering;
 
 
+#[cfg(test)]
 #[link(name = "shlwapi")]
 unsafe extern "system" {
     fn StrCmpLogicalW(a: *const u16, b: *const u16) -> i32;
 }
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn LCMapStringEx(locale: *const u16, flags: u32, src: *const u16, src_len: i32, dst: *mut u8, dst_len: i32, version: *const u8, reserved: *const u8, param: isize) -> i32;
     fn QueryDosDeviceW(name: *const u16, target: *mut u16, max: u32) -> u32;
     fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
     fn SetDefaultDllDirectories(flags: u32) -> i32;
@@ -210,10 +211,44 @@ fn from_wide_ptr(p: *const u16) -> String {
 }
 
 /// Explorer's "logical" name order (Shlwapi StrCmpLogicalW). Both strings must be NUL-terminated UTF-16.
-pub fn logical_cmp(a: &[u16], b: &[u16]) -> Ordering {
+/// Only tests call it, to check that `sort_key` keeps this order.
+#[cfg(test)]
+pub fn logical_cmp(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
     // SAFETY: both slices end with 0.
     let r = unsafe { StrCmpLogicalW(a.as_ptr(), b.as_ptr()) };
     r.cmp(&0)
+}
+
+/// Bytes whose order is Explorer's name order: digits compare as numbers and case is ignored,
+/// as StrCmpLogicalW does. A key is made once per name and compares in a few nanoseconds,
+/// where StrCmpLogicalW costs about 250 ns a call, which a folder of 500 000 names makes
+/// eight million times.
+pub fn sort_key(name: &str) -> Box<[u8]> {
+    const NORM_IGNORECASE: u32 = 0x1;
+    const SORT_DIGITSASNUMBERS: u32 = 0x8;
+    const LCMAP_SORTKEY: u32 = 0x400;
+    let wide: Vec<u16> = name.encode_utf16().collect();
+    if wide.is_empty() { return Box::default(); }
+    let map = |out: *mut u8, room: usize| {
+        // SAFETY: `wide` is live for its stated length, and `out` has room for `room` bytes
+        // (none when it is null). A null locale is the user's own, as StrCmpLogicalW uses.
+        unsafe {
+            LCMapStringEx(std::ptr::null(), LCMAP_SORTKEY | SORT_DIGITSASNUMBERS | NORM_IGNORECASE, wide.as_ptr(), wide.len() as i32,
+                out, room as i32, std::ptr::null(), std::ptr::null(), 0)
+        }
+    };
+    let mut short = [0u8; 256];
+    let made = map(short.as_mut_ptr(), short.len());
+    if made > 0 { return short[..made as usize].into(); }
+    // A long name with many marks needs more room than most.
+    let needed = map(std::ptr::null_mut(), 0);
+    if needed > 0 {
+        let mut long = vec![0u8; needed as usize];
+        let made = map(long.as_mut_ptr(), long.len());
+        if made > 0 { long.truncate(made as usize); return long.into(); }
+    }
+    // Not seen in practice. The lower-case name still gives a consistent order.
+    name.to_lowercase().into_bytes().into()
 }
 
 /// Folder behind a SUBST drive ("Mount folder as new drive letter"), via QueryDosDevice

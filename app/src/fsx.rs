@@ -340,13 +340,13 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
 /// Prepared name for comparing, kept only while sorting: most folders hold far
 /// more entries than they are ever re-sorted, so entries do not carry it.
 #[cfg(windows)]
-type NameKey = Vec<u16>;
+type NameKey = Box<[u8]>;
 #[cfg(not(windows))]
 type NameKey = ();
 
 fn name_key(_e: &Entry) -> NameKey {
     #[cfg(windows)]
-    { crate::win::wide(_e.name()) }
+    { crate::win::sort_key(_e.name()) }
 }
 
 fn compare_entries(keyed_a: &(NameKey, Entry), keyed_b: &(NameKey, Entry), s: Sorting) -> Ordering {
@@ -356,7 +356,7 @@ fn compare_entries(keyed_a: &(NameKey, Entry), keyed_b: &(NameKey, Entry), s: So
     }
     let by_name = || {
         #[cfg(windows)]
-        { crate::win::logical_cmp(&keyed_a.0, &keyed_b.0) }
+        { keyed_a.0.cmp(&keyed_b.0) }
         #[cfg(not(windows))]
         { natural_cmp(a.lname(), b.lname()) }
     };
@@ -381,26 +381,38 @@ fn compare_entries(keyed_a: &(NameKey, Entry), keyed_b: &(NameKey, Entry), s: So
 }
 
 pub fn sort_entries(v: &mut Vec<Entry>, s: Sorting) {
-    let keyed: Vec<(NameKey, Entry)> = std::mem::take(v).into_iter().map(|e| (name_key(&e), e)).collect();
-    *v = sort_in_parts(keyed, |a, b| compare_entries(a, b, s)).into_iter().map(|(_, e)| e).collect();
+    // On Windows a key costs about half a microsecond, so each part makes its own.
+    let keyed = |e: Entry| (name_key(&e), e);
+    *v = sort_in_parts(std::mem::take(v), keyed, |a, b| compare_entries(a, b, s)).into_iter().map(|(_, e)| e).collect();
 }
 
 /// From this many items a sort is worth spreading over the processor's cores.
 const SORT_IN_PARTS_FROM: usize = 20_000;
 
-/// A stable sort like `sort_by`, with the same result, on several cores when there is much to do.
-fn sort_in_parts<T: Send>(mut items: Vec<T>, compare: impl Fn(&T, &T) -> Ordering + Sync) -> Vec<T> {
-    let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+fn sort_workers() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get()).min(8)
+}
+
+/// Each item made ready by `prepare`, then a stable sort like `sort_by`, with the same
+/// result, on several cores when there is much to do. Each core prepares its own part.
+fn sort_in_parts<U: Send, T: Send>(items: Vec<U>, prepare: impl Fn(U) -> T + Sync, compare: impl Fn(&T, &T) -> Ordering + Sync) -> Vec<T> {
+    let workers = sort_workers();
     if items.len() < SORT_IN_PARTS_FROM || workers < 2 {
+        let mut items: Vec<T> = items.into_iter().map(prepare).collect();
         items.sort_by(compare);
         return items;
     }
     let size = items.len().div_ceil(workers);
     let mut rest = items.into_iter();
-    let mut parts: Vec<Vec<T>> = (0..workers).map(|_| rest.by_ref().take(size).collect()).collect();
-    let compare = &compare;
-    std::thread::scope(|scope| {
-        for part in &mut parts { scope.spawn(move || part.sort_by(compare)); }
+    let raw: Vec<Vec<U>> = (0..workers).map(|_| rest.by_ref().take(size).collect()).collect();
+    let (prepare, compare) = (&prepare, &compare);
+    let mut parts: Vec<Vec<T>> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = raw.into_iter().map(|part| scope.spawn(move || {
+            let mut part: Vec<T> = part.into_iter().map(prepare).collect();
+            part.sort_by(compare);
+            part
+        })).collect();
+        jobs.into_iter().map(|job| job.join().unwrap()).collect()
     });
     while parts.len() > 1 {
         let mut waiting = parts.into_iter();
@@ -734,8 +746,67 @@ mod tests {
             let items: Vec<(u32, u32)> = (0..len as u32).map(|k| (k.wrapping_mul(2_654_435_761) >> 22, k)).collect();
             let mut expected = items.clone();
             expected.sort_by_key(|item| item.0);
-            assert_eq!(super::sort_in_parts(items, |a, b| a.0.cmp(&b.0)), expected, "{len} items");
+            assert_eq!(super::sort_in_parts(items, |item| item, |a, b| a.0.cmp(&b.0)), expected, "{len} items");
         }
+    }
+
+    /// Names Explorer's order handles in its own way: numbers, marks, ligatures, widths.
+    #[cfg(windows)]
+    const TRICKY_NAMES: &[&str] = &["a1", "a01", "a001", "a10", "a2", "a-b", "ab", "a_b", "a b", "a.b", "co-op", "coop", "co'op",
+        "x9y", "x10y", "x 9", "x9", "ß", "ss", "Æ", "ae", "ą", "a", "z", "ż", "ź", "Zażółć", "zazolc", "1", "01", "1.5", "1.10",
+        "v1.2.10", "v1.2.9", "~a", "!a", "#a", "$a", "(a)", "[a]", "{a}", "a~", "0", "00", "007", "7", "1e10", "١٢", "12",
+        "file (2)", "file (10)", "file(2)", "IMG_0001", "IMG_1", "img_2", "Ａ", "A", "ｱ", "ア", "あ", "REPORT.txt", "report.txt",
+        "99999999999999999999", "100000000000000000000", "a\u{301}", "á", "🙂", "🙃"];
+
+    /// Whether the sort keys put `names` in StrCmpLogicalW's order; the disagreeing pairs.
+    #[cfg(windows)]
+    fn sort_key_disagreements(names: &[String]) -> Vec<(String, String)> {
+        let wides: Vec<Vec<u16>> = names.iter().map(|n| crate::win::wide(n)).collect();
+        let keys: Vec<Box<[u8]>> = names.iter().map(|n| crate::win::sort_key(n)).collect();
+        let (mut by_key, mut by_logical): (Vec<usize>, Vec<usize>) = ((0..names.len()).collect(), (0..names.len()).collect());
+        by_key.sort_by(|&a, &b| keys[a].cmp(&keys[b]));
+        by_logical.sort_by(|&a, &b| crate::win::logical_cmp(&wides[a], &wides[b]));
+        let mut bad = Vec::new();
+        for w in by_key.windows(2) { if crate::win::logical_cmp(&wides[w[0]], &wides[w[1]]).is_gt() { bad.push((names[w[0]].clone(), names[w[1]].clone())); } }
+        for w in by_logical.windows(2) { if keys[w[0]] > keys[w[1]] { bad.push((names[w[1]].clone(), names[w[0]].clone())); } }
+        bad
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sort_keys_keep_explorers_order() {
+        let names: Vec<String> = TRICKY_NAMES.iter().map(|n| n.to_string()).collect();
+        assert_eq!(sort_key_disagreements(&names), [], "key order before, Explorer's after");
+        for a in TRICKY_NAMES { for b in TRICKY_NAMES {
+            let logical = crate::win::logical_cmp(&crate::win::wide(a), &crate::win::wide(b));
+            assert_eq!(crate::win::sort_key(a).cmp(&crate::win::sort_key(b)), logical, "{a:?} against {b:?}");
+        }}
+        let long = "ą\u{301}".repeat(120);
+        assert!(crate::win::sort_key(&long).len() > 256, "a long key is made in full");
+        assert!(crate::win::sort_key("").is_empty());
+    }
+
+    /// The same check on every name under the user's folder, the programs and the system:
+    /// `cargo test --release sort_keys_keep_explorers_order_on_this_disk -- --ignored --nocapture`
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "walks the user's folder, the programs and the system"]
+    fn sort_keys_keep_explorers_order_on_this_disk() {
+        let mut names = std::collections::BTreeSet::new();
+        let mut stack = vec![std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap()), "C:\\Program Files".into(), "C:\\Windows\\System32".into()];
+        while let Some(dir) = stack.pop() {
+            if names.len() > 400_000 { break; }
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                if let Ok(n) = e.file_name().into_string() { names.insert(n); }
+                if e.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink()) { stack.push(e.path()); }
+            }
+        }
+        let names: Vec<String> = names.into_iter().chain(TRICKY_NAMES.iter().map(|n| n.to_string())).collect();
+        let bad = sort_key_disagreements(&names);
+        eprintln!("{} names, {} disagreements", names.len(), bad.len());
+        for (a, b) in bad.iter().take(25) { eprintln!("  keys put {a:?} before {b:?}, Explorer the other way"); }
+        assert!(bad.is_empty());
     }
 
     use std::path::PathBuf;

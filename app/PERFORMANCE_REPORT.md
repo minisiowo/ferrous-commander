@@ -1,5 +1,66 @@
 # Raport wydajności
 
+## 14 listopada 2026: Windows przed wydaniem po 0.2.1
+
+Ten sam laptop co niżej, zasilanie sieciowe, plan „Zrównoważony”, build release. Kod z `main` po
+v0.2.1 (42 commity) z nowym sortowaniem nazw opisanym dalej.
+
+### Zasoby prawdziwego programu
+
+| Pomiar | Wynik |
+| --- | --- |
+| Okno po uruchomieniu | 87 ms |
+| Pamięć prywatna / zestaw roboczy w spoczynku | 48 MB / 91 MB |
+| CPU w spoczynku | 0 ms przez 10 s, wszystkie wątki czekają |
+| CPU przez pierwsze 30 s po starcie | 2,6% jednego rdzenia (dyski i ikony), potem 0 |
+| Karta graficzna | Iris Xe, bez RTX: 0 MB pamięci dedykowanej, 41 MB współdzielonej, 3D 0,13% |
+| Wątki / uchwyty | 18 / 304 |
+| Rozmiar exe | 28,9 MB |
+| Folder 100 tys. plików | gotowy po ok. 2 s, 88 MB prywatnej |
+| Folder 500 tys. plików | gotowy po ok. 4 s, 234 MB prywatnej, chwilowo 493 MB w trakcie wczytywania |
+| Przecieki, 1500 cykli nawigacji, kart i zadań | 11 → 11 MB, 199 → 199 uchwytów |
+
+Te dwa foldery mierzono przed zmianą sortowania.
+
+### Sortowanie nazw na Windowsie
+
+Każde porównanie nazw wołało `StrCmpLogicalW`, około 250 ns na wywołanie. 500 tys. nazw to 8,4 mln
+porównań, około 2 s na jednym rdzeniu i ok. 790 ms na ośmiu wątkach. Teraz każda nazwa dostaje raz
+klucz z `LCMapStringEx` (`LCMAP_SORTKEY | SORT_DIGITSASNUMBERS | NORM_IGNORECASE`), a porównuje się
+bajty kluczy, ok. 20 ns. W dużym folderze klucze liczy każdy wątek dla swojej części.
+
+Kolejność się nie zmienia. Na 157 tys. nazw z folderu użytkownika, `Program Files` i `System32` nie
+było żadnej niezgodności z `StrCmpLogicalW`. Test `sort_keys_keep_explorers_order` porównuje każdą
+parę z ok. 70 trudnych nazw (zera wiodące, `plik (2)` i `plik (10)`, `ß`, polskie litery, szerokie
+znaki, kana, emoji). `sort_keys_keep_explorers_order_on_this_disk` powtarza sprawdzenie na dysku.
+
+| Pomiar | Przed | Po |
+| --- | --- | --- |
+| Sortowanie, 100 tys. | 187 ms | 46 ms |
+| Sortowanie, 500 tys. | 1032 ms | 233 ms |
+| Otwarcie folderu w programie, 10 tys. | 69 ms | 24 ms |
+| Otwarcie folderu w programie, 100 tys. | 381 ms | 195 ms |
+| Otwarcie folderu w programie, 500 tys. | 2,12 s | 1,25 s |
+| Klatka bez zaznaczenia, 500 tys., mediana / p99 | 1,02 / 14,18 ms | 0,87 / 1,36 ms |
+
+Wartości „przed” pochodzą z tego samego dnia. Różnica 148 → 187 ms przy 100 tys. względem
+pomiaru z 10 listopada to rozrzut między przebiegami, bo kod sortowania był wtedy ten sam.
+
+Filtr przy 500 tys. plików: 36 ms (10 listopada 109–226 ms). Czasy szukania z kampanii nie
+zachowały się, bo PowerShell uciął długie linie logu.
+
+### Testy na Windowsie
+
+- Pełen zestaw: 359 zaliczonych, 0 błędów.
+- Dwa testy zakładały zachowanie Linuksa i zostały poprawione. Kropka na początku nazwy nie ukrywa
+  pliku na Windowsie. Podpowiedź ścieżki wychodzi poza pole przy długim folderze tymczasowym.
+- Odtwarzanie dźwięku przez prawdziwy proces pomocniczy działa także na Windowsie: gra po 525 ms,
+  pauza, przewijanie i koniec bez opóźnień.
+- Uszkodzone pliki wszystkich podglądanych formatów, 400 rund: bez awarii i zawieszeń, 66 s.
+- Kod pod Linuksa nie został sprawdzony z Windowsa, bo `alsa-sys` wymaga biblioteki ALSA.
+
+## 10 listopada 2026: wersja 0.1.5
+
 Stan na 10 listopada 2026, wersja 0.1.5 z poprawkami wydajności, build release.
 
 Windows zmierzono na laptopie ASUS TUF Dash F15: i7-11370H (4 rdzenie, 8 wątków), obraz na Iris Xe,
