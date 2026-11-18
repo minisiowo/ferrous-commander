@@ -133,6 +133,7 @@ pub fn load(p: &Path, options: Options) -> Reply {
     let ext = fsx::split_ext(&fsx::display_name(p), false).to_ascii_lowercase();
     // Contents go first: a PDF or a picture with the wrong name is still that.
     if head.windows(5).any(|w| w == b"%PDF-") { return pdf::load(p, options); }
+    pdf::forget();
     if ext == "svg" || ext == "svgz" { return picture::svg(p, options); }
     if picture::is_picture(&head, &ext) { return picture::load(p, options); }
     let name = fsx::display_name(p);

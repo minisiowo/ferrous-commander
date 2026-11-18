@@ -19,15 +19,15 @@ pub enum Selection {
     Doc { anchor: (u32, u32), head: (u32, u32) },
     /// Opposite corners, as row and column.
     Cells { anchor: (u32, u32), head: (u32, u32) },
-    /// Places between the characters of a page, as indices into `PageText::chars`.
-    Page { anchor: u32, head: u32 },
+    /// Places between the characters of one page, as indices into its `PageText::chars`.
+    Page { page: u32, anchor: u32, head: u32 },
 }
 
 impl Selection {
     pub fn is_empty(&self) -> bool {
         match *self {
             Selection::None => true,
-            Selection::Text { anchor, head } | Selection::Page { anchor, head } => anchor == head,
+            Selection::Text { anchor, head } | Selection::Page { anchor, head, .. } => anchor == head,
             Selection::Doc { anchor, head } => anchor == head,
             Selection::Cells { .. } => false,
         }

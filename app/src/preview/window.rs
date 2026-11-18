@@ -63,6 +63,10 @@ const HEX_ASCII_X: f32 = 520.0;
 const SCROLL_TO_END: f32 = 1e9;
 /// How long the title bar says that text was copied.
 const COPIED_FOR: Duration = Duration::from_millis(1500);
+/// Room between the pages of a document, and above the first.
+const PAGE_GAP: f32 = 12.0;
+/// Pages kept at hand on each side of the one in view, to scroll into.
+const STRIP_AROUND: u32 = 2;
 
 pub(super) fn viewport() -> ViewportId {
     ViewportId::from_hash_of("ferrous_commander_preview")
@@ -73,6 +77,8 @@ enum Cmd {
     Close,
     Step(i32),
     Page(i32),
+    /// The page of a document now in view, which loads it and its neighbours.
+    ShowPage(u32),
     Detail([u16; 4]),
     Turn(ModelView),
     Open,
@@ -97,9 +103,13 @@ struct View {
     laid_out_for: (usize, usize),
     laid_out_height: f32,
     moved: Option<Instant>,
-    last_look: (f32, Vec2),
+    last_look: (f32, Vec2, f32),
     sent: Option<[u16; 4]>,
-    wheel: f32,
+    /// How far down the pages of a document are scrolled, in pages: 2.5 is halfway
+    /// down the third. The page in the middle of the view, and the one last asked for.
+    at: f32,
+    on_page: u32,
+    asked_page: Option<u32>,
     started: Option<Instant>,
     /// Showing a 3D model, which may also get smaller than its first picture.
     model: bool,
@@ -129,6 +139,8 @@ struct Shared {
     place: (usize, usize),
     mebibytes: bool,
     content: PreviewContent,
+    /// The pages of the shown document around `content` that have been loaded.
+    strip: Vec<PreviewContent>,
     previous: Option<PreviewContent>,
     switched: Instant,
     loading: Option<Instant>,
@@ -156,6 +168,9 @@ pub struct Quick {
     shown: Option<Key>,
     revision: u32,
     path: Option<std::path::PathBuf>,
+    /// What the strip of pages was last gathered for: the page asked for, the state of
+    /// the cache and whether the file has pages.
+    strip_for: Option<(Option<Key>, u64, bool)>,
     /// Whether the window has been asked for. Windows shows a new window before it moves it
     /// into place, so there it is made hidden and shown one frame later.
     made: bool,
@@ -253,6 +268,10 @@ impl App {
                         self.preview.page = self.preview.page.saturating_add_signed(by).min(pages.saturating_sub(1));
                     }
                 }
+                Cmd::ShowPage(page) => {
+                    let known = pages_of(&self.preview.content).or_else(|| pages_of(&self.quick.as_ref()?.shared.lock().unwrap().content));
+                    if let Some((_, pages)) = known { self.preview.page = page.min(pages.saturating_sub(1)); }
+                }
                 Cmd::Detail(crop) => self.want_detail(crop, ctx),
                 Cmd::Turn(view) => self.want_model_view(view, ctx),
                 Cmd::Step(by) => {
@@ -290,7 +309,8 @@ impl App {
             [row.wrapping_sub(1), row + 1].into_iter().filter_map(|r| self.entry_at(i, r)).filter(|n| !n.is_dir).map(Key::of).collect()
         });
         if let PreviewContent::Page { page, pages, .. } = self.preview.content {
-            let around = [page.checked_sub(1), (page + 1 < pages).then_some(page + 1)];
+            // Most often read onwards, so the next pages come first.
+            let around = [(page + 1 < pages).then_some(page + 1), page.checked_sub(1), (page + 2 < pages).then_some(page + 2)];
             neighbours.splice(0..0, around.into_iter().flatten().filter_map(|n| self.preview.page_key(n)));
         }
         self.prefetch_preview(neighbours, ctx);
@@ -351,6 +371,7 @@ impl App {
                     place,
                     mebibytes: false,
                     content: PreviewContent::Loading,
+                    strip: Vec::new(),
                     previous: None,
                     switched: Instant::now(),
                     loading: None,
@@ -370,6 +391,7 @@ impl App {
                 shown: None,
                 revision: 0,
                 path: None,
+                strip_for: None,
                 made: false,
             }
         });
@@ -393,8 +415,31 @@ impl App {
             s.detail = detail;
             changed = true;
         }
+        // The pages around the one asked for, as far as they have loaded.
+        // Looked for again only once another page is asked for or more have loaded.
+        let paged = matches!(s.content, PreviewContent::Page { .. }) || matches!(self.preview.content, PreviewContent::Page { .. });
+        let generation = self.preview.cache_generation();
+        if quick.strip_for.as_ref().map(|(key, g, p)| (key.as_ref(), *g, *p)) != Some((self.preview.key(), generation, paged)) {
+            quick.strip_for = Some((self.preview.key().cloned(), generation, paged));
+            let wanted = self.preview.page;
+            let strip: Vec<PreviewContent> = if paged {
+                (wanted.saturating_sub(STRIP_AROUND)..=wanted.saturating_add(STRIP_AROUND)).filter_map(|n| self.preview.cached_page(n)).collect()
+            } else {
+                Vec::new()
+            };
+            let ids = |pages: &[PreviewContent]| pages.iter().filter_map(|c| if let PreviewContent::Page { page, texture, .. } = c { Some((*page, texture.id())) } else { None }).collect::<Vec<_>>();
+            if ids(&strip) != ids(&s.strip) {
+                s.strip = strip;
+                changed = true;
+            }
+        }
+        let same_file = quick.shown.as_ref().map(|k| &k.path) == self.preview.key().map(|k| &k.path);
+        // Another page of the document on show: the strip has a place for it while it loads.
+        let turning = same_file && matches!(s.content, PreviewContent::Page { .. });
         let waiting = matches!(self.preview.content, PreviewContent::Loading);
-        if waiting {
+        if waiting && turning {
+            s.loading = None;
+        } else if waiting {
             if s.loading.is_none() {
                 s.loading = Some(Instant::now());
                 ctx.request_repaint_of(viewport());
@@ -409,6 +454,15 @@ impl App {
                 s.view.select = Selection::None;
                 changed = true;
             }
+        } else if turning && matches!(self.preview.content, PreviewContent::Page { .. }) {
+            // Scrolled or turned to another page: the view stays where it is.
+            quick.revision = self.preview.revision;
+            quick.shown = self.preview.key().cloned();
+            s.content = self.preview.content.clone();
+            s.loading = None;
+            s.view.sent = None;
+            s.view.moved = Some(Instant::now());
+            changed = true;
         } else {
             quick.revision = self.preview.revision;
             quick.shown = self.preview.key().cloned();
@@ -488,8 +542,10 @@ fn keys(ctx: &egui::Context, s: &mut Shared, page: f32) {
                 let to = if key == K::ArrowRight { status.position() + sound::STEP } else { status.position().saturating_sub(sound::STEP) };
                 s.send(Cmd::Seek(to.as_millis() as u64), ctx);
             }
-            K::PageDown if paged => s.send(Cmd::Page(1), ctx),
-            K::PageUp if paged => s.send(Cmd::Page(-1), ctx),
+            K::PageDown | K::ArrowRight if paged => turn_page(&mut s.view, 1),
+            K::PageUp | K::ArrowLeft if paged => turn_page(&mut s.view, -1),
+            K::Home if paged => s.view.at = 0.0,
+            K::End if paged => s.view.at = f32::MAX,
             K::Escape if !repeat && !s.view.select.is_empty() => s.view.select = Selection::None,
             K::Space | K::Escape if !repeat => s.send(Cmd::Close, ctx),
             K::Enter if !repeat => s.send(Cmd::Open, ctx),
@@ -518,7 +574,7 @@ fn selected_text(s: &Shared) -> Option<String> {
         (PreviewContent::Doc(doc), Selection::Text { anchor, head }) => select::text_between(&doc.source.as_ref()?.text, anchor, head),
         (PreviewContent::Doc(doc), Selection::Doc { anchor, head }) => select::blocks_between(&doc.blocks, anchor, head),
         (PreviewContent::Table(table), Selection::Cells { anchor, head }) => select::cells_between(&table.rows, anchor, head),
-        (PreviewContent::Page { text: Some(text), .. }, Selection::Page { anchor, head }) => select::page_between(text, anchor, head),
+        (PreviewContent::Page { .. }, Selection::Page { page, anchor, head }) => select::page_between(loaded_page(s, page)?.2?, anchor, head),
         _ => None,
     }
 }
@@ -537,7 +593,10 @@ fn select_all(s: &Shared) -> Selection {
             let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
             Selection::Cells { anchor: (0, 0), head: (table.rows.len() as u32 - 1, columns as u32 - 1) }
         }
-        PreviewContent::Page { text: Some(text), .. } => Selection::Page { anchor: 0, head: text.chars.len() as u32 },
+        PreviewContent::Page { .. } => match loaded_page(s, s.view.on_page).and_then(|p| p.2) {
+            Some(text) => Selection::Page { page: s.view.on_page, anchor: 0, head: text.chars.len() as u32 },
+            None => Selection::None,
+        },
         _ => Selection::None,
     }
 }
@@ -585,6 +644,25 @@ fn pages_of(content: &PreviewContent) -> Option<(u32, u32)> {
         PreviewContent::Table(table) if table.sheets.len() > 1 => Some((table.page, table.sheets.len() as u32)),
         _ => None,
     }
+}
+
+/// To the top of the next page of a document, or back to the top of this one and then
+/// to the one before.
+fn turn_page(view: &mut View, by: i32) {
+    let here = view.at.floor();
+    let by = if by < 0 && view.at - here > 0.01 { 0.0 } else { by as f32 };
+    view.at = (here + by).max(0.0);
+}
+
+/// A loaded page's picture, size and text.
+type LoadedPage<'a> = (&'a egui::TextureHandle, [u32; 2], Option<&'a Arc<PageText>>);
+
+/// A loaded page of the shown document, the one on show or one around it.
+fn loaded_page(s: &Shared, n: u32) -> Option<LoadedPage<'_>> {
+    std::iter::once(&s.content).chain(&s.strip).find_map(|content| match content {
+        PreviewContent::Page { texture, orig, page, text, .. } if *page == n => Some((texture, *orig, text.as_ref())),
+        _ => None,
+    })
 }
 
 fn zoom_by(view: &mut View, factor: f32) {
@@ -647,12 +725,12 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
         PreviewContent::Model(tex, orig) => model_view(&mut child, s, tex, *orig, content_body),
         PreviewContent::Image(tex, orig, alpha) => {
             let sharpen = tex.size()[0] < orig[0] as usize;
-            image_view(&mut child, s, tex, *orig, *alpha, content_body, sharpen, false, None);
+            image_view(&mut child, s, tex, *orig, *alpha, content_body, sharpen);
         }
-        PreviewContent::Page { texture, orig, text, .. } => image_view(&mut child, s, texture, *orig, false, content_body, true, true, text.as_deref()),
+        PreviewContent::Page { orig, pages, .. } => pages_view(&mut child, s, content_body, *pages, *orig),
         PreviewContent::Animation(frames, orig) => {
             let tex = playing_frame(s, &ctx, frames);
-            image_view(&mut child, s, tex, *orig, true, content_body, false, false, None);
+            image_view(&mut child, s, tex, *orig, true, content_body, false);
         }
         PreviewContent::Doc(doc) => match (&doc.source, s.view.source) {
             (Some(source), true) => text_view(&mut child, s, source, content_body),
@@ -687,7 +765,11 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
         }
     }
     let zoomable = matches!(content, PreviewContent::Image(..) | PreviewContent::Model(..) | PreviewContent::Page { .. } | PreviewContent::Animation(..));
-    let pages = pages_of(&content);
+    // A document shows the page in view, which may still be loading.
+    let pages = match &content {
+        PreviewContent::Page { pages, .. } => Some((s.view.on_page, *pages)),
+        _ => pages_of(&content),
+    };
     control_bar(ui, s, body, &ctx, zoomable, pages);
     if cfg!(windows) { ui.painter().rect_stroke(full, CornerRadius::ZERO, Stroke::new(1.0, pal.border), egui::StrokeKind::Inside); }
 }
@@ -820,56 +902,49 @@ fn model_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32; 2], alpha: bool, body: Rect, sharpen: bool, paged: bool, text: Option<&PageText>) {
+fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32; 2], alpha: bool, body: Rect, sharpen: bool) {
     let response = ui.interact(body, ui.scope_id().with("preview_image"), Sense::click_and_drag());
     let ppp = ui.ctx().pixels_per_point();
-    // Where the page was drawn last, which is where the pointer found its text.
-    let shown = fitted_rect(body, tex, orig, s.view.zoom, paged, ppp).translate(s.view.pan);
-    let choosing = text.is_some_and(|text| page_choosing(ui, s, text, &response, shown));
     let (wheel, pinch, hover) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta(), i.pointer.hover_pos()));
     let before = s.view.zoom;
-    let over = response.contains_pointer();
-    if over && paged && pinch == 1.0 && before <= 1.0 {
-        // At fit size a document's wheel turns pages, as it would scroll through them.
-        s.view.wheel += wheel;
-        if s.view.wheel.abs() >= 40.0 {
-            s.send(Cmd::Page(if s.view.wheel > 0.0 { -1 } else { 1 }), &ui.ctx().clone());
-            s.view.wheel = 0.0;
-        }
-    } else if over && paged && pinch == 1.0 {
-        s.view.pan.y += wheel;
-    } else if over && (wheel != 0.0 || pinch != 1.0) {
+    if response.contains_pointer() && (wheel != 0.0 || pinch != 1.0) {
         s.view.zoom = (s.view.zoom * pinch * (wheel * 0.002).exp()).clamp(1.0, MAX_ZOOM);
         if let Some(at) = hover {
             let from_center = at - body.center() - s.view.pan;
             s.view.pan -= from_center * (s.view.zoom / before - 1.0);
         }
     }
-    if response.dragged() && !choosing { s.view.pan += response.drag_delta(); }
-    if response.double_clicked() && !choosing { s.view.zoom = 1.0; s.view.pan = Vec2::ZERO; }
-    let fitted = fitted_rect(body, tex, orig, s.view.zoom, paged, ppp);
+    if response.dragged() { s.view.pan += response.drag_delta(); }
+    if response.double_clicked() { s.view.zoom = 1.0; s.view.pan = Vec2::ZERO; }
+    let fitted = fitted_rect(body, tex, orig, s.view.zoom, false, ppp);
     let spare = ((fitted.size() - body.size()) / 2.0).max(Vec2::ZERO);
     s.view.pan = s.view.pan.clamp(-spare, spare);
     let r = fitted.translate(s.view.pan);
     if alpha { checkerboard(ui, r, body, s.pal); }
     let p = ui.painter_at(body);
     p.image(tex.id(), r, unit_uv(), Color32::WHITE);
+    paint_detail(&p, s, r);
+    if sharpen { sharpen_when_still(ui, s, r, body, tex, 0.0); }
+}
+
+/// The sharper copy of part of the shown picture, over it while zoomed in.
+fn paint_detail(p: &egui::Painter, s: &Shared, r: Rect) {
     if s.view.zoom > 1.0 && let Some((detail, [l, t, cr, cb])) = &s.detail {
         let at = |x: u16, y: u16| r.min + vec2(x as f32 / 65535.0 * r.width(), y as f32 / 65535.0 * r.height());
         p.image(detail.id(), Rect::from_min_max(at(*l, *t), at(*cr, *cb)), unit_uv(), Color32::WHITE);
     }
-    if let (Some(text), Selection::Page { anchor, head }) = (text, s.view.select) {
-        paint_page_choice(&p, text, r, select::ordered(anchor, head), chosen(s.pal));
-    }
-    if text.is_some() { copy_menu(&response, s); }
-    let look = (s.view.zoom, s.view.pan);
+}
+
+/// Once the picture at `r` has rested for a moment larger than its texture, asks for a
+/// sharper copy of the part in view. A change of `scrolled` counts as moving it too.
+fn sharpen_when_still(ui: &Ui, s: &mut Shared, r: Rect, body: Rect, tex: &egui::TextureHandle, scrolled: f32) {
+    let look = (s.view.zoom, s.view.pan, scrolled);
     if s.view.last_look != look {
         s.view.last_look = look;
         s.view.moved = Some(Instant::now());
     }
-    let coarse = r.width() * ppp > tex.size()[0] as f32 * 1.05;
-    if sharpen && coarse && let Some(moved) = s.view.moved {
+    let coarse = r.width() * ui.ctx().pixels_per_point() > tex.size()[0] as f32 * 1.05;
+    if coarse && r.intersects(body) && let Some(moved) = s.view.moved {
         let crop = visible_part(r, body);
         if moved.elapsed() < SHARPEN_AFTER {
             ui.ctx().request_repaint_after(SHARPEN_AFTER);
@@ -880,6 +955,105 @@ fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32
     }
 }
 
+/// A page of a document where it is drawn, with its picture and text once loaded.
+struct Sheet {
+    page: u32,
+    rect: Rect,
+    texture: Option<egui::TextureHandle>,
+    text: Option<Arc<PageText>>,
+}
+
+/// The pages in view, one under another, scrolled to `s.view.at`.
+fn sheets(s: &Shared, body: Rect, pages: u32, fallback: [u32; 2]) -> Vec<Sheet> {
+    let first = (s.view.at.max(0.0) as u32).min(pages.saturating_sub(1));
+    let mut y = body.top() + PAGE_GAP - (s.view.at - first as f32) * page_height(s, body, first, fallback);
+    let mut out = Vec::new();
+    for page in first..pages {
+        if y > body.bottom() { break; }
+        let loaded = loaded_page(s, page);
+        let size = page_rect(body, loaded.as_ref().map_or(fallback, |l| l.1), s.view.zoom).size();
+        let rect = Rect::from_min_size(pos2(body.center().x - size.x / 2.0 + s.view.pan.x, y), size);
+        let (texture, text) = loaded.map_or((None, None), |(texture, _, text)| (Some(texture.clone()), text.cloned()));
+        out.push(Sheet { page, rect, texture, text });
+        y += size.y + PAGE_GAP;
+    }
+    out
+}
+
+/// The room page `n` takes in the strip, gap included.
+fn page_height(s: &Shared, body: Rect, n: u32, fallback: [u32; 2]) -> f32 {
+    page_rect(body, loaded_page(s, n).map_or(fallback, |l| l.1), s.view.zoom).height() + PAGE_GAP
+}
+
+/// The pages of a document one under another, scrolled through as one long strip.
+/// The keys and the buttons still turn to the next page, by scrolling to it.
+fn pages_view(ui: &mut Ui, s: &mut Shared, body: Rect, pages: u32, fallback: [u32; 2]) {
+    let response = ui.interact(body, ui.scope_id().with("preview_pages"), Sense::click_and_drag());
+    let PreviewContent::Page { page: current, .. } = s.content else { return };
+    // Where the pages were drawn last, which is where the pointer found their text.
+    let before = sheets(s, body, pages, fallback);
+    let choosing = page_choosing(ui, s, &before, &response);
+    let (wheel, pinch, hover) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta(), i.pointer.hover_pos()));
+    let height = |s: &Shared| page_height(s, body, s.view.at.max(0.0) as u32, fallback);
+    let over = response.contains_pointer();
+    if over && pinch != 1.0 {
+        let old = height(s);
+        let zoom = s.view.zoom;
+        s.view.zoom = (zoom * pinch).clamp(1.0, MAX_ZOOM);
+        if let Some(at) = hover {
+            // The part of the page under the pointer stays under it.
+            s.view.pan.x -= (at.x - body.center().x - s.view.pan.x) * (s.view.zoom / zoom - 1.0);
+            let down = at.y - body.top();
+            s.view.at += down / old - down / height(s);
+        }
+    } else if over && wheel != 0.0 {
+        s.view.at -= wheel / height(s);
+    }
+    if response.dragged() && !choosing {
+        let delta = response.drag_delta();
+        s.view.pan.x += delta.x;
+        s.view.at -= delta.y / height(s);
+    }
+    if response.double_clicked() && !choosing { s.view.zoom = 1.0; s.view.pan = Vec2::ZERO; }
+    // Down to where the bottom of the last page shows.
+    let last = pages.saturating_sub(1);
+    let tail = page_height(s, body, last, fallback);
+    let end = last as f32 + ((tail + PAGE_GAP - body.height()) / tail).max(0.0);
+    s.view.at = s.view.at.clamp(0.0, end);
+    let width = page_rect(body, fallback, s.view.zoom).width();
+    let spare = ((width - body.width()) / 2.0).max(0.0);
+    s.view.pan = vec2(s.view.pan.x.clamp(-spare, spare), 0.0);
+
+    let now = sheets(s, body, pages, fallback);
+    let p = ui.painter_at(body);
+    let blank = blend(s.pal.panel, s.pal.text_weak, 0.12);
+    for sheet in &now {
+        match &sheet.texture {
+            Some(texture) => { p.image(texture.id(), sheet.rect, unit_uv(), Color32::WHITE); }
+            None => {
+                p.rect_filled(sheet.rect, CornerRadius::ZERO, blank);
+                paced_spinner(ui, Rect::from_center_size(sheet.rect.intersect(body).center(), Vec2::splat(28.0)));
+            }
+        }
+        if let (Some(text), Selection::Page { page, anchor, head }) = (&sheet.text, s.view.select) && page == sheet.page {
+            paint_page_choice(&p, text, sheet.rect, select::ordered(anchor, head), chosen(s.pal));
+        }
+    }
+    // The page across the middle of the view is the one the window is on.
+    let middle = body.center().y;
+    let on = now.iter().find(|sheet| sheet.rect.bottom() + PAGE_GAP >= middle).or(now.last()).map_or(0, |sheet| sheet.page);
+    s.view.on_page = on;
+    if s.view.asked_page.unwrap_or(current) != on {
+        s.view.asked_page = Some(on);
+        s.send(Cmd::ShowPage(on), &ui.ctx().clone());
+    }
+    if let Some(sheet) = now.iter().find(|sheet| sheet.page == current) && let Some(texture) = &sheet.texture {
+        paint_detail(&p, s, sheet.rect);
+        sharpen_when_still(ui, s, sheet.rect, body, texture, s.view.at);
+    }
+    if now.iter().any(|sheet| sheet.text.is_some()) { copy_menu(&response, s); }
+}
+
 /// Where on the screen a character of a page is, for a page drawn at `r`.
 fn char_rect(r: Rect, part: [f32; 4]) -> Rect {
     Rect::from_min_max(r.min + vec2(part[0] * r.width(), part[1] * r.height()), r.min + vec2(part[2] * r.width(), part[3] * r.height()))
@@ -888,6 +1062,8 @@ fn char_rect(r: Rect, part: [f32; 4]) -> Rect {
 /// The place between characters at `pos`: before the character under it or after it,
 /// by which half is pointed at. Away from all text, only when `nearest`.
 fn page_place(text: &PageText, r: Rect, pos: Pos2, nearest: bool) -> Option<u32> {
+    // Its characters lie on it: away from a page, none of them is under the pointer.
+    if !nearest && !r.expand(2.0).contains(pos) { return None; }
     let mut best: Option<(f32, usize)> = None;
     for (i, &(_, part)) in text.chars.iter().enumerate() {
         let distance = char_rect(r, part).expand(1.0).distance_sq_to_pos(pos);
@@ -900,28 +1076,32 @@ fn page_place(text: &PageText, r: Rect, pos: Pos2, nearest: bool) -> Option<u32>
 }
 
 /// Text on a page is chosen by dragging from a character; a drag that starts away from
-/// the text still moves the page. True while choosing, so the page does not move.
-fn page_choosing(ui: &Ui, s: &mut Shared, text: &PageText, response: &egui::Response, r: Rect) -> bool {
+/// the text still moves the pages. True while choosing, so that they do not move.
+fn page_choosing(ui: &Ui, s: &mut Shared, sheets: &[Sheet], response: &egui::Response) -> bool {
     let (pressed, down, shift, pos) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.modifiers.shift, i.pointer.interact_pos()));
     let Some(pos) = pos else { return s.view.choosing };
-    let over = response.hovered().then(|| page_place(text, r, pos, false)).flatten();
+    let texts: Vec<(u32, Rect, &PageText)> = sheets.iter().filter_map(|sheet| Some((sheet.page, sheet.rect, sheet.text.as_deref()?))).collect();
+    let over = response.hovered().then(|| texts.iter().find_map(|&(page, r, text)| Some((page, page_place(text, r, pos, false)?, text)))).flatten();
     if over.is_some() && !response.dragged() { ui.ctx().set_cursor_icon(egui::CursorIcon::Text); }
-    let anchor = match s.view.select { Selection::Page { anchor, .. } => Some(anchor), _ => None };
+    let held = match s.view.select { Selection::Page { page, anchor, .. } => Some((page, anchor)), _ => None };
     if pressed && response.hovered() {
         s.view.choosing = over.is_some();
-        s.view.select = match (over, shift.then_some(anchor).flatten()) {
-            (Some(at), Some(from)) => Selection::Page { anchor: from, head: at },
-            (Some(at), None) => Selection::Page { anchor: at, head: at },
+        s.view.select = match (over, shift.then_some(held).flatten()) {
+            (Some((page, at, _)), Some((from_page, from))) if from_page == page => Selection::Page { page, anchor: from, head: at },
+            (Some((page, at, _)), _) => Selection::Page { page, anchor: at, head: at },
             (None, _) => Selection::None,
         };
-    } else if s.view.choosing && down && let (Some(anchor), Some(at)) = (anchor, page_place(text, r, pos, true)) {
-        s.view.select = Selection::Page { anchor, head: at };
+    } else if s.view.choosing && down && let Some((page, anchor)) = held
+        && let Some(&(_, r, text)) = texts.iter().find(|t| t.0 == page)
+        && let Some(at) = page_place(text, r, pos, true)
+    {
+        s.view.select = Selection::Page { page, anchor, head: at };
         ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
     }
-    if response.double_clicked() && let Some(at) = over {
+    if response.double_clicked() && let Some((page, at, text)) = over {
         let i = (at as usize).min(text.chars.len() - 1);
         let (from, to) = select::word_at(&text.text, text.chars[i].0 as usize);
-        s.view.select = Selection::Page { anchor: select::page_char(text, from), head: select::page_char(text, to) };
+        s.view.select = Selection::Page { page, anchor: select::page_char(text, from), head: select::page_char(text, to) };
         return true;
     }
     // Held until the button is let go: egui calls it a drag only once the pointer has moved
@@ -1442,9 +1622,11 @@ fn control_bar(ui: &mut Ui, s: &mut Shared, body: Rect, ctx: &egui::Context, ima
     if symbol_button(&mut bar, "#next", false, &pal).on_hover_text("Next file").clicked() { s.send(Cmd::Step(1), ctx); }
     if let Some((page, total)) = pages {
         bar.add_space(10.0);
-        if symbol_button(&mut bar, "#prev", false, &pal).on_hover_text("Previous page").clicked() { s.send(Cmd::Page(-1), ctx); }
+        let paged = matches!(s.content, PreviewContent::Page { .. });
+        let turn = |s: &mut Shared, by: i32| if paged { turn_page(&mut s.view, by) } else { s.send(Cmd::Page(by), ctx) };
+        if symbol_button(&mut bar, "#prev", false, &pal).on_hover_text("Previous page").clicked() { turn(s, -1); }
         bar.label(egui::RichText::new(format!("{} / {total}", page + 1)).size(12.0).color(pal.text_weak));
-        if symbol_button(&mut bar, "#next", false, &pal).on_hover_text("Next page").clicked() { s.send(Cmd::Page(1), ctx); }
+        if symbol_button(&mut bar, "#next", false, &pal).on_hover_text("Next page").clicked() { turn(s, 1); }
     }
     if image {
         bar.add_space(10.0);
@@ -1467,7 +1649,7 @@ mod tests {
             name: "shape.stl".into(), kind: Kind::Other, ext: "stl".into(), is_dir: false, folder: Color32::WHITE,
             size: String::new(), place: (1, 1), mebibytes: false,
             content: PreviewContent::Model(texture, [32, 32]),
-            previous: None, switched: Instant::now() - Duration::from_secs(1), loading: None, commands: Vec::new(),
+            strip: Vec::new(), previous: None, switched: Instant::now() - Duration::from_secs(1), loading: None, commands: Vec::new(),
             view: View { zoom: 1.0, ..Default::default() }, detail: None, lane: None, model: None,
             sound: sound::Sound::new().shared(),
         }
@@ -1861,8 +2043,78 @@ a.txt	12"));
         frame(&ctx, &mut s, key(K::Plus, egui::Modifiers::NONE));
         frame(&ctx, &mut s, vec![]);
         drag(&ctx, &mut s, at(0.5, 0.7), at(0.45, 0.6));
-        assert!(s.view.pan != Vec2::ZERO, "away from the text a drag still moves the page");
+        assert!(s.view.at > 0.0, "away from the text a drag still moves the page");
         assert!(s.view.select.is_empty(), "and lets go of the text");
+    }
+
+    fn pdf_on_screen(ctx: &egui::Context, shown: u32, loaded: &[u32]) -> Shared {
+        let strip = loaded.iter().map(|&n| page(ctx, n, 5)).collect();
+        Shared { content: page(ctx, shown, 5), strip, ..model_on_screen(ctx) }
+    }
+
+    fn shown_pages(s: &mut Shared) -> Vec<u32> {
+        s.commands.drain(..).filter_map(|c| if let Cmd::ShowPage(n) = c { Some(n) } else { None }).collect()
+    }
+
+    #[test]
+    fn the_wheel_scrolls_through_the_pages_and_asks_for_the_one_in_view() {
+        use egui::{Event, Modifiers, MouseWheelUnit};
+        let ctx = egui::Context::default();
+        let mut s = pdf_on_screen(&ctx, 0, &[1, 2]);
+        frame(&ctx, &mut s, vec![]);
+        let wheel = Event::MouseWheel { unit: MouseWheelUnit::Point, delta: vec2(0.0, -120.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel };
+        frame(&ctx, &mut s, vec![Event::PointerMoved(pos2(400.0, 300.0))]);
+        for _ in 0..40 { frame(&ctx, &mut s, vec![wheel.clone()]); }
+        for _ in 0..20 { frame(&ctx, &mut s, vec![]); }
+        assert!(s.view.at > 0.5, "the pages moved up: {}", s.view.at);
+        assert!(shown_pages(&mut s).contains(&1), "the second page is asked for once it fills the middle");
+        assert_eq!(s.view.on_page, s.view.at.round() as u32);
+    }
+
+    #[test]
+    fn the_page_keys_jump_to_the_top_of_a_page_and_stop_at_the_ends() {
+        let ctx = egui::Context::default();
+        let mut s = pdf_on_screen(&ctx, 0, &[1, 2]);
+        frame(&ctx, &mut s, vec![]);
+        frame(&ctx, &mut s, key(K::ArrowRight, egui::Modifiers::NONE));
+        frame(&ctx, &mut s, key(K::PageDown, egui::Modifiers::NONE));
+        assert_eq!(s.view.at, 2.0);
+        assert_eq!(shown_pages(&mut s), [1, 2], "each page in view is asked for");
+        s.view.at = 2.4;
+        frame(&ctx, &mut s, key(K::PageUp, egui::Modifiers::NONE));
+        assert_eq!(s.view.at, 2.0, "back to the top of this page first");
+        frame(&ctx, &mut s, key(K::End, egui::Modifiers::NONE));
+        assert_eq!(s.view.at, 4.0, "the last page, which fits the window");
+        frame(&ctx, &mut s, key(K::Home, egui::Modifiers::NONE));
+        assert_eq!(s.view.at, 0.0);
+        assert!(!s.commands.iter().any(|c| matches!(c, Cmd::Page(_))), "the list turns no pages itself");
+    }
+
+    #[test]
+    fn another_page_of_the_same_document_keeps_the_view_and_its_neighbours_come_along() {
+        let (mut app, ctx) = app();
+        let file = entry("a.pdf");
+        for n in 0..3 { app.preview.remember(Key { page: n, ..Key::of(&file) }, page(&ctx, n, 5)); }
+        app.want_preview(Some(Key::of(&file)), &ctx);
+        app.hand_over(&ctx, &file, 0);
+        {
+            let mut s = app.quick.as_ref().unwrap().shared.lock().unwrap();
+            assert_eq!(s.strip.iter().filter_map(|c| pages_of(c).map(|p| p.0)).collect::<Vec<_>>(), [0, 1, 2]);
+            s.view.zoom = 2.0;
+            s.view.at = 0.8;
+            s.commands.push(Cmd::ShowPage(1));
+        }
+        app.preview_commands(&ctx);
+        app.want_preview(Some(Key::of(&file)), &ctx);
+        app.hand_over(&ctx, &file, 0);
+        let s = app.quick.as_ref().unwrap().shared.lock().unwrap();
+        assert!(matches!(s.content, PreviewContent::Page { page: 1, .. }));
+        assert_eq!((s.view.zoom, s.view.at), (2.0, 0.8), "scrolling on does not start the view again");
+        assert!(s.loading.is_none());
+        drop(s);
+        app.quick.as_ref().unwrap().shared.lock().unwrap().commands.push(Cmd::ShowPage(99));
+        app.preview_commands(&ctx);
+        assert_eq!(app.preview.page, 4, "no page past the last");
     }
 
     #[test]

@@ -1,6 +1,9 @@
 //! PDF pages, drawn one at a time.
 
-use std::path::Path;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::time::SystemTime;
 
 use hayro::hayro_interpret::font::{Glyph, GlyphRun};
 use hayro::hayro_interpret::hayro_cmap::BfString;
@@ -29,16 +32,47 @@ fn to_picture(pixmap: Pixmap) -> Picture {
     Picture { size, delays: Vec::new(), rgba: pixmap.take_rgba8(ImageAlphaType::AlphaPremultiplied) }
 }
 
-pub fn load(p: &Path, options: Options) -> Reply {
-    if std::fs::metadata(p).is_ok_and(|m| m.len() > MAX_FILE) { return failed("This PDF is too large to preview"); }
-    let data = match std::fs::read(p) {
-        Ok(data) => data,
-        Err(e) => return failed(fsx::friendly_err(&e)),
-    };
-    let pdf = match Pdf::new(data) {
+/// The PDF read last, kept for its next pages: reading a large file again for every page
+/// took longer than drawing the page. A changed size or date reads it anew.
+struct Open {
+    path: PathBuf,
+    len: u64,
+    modified: Option<SystemTime>,
+    pdf: Rc<Pdf>,
+}
+
+thread_local! {
+    static OPEN: RefCell<Option<Open>> = const { RefCell::new(None) };
+}
+
+/// Lets go of the kept PDF, once something else is being looked at.
+pub fn forget() {
+    OPEN.set(None);
+}
+
+/// The PDF, or what to say instead of it.
+fn open(p: &Path) -> Result<Rc<Pdf>, String> {
+    let md = std::fs::metadata(p).map_err(|e| fsx::friendly_err(&e))?;
+    if md.len() > MAX_FILE { return Err("This PDF is too large to preview".into()); }
+    let modified = md.modified().ok();
+    let kept = OPEN.with_borrow(|open| open.as_ref().filter(|o| o.path == p && o.len == md.len() && o.modified == modified).map(|o| o.pdf.clone()));
+    if let Some(pdf) = kept { return Ok(pdf); }
+    // Not two large files in memory at once.
+    forget();
+    let data = std::fs::read(p).map_err(|e| fsx::friendly_err(&e))?;
+    let pdf = Rc::new(match Pdf::new(data) {
         Ok(pdf) => pdf,
-        Err(e) if format!("{e:?}").to_lowercase().contains("encrypt") => return failed("This PDF is protected with a password"),
-        Err(_) => return failed("This PDF could not be read"),
+        Err(e) if format!("{e:?}").to_lowercase().contains("encrypt") => return Err("This PDF is protected with a password".into()),
+        Err(_) => return Err("This PDF could not be read".into()),
+    });
+    OPEN.set(Some(Open { path: p.to_path_buf(), len: md.len(), modified, pdf: pdf.clone() }));
+    Ok(pdf)
+}
+
+pub fn load(p: &Path, options: Options) -> Reply {
+    let pdf = match open(p) {
+        Ok(pdf) => pdf,
+        Err(message) => return failed(message),
     };
     let pages = pdf.pages();
     let total = pages.len() as u32;
@@ -152,6 +186,20 @@ impl<'a> Device<'a> for TextCollector {
 mod tests {
     use super::super::load::{scratch, whole};
     use super::*;
+
+    #[test]
+    fn the_next_page_comes_from_the_kept_file_and_a_changed_file_is_read_again() {
+        let root = scratch("pdf_kept");
+        let file = root.join("a.pdf");
+        std::fs::write(&file, two_pages()).unwrap();
+        assert!(matches!(load(&file, whole(400)).0, Loaded::Page { page: 0, pages: 2, .. }));
+        let kept = OPEN.with_borrow(|open| open.as_ref().map(|o| Rc::as_ptr(&o.pdf)));
+        assert!(matches!(load(&file, Options { page: 1, ..whole(400) }).0, Loaded::Page { page: 1, .. }));
+        assert_eq!(OPEN.with_borrow(|open| open.as_ref().map(|o| Rc::as_ptr(&o.pdf))), kept, "the same file is not read again");
+        std::fs::write(&file, b"%PDF-1.4 now broken").unwrap();
+        assert!(matches!(load(&file, whole(400)).0, Loaded::Error(_)), "a changed file is read anew");
+        assert!(OPEN.with_borrow(Option::is_none), "and a broken one is not kept");
+    }
 
     /// Two 200×100 pages; the second is filled red. Written by hand so the offsets are exact.
     fn two_pages() -> Vec<u8> {

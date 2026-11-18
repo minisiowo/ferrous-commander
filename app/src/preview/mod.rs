@@ -64,9 +64,12 @@ pub struct Key {
 
 impl Key {
     /// Worth reading before it is known to be wanted.
+    /// Further pages of a document already open are, however large the file: they come
+    /// into view as it is scrolled.
     fn light(&self) -> bool {
-        let model = self.path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("stl") || ext.eq_ignore_ascii_case("3mf"));
-        self.size <= PREFETCH_MAX_BYTES && !model
+        let is = |name: &str| self.path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case(name));
+        let model = is("stl") || is("3mf");
+        (self.page > 0 && is("pdf")) || (self.size <= PREFETCH_MAX_BYTES && !model)
     }
 
     fn options(&self) -> Options {
@@ -223,6 +226,8 @@ struct Cache {
     items: Vec<Item>,
     /// The last few too large to remember, so that reading ahead does not keep redoing them.
     too_large: VecDeque<Key>,
+    /// Grows with each insert, so that a look at what is cached can wait until it changed.
+    generation: u64,
 }
 
 impl Cache {
@@ -240,6 +245,7 @@ impl Cache {
     }
 
     fn insert(&mut self, key: Key, content: PreviewContent) {
+        self.generation += 1;
         self.items.retain(|item| item.key != key);
         let bytes = content.bytes();
         // Remembering it would push out everything else; the shown copy stays on screen.
@@ -483,6 +489,16 @@ impl Preview {
 
     pub fn page_key(&self, page: u32) -> Option<Key> {
         self.key.clone().map(|key| Key { page, ..key })
+    }
+
+    pub fn cache_generation(&self) -> u64 {
+        self.cache.generation
+    }
+
+    /// Another page of the shown file, once it has been loaded.
+    pub fn cached_page(&mut self, page: u32) -> Option<PreviewContent> {
+        let key = self.page_key(page)?;
+        self.cache.get(&key).filter(|content| matches!(content, PreviewContent::Page { .. }))
     }
 
     pub fn key(&self) -> Option<&Key> {
