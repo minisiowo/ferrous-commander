@@ -155,38 +155,14 @@ pub fn drive(p: &Painter, r: Rect, color: Color32) {
     p.circle_filled(pos2(body.right() - s * 0.18, body.center().y), s * 0.07, Color32::from_rgb(0x88, 0xC8, 0x66));
 }
 
-/// App icon (64×64 RGBA): a rounded gradient square holding a folder.
+/// Shared with the Linux launcher and the project README.
 pub fn app_icon() -> egui::IconData {
-    let n = 64usize;
-    let mut rgba = vec![0u8; n * n * 4];
-    let inside = |x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, rad: f32| {
-        let cx = x.clamp(x0 + rad, x1 - rad);
-        let cy = y.clamp(y0 + rad, y1 - rad);
-        (x - cx).powi(2) + (y - cy).powi(2) <= rad * rad
-    };
-    for y in 0..n {
-        for x in 0..n {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let i = (y * n + x) * 4;
-            if inside(fx, fy, 2.0, 2.0, 62.0, 62.0, 14.0) {
-                let t = (fx + fy) / 128.0;
-                let (r, g, b) = (
-                    (0x00 as f32 * (1.0 - t) + 0x5E as f32 * t) as u8,
-                    (0x78 as f32 * (1.0 - t) + 0x3A as f32 * t) as u8,
-                    (0xD7 as f32 * (1.0 - t) + 0xC8 as f32 * t) as u8,
-                );
-                rgba[i..i + 4].copy_from_slice(&[r, g, b, 255]);
-                let folder_back = inside(fx, fy, 14.0, 18.0, 34.0, 28.0, 3.0) || inside(fx, fy, 14.0, 22.0, 50.0, 46.0, 3.0);
-                let folder_front = inside(fx, fy, 14.0, 28.0, 50.0, 46.0, 3.0);
-                if folder_front {
-                    rgba[i..i + 4].copy_from_slice(&[0xF2, 0xC2, 0x4F, 255]);
-                } else if folder_back {
-                    rgba[i..i + 4].copy_from_slice(&[0xC9, 0x9A, 0x30, 255]);
-                }
-            }
-        }
-    }
-    egui::IconData { rgba, width: n as u32, height: n as u32 }
+    let png = include_bytes!("../packaging/linux/ferrous-commander.png");
+    let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .expect("embedded app icon is a valid PNG")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    egui::IconData { rgba: image.into_raw(), width, height }
 }
 
 /// Toolbar glyphs the bundled fonts don't have.
