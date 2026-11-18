@@ -51,6 +51,15 @@ Before tagging, run the workflow on `main` by hand (`gh workflow run release.yml
 and wait for it to pass. If a tag's build still fails, leave the tag where it is and
 release the next version number.
 
+### Release notes
+
+Prepare release notes only when the user explicitly identifies changes to announce.
+Before tagging, write a user-facing summary in `.github/release-notes/<tag>.md`
+with one plain Markdown bullet per change. The workflow uses that text for the
+GitHub release description and the app's **What's new** window. A release with
+no explicitly requested announcement can publish without that file. Keep note
+writing manual and use the user's instructions to choose what to include.
+
 ## Packaging
 
 Full packaging builds: `sh packaging/build-linux.sh` on Linux and

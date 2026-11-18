@@ -143,6 +143,14 @@ On Windows, use `powershell -File packaging\build-windows.ps1`.
 
 To build and install for the current user in one step, run `sh packaging/build-and-install-linux.sh` on Linux or `powershell -ExecutionPolicy Bypass -File packaging\build-and-install-windows.ps1` on Windows.
 
+## Publishing a release
+
+Pushing a version tag such as `v0.4.0` builds the release. To announce changes,
+include `.github/release-notes/v0.4.0.md` in the tagged commit and write one plain
+`- ` bullet per change. The same notes appear in the GitHub release and the app's
+**What's new** window. The notes are optional, so releases without a notes file
+publish normally and open without the announcement.
+
 ## More
 
 - [Full reference](docs/DETAILS.md): every feature, limit and option in detail

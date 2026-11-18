@@ -10,6 +10,15 @@ fn embed_windows_icon() {
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=FERROUS_RELEASE_NOTES");
+    let notes = std::env::var_os("FERROUS_RELEASE_NOTES").filter(|path| !path.is_empty()).map_or_else(String::new, |path| {
+        let path = std::path::PathBuf::from(path);
+        println!("cargo:rerun-if-changed={}", path.display());
+        std::fs::read_to_string(path).expect("read release notes")
+    });
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo output directory"));
+    std::fs::write(out.join("release-notes.md"), notes).expect("embed release notes");
+
     // cfg(windows) describes the machine building this, which may be checking for Linux.
     #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") { embed_windows_icon(); }

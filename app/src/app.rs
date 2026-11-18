@@ -244,6 +244,7 @@ pub enum Notice {
     /// A program from a place the user does not control. See `App::open`.
     ConfirmRun { path: PathBuf, place: &'static str, link: Option<String> },
     Problems { title: String, lines: Vec<String> },
+    ReleaseNotes { marker: PathBuf },
 }
 
 pub use crate::ui_search::SearchUi;
@@ -547,6 +548,13 @@ impl App {
         let tiles = st.tiles.clone().unwrap_or(Tile::Leaf(0)).sanitize(n);
         let wake = Wake::default();
         let folders = FolderLoader::start(wake.clone());
+        let mut notices: Vec<_> = load_problem.map(|problem| Notice::Problems {
+            title: "Your settings could not be read".to_string(),
+            lines: vec![problem, "Default settings are in use, and changes will not be saved until the file is fixed.".to_string()],
+        }).into_iter().collect();
+        if persist && let Some(marker) = crate::release_notes::pending() {
+            notices.push(Notice::ReleaseNotes { marker });
+        }
         let mut app = App {
             folders,
             wake,
@@ -578,10 +586,7 @@ impl App {
             ejecting: Vec::new(),
             dialog: None,
             locked: VecDeque::new(),
-            notices: load_problem.map(|problem| Notice::Problems {
-                title: "Your settings could not be read".to_string(),
-                lines: vec![problem, "Default settings are in use, and changes will not be saved until the file is fixed.".to_string()],
-            }).into_iter().collect(),
+            notices,
             closing: false,
             save_warned: false,
             #[cfg(target_os = "linux")]

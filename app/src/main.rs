@@ -29,6 +29,7 @@ mod ops;
 mod search;
 mod palette;
 mod preview;
+mod release_notes;
 mod defaults;
 mod settings;
 mod theme;

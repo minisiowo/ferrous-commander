@@ -1428,6 +1428,30 @@ fn keys_cannot_confirm_a_permanent_deletion() {
 }
 
 #[test]
+fn dismissing_release_notes_records_the_version() {
+    let (root, _, ctx, mut app) = safety_app("release_notes");
+    let marker = root.join("seen-releases").join(crate::release_notes::VERSION);
+    app.notices.push(crate::app::Notice::ReleaseNotes { marker: marker.clone() });
+
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    assert_eq!(app.notices.len(), 1);
+    assert!(!marker.exists());
+    let version = format!("Ferrous Commander {}", crate::release_notes::VERSION);
+    assert!(painted_text(&ctx, &mut app, &version).is_some());
+    if let Some(line) = crate::release_notes::NOTES.lines().next() {
+        let change = line.strip_prefix("- ").unwrap_or(line);
+        assert!(painted_text(&ctx, &mut app, &format!("• {change}")).is_some());
+    }
+
+    click_text(&ctx, &mut app, "Got it");
+    assert!(app.notices.is_empty());
+    assert!(marker.is_file());
+    std::fs::remove_file(marker).unwrap();
+    std::fs::remove_dir(root.join("seen-releases")).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn window_stays_open_until_operations_stop() {
     use crate::app::Notice;
     use crate::ops::{Job, OpKind, Progress};

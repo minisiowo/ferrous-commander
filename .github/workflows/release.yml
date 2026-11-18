@@ -11,7 +11,31 @@ permissions:
   contents: read
 
 jobs:
+  release-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'push'
+        with:
+          persist-credentials: false
+      - name: Package the optional notes for this tag
+        if: github.event_name == 'push'
+        run: |
+          authored=".github/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$authored" ]; then
+            cp -- "$authored" release-notes.md
+          else
+            : > release-notes.md
+          fi
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
   linux:
+    needs: release-notes
     # The oldest supported runner, so the program also starts on older systems.
     runs-on: ubuntu-22.04
     defaults:
@@ -19,6 +43,11 @@ jobs:
         working-directory: app
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/ferrous-release
       - name: Tag must match the version in Cargo.toml
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -28,6 +57,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y build-essential libxkbcommon-dev libgl1-mesa-dev libwayland-dev libasound2-dev acl attr
       - run: cargo test --locked
       - run: sh packaging/build-linux.sh
+        env:
+          FERROUS_RELEASE_NOTES: ${{ github.event_name == 'push' && format('{0}/ferrous-release/release-notes.md', runner.temp) || '' }}
       - uses: actions/upload-artifact@v4
         with:
           name: linux
@@ -35,16 +66,24 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: release-notes
     runs-on: windows-latest
     defaults:
       run:
         working-directory: app
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/ferrous-release
       - run: rustup update stable; rustup default stable
       - run: cargo test --locked
       - run: choco install innosetup -y --no-progress
       - run: powershell -ExecutionPolicy Bypass -File packaging\build-windows.ps1
+        env:
+          FERROUS_RELEASE_NOTES: ${{ github.event_name == 'push' && format('{0}/ferrous-release/release-notes.md', runner.temp) || '' }}
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -54,7 +93,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push'
     needs: [linux, windows]
     runs-on: ubuntu-latest
     permissions:
@@ -68,7 +107,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          mv assets/release-notes.md release-notes.md
           cd assets
           sha256sum * > SHA256SUMS.txt
           gh release create "$GITHUB_REF_NAME" * --repo "$GITHUB_REPOSITORY" \
-            --title "Ferrous Commander ${GITHUB_REF_NAME#v}" --generate-notes --prerelease
+            --title "Ferrous Commander ${GITHUB_REF_NAME#v}" --notes-file ../release-notes.md --prerelease

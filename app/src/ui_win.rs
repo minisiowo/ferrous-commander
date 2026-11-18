@@ -9,6 +9,7 @@ use crate::app::{Act, App, Dialog, DragPaths, DropTarget, Notice, ToastKind, is_
 use crate::chrome::{self, Icon, Panel};
 use crate::fsx;
 use crate::keymap::Command;
+use crate::release_notes;
 use crate::theme::hex;
 
 fn settings_section(ui: &mut egui::Ui, title: &str, accent: egui::Color32) {
@@ -214,6 +215,7 @@ impl App {
             Notice::ConfirmClose => "File operations are still running".to_string(),
             Notice::ConfirmRun { .. } => "Run this program?".to_string(),
             Notice::Problems { title, .. } => title.clone(),
+            Notice::ReleaseNotes { .. } => "What's new".to_string(),
         };
         let mut dismiss = false;
         let mut escape = false;
@@ -221,6 +223,7 @@ impl App {
         let icon = match notice {
             Notice::ConfirmDestroy { .. } | Notice::ConfirmRun { .. } => Icon::Glyph("⚠", Some(hex("#ef7063"))),
             Notice::ConfirmClose | Notice::Problems { .. } | Notice::ConfirmTrash { .. } => Icon::Glyph("⚠", None),
+            Notice::ReleaseNotes { .. } => Icon::Glyph("★", Some(pal.accent)),
         };
         dismiss |= Panel::new(&title, pal, icon)
             .fixed_width(440.0)
@@ -290,11 +293,32 @@ impl App {
                         chrome::body(ui, |ui| list(ui, lines));
                         chrome::footer(ui, pal, |ui| dismiss |= ui.button("Close").clicked());
                     }
+                    Notice::ReleaseNotes { .. } => {
+                        chrome::body(ui, |ui| {
+                            ui.label(RichText::new(format!("Ferrous Commander {}", release_notes::VERSION)).strong().color(pal.text));
+                            ui.add_space(6.0);
+                            egui::ScrollArea::vertical().id_salt("release_notes").max_height(220.0).show(ui, |ui| {
+                                for line in release_notes::NOTES.lines() {
+                                    let change = line.strip_prefix("- ").unwrap_or(line);
+                                    ui.label(RichText::new(format!("• {change}")).color(pal.text));
+                                }
+                            });
+                        });
+                        chrome::footer(ui, pal, |ui| {
+                            dismiss |= ui.button("Got it").clicked();
+                            ui.hyperlink_to("View release on GitHub", release_notes::URL);
+                        });
+                    }
                 }
             });
         dismiss |= escape;
         if !confirm && !dismiss { return; }
         let notice = self.notices.remove(0);
+        if let Notice::ReleaseNotes { marker } = &notice
+            && let Err(error) = release_notes::mark_seen(marker)
+        {
+            self.toast(ToastKind::Error, format!("Could not save release notes dismissal: {error}"));
+        }
         if !confirm { return; }
         match notice {
             Notice::ConfirmDestroy { items } => {
@@ -306,7 +330,7 @@ impl App {
                 self.closing = true;
             }
             Notice::ConfirmRun { path, .. } => self.launch(&path),
-            Notice::Problems { .. } => {}
+            Notice::Problems { .. } | Notice::ReleaseNotes { .. } => {}
         }
     }
 
