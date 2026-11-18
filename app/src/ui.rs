@@ -417,6 +417,7 @@ impl App {
         self.overlays(&ctx);
         self.which_key(&ctx);
         self.handle_drop(&ctx);
+        self.fav_drag_out(&ctx);
         self.end_frame(&ctx);
         self.screenshot(&ctx);
     }
@@ -1135,6 +1136,7 @@ impl App {
         self.fav_item_drop(ui, &r.response, g, &rows);
         self.fav_folder_drop(ui, r.response.rect, g, &rows);
         self.sidebar_group_drop(ui, &r.response, SidebarSection::Favorite(g));
+        self.fav_cards.push(r.response.rect.intersect(ui.clip_rect()));
         let target = self.fav_paths_target(ui, r.response.rect, g, paths, &rows);
         // A scrolled-away part must not catch a drop aimed at what covers it.
         self.drop_zones.push((r.response.rect.intersect(ui.clip_rect()), target));
@@ -1324,7 +1326,12 @@ impl App {
             });
             ui.spacing_mut().item_spacing.y = 1.0;
             for p in &hist {
-                let resp = self.side_item(ui, p, &fsx::display_name(p));
+                // Dragged like a path-bar piece: onto a favorites group or a panel's tabs.
+                let resp = self.side_item_with(ui, p, &fsx::display_name(p), Sense::click_and_drag());
+                self.side_row_drop(ui, resp.rect, p);
+                if resp.drag_started() && !is_computer(p) {
+                    egui::DragAndDrop::set_payload(ui.ctx(), CrumbDrag { pane: usize::MAX, path: p.clone() });
+                }
                 resp.context_menu(|ui| {
                     self.path_color_menu(ui, "Folder color", vec![p.clone()]);
                 });

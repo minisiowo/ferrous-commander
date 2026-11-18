@@ -2216,6 +2216,40 @@ fn tabs_and_path_pieces_become_shortcuts_without_moving_anything() {
 }
 
 #[test]
+fn history_folders_drag_into_a_group_and_shortcuts_drag_out_of_it() {
+    use crate::app::DropTarget;
+    use crate::settings::{FavGroup, SidebarSection};
+    let root = std::env::temp_dir().join(format!("fc_history_drag_{}", std::process::id()));
+    let (seen, kept) = (root.join("fc-seen"), root.join("fc-kept"));
+    std::fs::create_dir_all(&seen).unwrap();
+    std::fs::create_dir_all(&kept).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(Some(root.join("unused.png")));
+    app.st.favorites = vec![FavGroup::new("Beloved", vec![kept.clone()])];
+    app.st.history = vec![seen.clone()];
+    app.st.show_history = true;
+    app.st.sidebar_order = vec![SidebarSection::Favorite(0), SidebarSection::History,
+        SidebarSection::Drives, SidebarSection::Cloud];
+    for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
+    let card = |app: &App| app.drop_zones.iter().find_map(|(r, t)| matches!(t, DropTarget::Favorites { .. }).then_some(*r)).unwrap();
+    let screen = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0));
+
+    let from = painted_at(&ctx, &mut app, "fc-seen", screen);
+    let c = card(&app);
+    drag_mouse(&ctx, &mut app, from, pos2(c.min.x + 40.0, c.max.y - 8.0));
+    assert_eq!(app.st.favorites[0].paths, [kept.clone(), seen.clone()], "a history folder becomes a shortcut");
+    assert_eq!(app.st.history, [seen.clone()], "and stays in the history");
+
+    let pane = app.pane_rects[0].1;
+    let c = card(&app);
+    let shortcut = painted_at(&ctx, &mut app, "fc-kept", c);
+    drag_mouse(&ctx, &mut app, shortcut, pane.center());
+    assert_eq!(app.st.favorites[0].paths, [seen.clone()], "a shortcut let go outside the groups is removed");
+    assert!(kept.is_dir(), "its folder stays");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn ctrl_l_selects_the_whole_path_like_a_browser() {
     let root = std::env::temp_dir().join(format!("fc_ctrl_l_{}", std::process::id()));
     std::fs::create_dir_all(root.join("inner")).unwrap();

@@ -447,6 +447,8 @@ pub struct App {
     persist: bool,
     generation: u64,
     pub drop_zones: Vec<(egui::Rect, DropTarget)>,
+    /// The favorites groups drawn this frame; a shortcut dragged out of all of them is removed.
+    pub fav_cards: Vec<egui::Rect>,
     /// The tabs drawn this frame: the panel whose strip shows the tab, the panel and tab it is, and where.
     pub tab_rects: Vec<(usize, usize, usize, egui::Rect)>,
     /// The window is too small for the layout, so one panel shows and lists every tab.
@@ -627,6 +629,7 @@ impl App {
             persist,
             generation: 1,
             drop_zones: Vec::new(),
+            fav_cards: Vec::new(),
             tab_rects: Vec::new(),
             panels_stacked: false,
             panels_area: egui::Vec2::ZERO,
@@ -799,6 +802,7 @@ impl App {
             self.applied = Some(key);
         }
         self.drop_zones.clear();
+        self.fav_cards.clear();
         self.tab_rects.clear();
         #[cfg(windows)]
         {

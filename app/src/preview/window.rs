@@ -126,6 +126,10 @@ struct View {
     copied: Option<Instant>,
     /// A drag on a page that began on its text chooses text instead of moving the page.
     choosing: bool,
+    /// The last press on text: when, where, and how many came in a row.
+    presses: (f64, Pos2, u8),
+    /// What a double (2) or triple (3) press took, so that a drag goes on by words or lines.
+    grain: Option<(u8, Selection)>,
 }
 
 struct Shared {
@@ -1086,7 +1090,14 @@ fn page_choosing(ui: &Ui, s: &mut Shared, sheets: &[Sheet], response: &egui::Res
     let held = match s.view.select { Selection::Page { page, anchor, .. } => Some((page, anchor)), _ => None };
     if pressed && response.hovered() {
         s.view.choosing = over.is_some();
+        let presses = if over.is_some() { press_count(ui, s, pos) } else { 1 };
+        s.view.grain = None;
         s.view.select = match (over, shift.then_some(held).flatten()) {
+            (Some((page, at, text)), _) if presses > 1 => {
+                let (anchor, head) = page_stretch(text, at, presses);
+                s.view.grain = Some((presses, Selection::Page { page, anchor, head }));
+                Selection::Page { page, anchor, head }
+            }
             (Some((page, at, _)), Some((from_page, from))) if from_page == page => Selection::Page { page, anchor: from, head: at },
             (Some((page, at, _)), _) => Selection::Page { page, anchor: at, head: at },
             (None, _) => Selection::None,
@@ -1095,20 +1106,47 @@ fn page_choosing(ui: &Ui, s: &mut Shared, sheets: &[Sheet], response: &egui::Res
         && let Some(&(_, r, text)) = texts.iter().find(|t| t.0 == page)
         && let Some(at) = page_place(text, r, pos, true)
     {
-        s.view.select = Selection::Page { page, anchor, head: at };
+        let (anchor, head) = match s.view.grain {
+            Some((n, Selection::Page { page: first, anchor: a, head: b })) if first == page => by_grain((a, b), page_stretch(text, at, n)),
+            _ => (anchor, at),
+        };
+        s.view.select = Selection::Page { page, anchor, head };
         ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
-    }
-    if response.double_clicked() && let Some((page, at, text)) = over {
-        let i = (at as usize).min(text.chars.len() - 1);
-        let (from, to) = select::word_at(&text.text, text.chars[i].0 as usize);
-        s.view.select = Selection::Page { page, anchor: select::page_char(text, from), head: select::page_char(text, to) };
-        return true;
     }
     // Held until the button is let go: egui calls it a drag only once the pointer has moved
     // a little, and the frames before that must not end the choosing.
     let choosing = s.view.choosing;
     if !down && !pressed { s.view.choosing = false; }
     choosing
+}
+
+/// The word (2 presses) or line (3) of a page around the place before character `at`.
+fn page_stretch(text: &PageText, at: u32, presses: u8) -> (u32, u32) {
+    let Some(last) = text.chars.len().checked_sub(1) else { return (at, at) };
+    let byte = (text.chars[(at as usize).min(last)].0 as usize).min(text.text.len());
+    let byte = text.text.floor_char_boundary(byte);
+    let (from, to) = if presses == 2 {
+        select::word_at(&text.text, byte)
+    } else {
+        let from = text.text[..byte].rfind('\n').map_or(0, |k| k + 1);
+        (from, text.text[byte..].find('\n').map_or(text.text.len(), |k| byte + k))
+    };
+    (select::page_char(text, from), select::page_char(text, to))
+}
+
+/// Presses in a row on about the same spot: 1, then 2 for a word, 3 for a line, then 1 again.
+fn press_count(ui: &Ui, s: &mut Shared, pos: Pos2) -> u8 {
+    let (now, near) = (ui.input(|i| i.time), ui.options(|o| o.input_options.max_click_dist));
+    let (then, at, n) = s.view.presses;
+    let n = if n > 0 && now - then <= 0.5 && at.distance(pos) <= near { n % 3 + 1 } else { 1 };
+    s.view.presses = (now, pos, n);
+    n
+}
+
+/// A choice by whole words or lines: from what the presses took, `first`, on to the
+/// stretch under the pointer, `here`, always keeping all of `first`.
+fn by_grain<T: Ord + Copy>(first: (T, T), here: (T, T)) -> (T, T) {
+    if here.0 < first.0 { (first.1, here.0) } else { (first.0, here.1.max(first.1)) }
 }
 
 /// Chosen characters, joined along their lines so that no seams show.
@@ -1278,17 +1316,19 @@ fn text_choosing(ui: &Ui, s: &mut Shared, response: &egui::Response, place: &dyn
     let (pressed, shift, pos) = ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift, i.pointer.interact_pos()));
     let Some(pos) = pos else { return };
     let anchor = match s.view.select { Selection::Text { anchor, .. } => Some(anchor), _ => None };
+    let stretch = |n: u8, at: u32| if n == 2 { word(at) } else { line(at) };
     if pressed && response.hovered() {
         let Some(at) = place(pos) else { return };
-        s.view.select = Selection::Text { anchor: if shift { anchor.unwrap_or(at) } else { at }, head: at };
-    } else if response.dragged_by(egui::PointerButton::Primary) && let (Some(anchor), Some(at)) = (anchor, place(pos)) {
-        s.view.select = Selection::Text { anchor, head: at };
-    }
-    if response.triple_clicked() && let Some(at) = place(pos) {
-        let (anchor, head) = line(at);
+        let n = press_count(ui, s, pos);
+        let (anchor, head) = if n > 1 { stretch(n, at) } else { (if shift { anchor.unwrap_or(at) } else { at }, at) };
         s.view.select = Selection::Text { anchor, head };
-    } else if response.double_clicked() && let Some(at) = place(pos) {
-        let (anchor, head) = word(at);
+        s.view.grain = (n > 1).then_some((n, s.view.select));
+    } else if response.dragged_by(egui::PointerButton::Primary) && let Some(at) = place(pos) {
+        let (anchor, head) = match (s.view.grain, anchor) {
+            (Some((n, Selection::Text { anchor: a, head: b })), _) => by_grain((a, b), stretch(n, at)),
+            (_, Some(anchor)) => (anchor, at),
+            _ => return,
+        };
         s.view.select = Selection::Text { anchor, head };
     }
 }
@@ -1380,7 +1420,7 @@ fn doc_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<DocData>, body: Rect) {
 fn doc_choosing(ui: &Ui, s: &mut Shared, doc: &DocData, laid: &[(Arc<egui::Galley>, Pos2, BlockKind)], response: &egui::Response, origin: Pos2) {
     let (pressed, shift, pos) = ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift, i.pointer.interact_pos()));
     let Some(pos) = pos else { return };
-    if !(pressed || response.dragged() || response.double_clicked() || response.triple_clicked()) { return; }
+    if !(pressed || response.dragged()) { return; }
     // The note about a cut document comes after the blocks and is not part of them.
     let count = doc.blocks.len().min(laid.len());
     if count == 0 { return; }
@@ -1391,16 +1431,24 @@ fn doc_choosing(ui: &Ui, s: &mut Shared, doc: &DocData, laid: &[(Arc<egui::Galle
     let byte = if local.y < at.y { 0 } else { select::byte_at(galley, text, local - at.to_vec2()) } as u32;
     let here = (i as u32, byte);
     let anchor = match s.view.select { Selection::Doc { anchor, .. } => Some(anchor), _ => None };
-    if pressed && response.hovered() {
-        s.view.select = Selection::Doc { anchor: if shift { anchor.unwrap_or(here) } else { here }, head: here };
-    } else if response.dragged_by(egui::PointerButton::Primary) && let Some(anchor) = anchor {
-        s.view.select = Selection::Doc { anchor, head: here };
-    }
-    if response.triple_clicked() {
-        s.view.select = Selection::Doc { anchor: (here.0, 0), head: (here.0, text.len() as u32) };
-    } else if response.double_clicked() {
+    let stretch = |n: u8| if n == 2 {
         let (from, to) = select::word_at(text, byte as usize);
-        s.view.select = Selection::Doc { anchor: (here.0, from as u32), head: (here.0, to as u32) };
+        ((here.0, from as u32), (here.0, to as u32))
+    } else {
+        ((here.0, 0), (here.0, text.len() as u32))
+    };
+    if pressed && response.hovered() {
+        let n = press_count(ui, s, pos);
+        let (anchor, head) = if n > 1 { stretch(n) } else { (if shift { anchor.unwrap_or(here) } else { here }, here) };
+        s.view.select = Selection::Doc { anchor, head };
+        s.view.grain = (n > 1).then_some((n, s.view.select));
+    } else if response.dragged_by(egui::PointerButton::Primary) {
+        let (anchor, head) = match (s.view.grain, anchor) {
+            (Some((n, Selection::Doc { anchor: a, head: b })), _) => by_grain((a, b), stretch(n)),
+            (_, Some(anchor)) => (anchor, here),
+            _ => return,
+        };
+        s.view.select = Selection::Doc { anchor, head };
     }
 }
 
@@ -2010,8 +2058,61 @@ two"), "the note about a cut document is not copied");
         let on = pos2(left, BAR_H) + at.to_vec2() + vec2(galley.size().x * 0.45, galley.size().y / 2.0);
         let click = |pressed| Event::PointerButton { pos: on, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
         frame(&ctx, &mut s, vec![Event::PointerMoved(on)]);
-        frame(&ctx, &mut s, vec![click(true), click(false), click(true), click(false)]);
+        for pressed in [true, false, true, false] { frame(&ctx, &mut s, vec![click(pressed)]); }
         assert_eq!(frame(&ctx, &mut s, vec![Event::Copy]).as_deref(), Some("words"));
+    }
+
+    #[test]
+    fn a_double_press_takes_a_word_and_a_drag_from_it_goes_on_by_words() {
+        use egui::{Event, Modifiers, PointerButton};
+        let ctx = egui::Context::default();
+        let doc = TextDoc::new("alpha beta gamma\ndelta epsilon".into(), false, Default::default());
+        let mut s = Shared { content: PreviewContent::Text(Arc::new(doc)), ..model_on_screen(&ctx) };
+        let mut time = 1.0;
+        let mut at = |s: &mut Shared, events: Vec<Event>| {
+            time += 0.05;
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), time: Some(time), events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| draw(ui, s, ViewportClass::Deferred));
+            out.textures_delta.clear();
+            out.platform_output.commands.iter().find_map(|c| if let egui::OutputCommand::CopyText(t) = c { Some(t.clone()) } else { None })
+        };
+        at(&mut s, vec![]);
+        let row = BAR_H + 8.0;
+        let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        // Find a spot inside "beta" by trying single presses along the row.
+        let mut on = None;
+        for x in (0..400).step_by(4) {
+            let p = pos2(x as f32, row);
+            at(&mut s, vec![Event::PointerMoved(p), button(p, true)]);
+            at(&mut s, vec![button(p, false)]);
+            time_gap(&mut s, &mut at);
+            if let Selection::Text { head, .. } = s.view.select && (7..9).contains(&head) { on = Some(p); break; }
+        }
+        let on = on.expect("a place in beta");
+        at(&mut s, vec![Event::PointerMoved(on), button(on, true)]);
+        at(&mut s, vec![button(on, false)]);
+        at(&mut s, vec![button(on, true)]);
+        assert_eq!(at(&mut s, vec![Event::Copy]).as_deref(), Some("beta"), "the word is taken on the second press");
+        at(&mut s, vec![button(on, false)]);
+        assert_eq!(at(&mut s, vec![Event::Copy]).as_deref(), Some("beta"));
+        // Pressed twice and dragged: whole words, both ways.
+        at(&mut s, vec![button(on, true)]);
+        at(&mut s, vec![button(on, false)]);
+        time_gap(&mut s, &mut at);
+        at(&mut s, vec![button(on, true)]);
+        at(&mut s, vec![button(on, false), button(on, true)]);
+        let ahead = on + vec2(60.0, 0.0);
+        at(&mut s, vec![Event::PointerMoved(on + vec2(8.0, 0.0))]);
+        at(&mut s, vec![Event::PointerMoved(ahead)]);
+        assert_eq!(at(&mut s, vec![Event::Copy]).as_deref(), Some("beta gamma"));
+        at(&mut s, vec![Event::PointerMoved(pos2(on.x - 30.0, row))]);
+        assert_eq!(at(&mut s, vec![Event::Copy]).as_deref(), Some("alpha beta"));
+        at(&mut s, vec![button(pos2(on.x - 30.0, row), false)]);
+    }
+
+    /// Lets enough time pass that the next press starts afresh.
+    fn time_gap(s: &mut Shared, at: &mut impl FnMut(&mut Shared, Vec<egui::Event>) -> Option<String>) {
+        for _ in 0..12 { at(s, vec![]); }
     }
 
     #[test]
@@ -2039,6 +2140,11 @@ a.txt	12"));
         let at = |x: f32, y: f32| page.min + vec2(x * page.width(), y * page.height());
         drag(&ctx, &mut s, at(0.11, 0.15), at(0.38, 0.15));
         assert_eq!(frame(&ctx, &mut s, vec![egui::Event::Copy]).as_deref(), Some("Hel"));
+        let word = at(0.25, 0.15);
+        let click = |pressed| egui::Event::PointerButton { pos: word, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        for pressed in [true, false, true, false] { frame(&ctx, &mut s, vec![click(pressed)]); }
+        assert_eq!(frame(&ctx, &mut s, vec![egui::Event::Copy]).as_deref(), Some("Hello"), "a double press takes the word");
+        assert_eq!(s.view.zoom, 1.0);
         assert_eq!(s.view.pan, Vec2::ZERO, "choosing does not move the page");
         frame(&ctx, &mut s, key(K::Plus, egui::Modifiers::NONE));
         frame(&ctx, &mut s, vec![]);

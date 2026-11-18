@@ -716,6 +716,21 @@ impl App {
         }
     }
 
+    /// A shortcut dragged out of every favorites group shows a bin by the pointer,
+    /// and is removed from its group when let go there.
+    pub fn fav_drag_out(&mut self, ctx: &egui::Context) {
+        let Some(drag) = egui::DragAndDrop::payload::<crate::app::FavDrag>(ctx) else { return };
+        let (pos, released) = ctx.input(|inp| (inp.pointer.hover_pos(), inp.pointer.any_released()));
+        let Some(pos) = pos else { return };
+        if self.fav_cards.iter().any(|r| r.contains(pos)) { return; }
+        let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("fav_drag_out"));
+        ctx.layer_painter(layer).text(pos + vec2(14.0, 10.0), egui::Align2::LEFT_TOP, "🗑", egui::FontId::proportional(18.0), self.pal.text_important);
+        if released {
+            egui::DragAndDrop::clear_payload(ctx);
+            self.acts.push(Act::RemoveFavorite(drag.group, drag.index));
+        }
+    }
+
     /// `--screenshot <file.png>`: draw ~120 frames, save the window picture, exit.
     pub fn screenshot(&mut self, ctx: &egui::Context) {
         let frame = self.frame;
