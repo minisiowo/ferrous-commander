@@ -437,6 +437,9 @@ mod tests {
         assert_eq!((picture.delays, picture.rgba.len()), (vec![50, 60], 16));
         let text: Reply = (Loaded::Text { text: "żółw".into(), trimmed: true, colours: load::Colours { spans: vec![(7, 1)], ends: vec![1] } }, None);
         assert!(matches!(read_reply(&mut frame(&text).as_slice()).unwrap(), (Loaded::Text { text, trimmed: true, .. }, None) if text == "żółw"));
+        let words = super::super::select::PageText { text: "Zażółć".into(), chars: vec![(0, [0.1, 0.2, 0.3, 0.4]), (1, [0.3, 0.2, 0.5, 0.4])] };
+        let page: Reply = (Loaded::Page { orig: [595, 842], page: 1, pages: 3, text: Some(words.clone()) }, Some(Picture { size: [1, 1], delays: Vec::new(), rgba: vec![255; 4] }));
+        assert!(matches!(read_reply(&mut frame(&page).as_slice()).unwrap().0, Loaded::Page { text: Some(text), .. } if text == words), "the text of a page comes along");
     }
 
     #[test]

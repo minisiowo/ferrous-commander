@@ -77,7 +77,8 @@ pub enum Loaded {
     Image([u32; 2]),
     /// A drawn 3D model, with nothing behind it; its size in points, as for `Image`.
     Model([u32; 2]),
-    Page { orig: [u32; 2], page: u32, pages: u32 },
+    /// The text of the page comes along when it has any, to be chosen and copied.
+    Page { orig: [u32; 2], page: u32, pages: u32, text: Option<super::select::PageText> },
     /// A sharper copy of part of a picture that is already shown.
     Detail,
     Doc { blocks: Vec<Block>, source: Option<String>, trimmed: bool },

@@ -11,6 +11,7 @@ mod model;
 mod office;
 mod pdf;
 mod picture;
+pub mod select;
 pub mod sound;
 pub mod text;
 pub mod window;
@@ -144,7 +145,7 @@ pub enum PreviewContent {
     Text(Arc<TextDoc>),
     /// Frames with their durations, and the original size.
     Animation(Frames, [u32; 2]),
-    Page { texture: egui::TextureHandle, orig: [u32; 2], page: u32, pages: u32 },
+    Page { texture: egui::TextureHandle, orig: [u32; 2], page: u32, pages: u32, text: Option<Arc<select::PageText>> },
     /// A sharper copy of the part of the shown picture named by the job.
     Detail(egui::TextureHandle),
     Doc(Arc<DocData>),
@@ -181,7 +182,8 @@ impl PreviewContent {
     fn bytes(&self) -> usize {
         match self {
             PreviewContent::Text(t) => t.bytes(),
-            PreviewContent::Image(tex, ..) | PreviewContent::Model(tex, _) | PreviewContent::Page { texture: tex, .. } | PreviewContent::Detail(tex) => tex.byte_size(),
+            PreviewContent::Page { texture, text, .. } => texture.byte_size() + text.as_ref().map_or(0, |t| t.bytes()),
+            PreviewContent::Image(tex, ..) | PreviewContent::Model(tex, _) | PreviewContent::Detail(tex) => tex.byte_size(),
             PreviewContent::Animation(frames, _) => frames_bytes(frames),
             PreviewContent::Doc(doc) => {
                 let blocks: usize = doc.blocks.iter().map(|b| b.text.len() + 32).sum();
@@ -391,7 +393,7 @@ fn content_of((loaded, picture): Reply, ctx: &egui::Context) -> PreviewContent {
         (Loaded::Text { text, trimmed, colours }, _) => PreviewContent::Text(Arc::new(TextDoc::new(text, trimmed, colours))),
         (Loaded::Image(orig), Some(p)) => picture_content(p, orig, ctx),
         (Loaded::Model(orig), Some(p)) => PreviewContent::Model(texture(&p.rgba, p.size, ctx), orig),
-        (Loaded::Page { orig, page, pages }, Some(p)) => PreviewContent::Page { texture: texture(&p.rgba, p.size, ctx), orig, page, pages },
+        (Loaded::Page { orig, page, pages, text }, Some(p)) => PreviewContent::Page { texture: texture(&p.rgba, p.size, ctx), orig, page, pages, text: text.map(Arc::new) },
         (Loaded::Detail, Some(p)) => PreviewContent::Detail(texture(&p.rgba, p.size, ctx)),
         (Loaded::Image(_) | Loaded::Model(_) | Loaded::Page { .. } | Loaded::Detail, None) => PreviewContent::Error("The picture is missing".into()),
         (Loaded::Doc { blocks, source, trimmed }, picture) => {

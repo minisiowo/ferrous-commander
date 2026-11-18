@@ -13,6 +13,7 @@ use super::text::{CLASS_COMMENT, CLASS_FUNCTION, CLASS_KEYWORD, CLASS_NUMBER, CL
 use super::load::ArchiveEntry;
 use super::load::ModelView;
 use super::model::{MIN_MODEL_ZOOM, TILT_OFFSETS};
+use super::select::{self, PageText, Selection};
 use super::{DocData, Job, Key, PreviewContent, Slot, TableDoc, TextDoc, sound};
 use crate::app::{Act, App};
 use crate::chrome::{self, BAR_H, Icon};
@@ -60,6 +61,8 @@ const READING_WIDTH: f32 = 760.0;
 const HEX_ASCII_X: f32 = 520.0;
 /// Past the end of any preview, yet small enough to compute with.
 const SCROLL_TO_END: f32 = 1e9;
+/// How long the title bar says that text was copied.
+const COPIED_FOR: Duration = Duration::from_millis(1500);
 
 pub(super) fn viewport() -> ViewportId {
     ViewportId::from_hash_of("ferrous_commander_preview")
@@ -108,6 +111,11 @@ struct View {
     look: Option<egui::TextureHandle>,
     /// For tracing: since when a look has been waiting.
     look_waiting: Option<Instant>,
+    /// Text chosen with the mouse, and when some was last copied.
+    select: Selection,
+    copied: Option<Instant>,
+    /// A drag on a page that began on its text chooses text instead of moving the page.
+    choosing: bool,
 }
 
 struct Shared {
@@ -398,6 +406,7 @@ impl App {
                 quick.revision = self.preview.revision;
                 s.content = self.preview.content.clone();
                 s.view.started = None;
+                s.view.select = Selection::None;
                 changed = true;
             }
         } else {
@@ -460,7 +469,15 @@ fn keys(ctx: &egui::Context, s: &mut Shared, page: f32) {
     }
     let events = ctx.input(|i| i.events.clone());
     for event in events {
+        if matches!(event, egui::Event::Copy) {
+            copy_selection(s, ctx);
+            continue;
+        }
         let egui::Event::Key { key, pressed: true, repeat, modifiers, .. } = event else { continue };
+        if key == K::A && modifiers.command && !modifiers.alt {
+            s.view.select = select_all(s);
+            continue;
+        }
         if modifiers.ctrl || modifiers.alt || modifiers.command { continue; }
         let paged = matches!(s.content, PreviewContent::Page { .. });
         let music = s.music();
@@ -473,6 +490,7 @@ fn keys(ctx: &egui::Context, s: &mut Shared, page: f32) {
             }
             K::PageDown if paged => s.send(Cmd::Page(1), ctx),
             K::PageUp if paged => s.send(Cmd::Page(-1), ctx),
+            K::Escape if !repeat && !s.view.select.is_empty() => s.view.select = Selection::None,
             K::Space | K::Escape if !repeat => s.send(Cmd::Close, ctx),
             K::Enter if !repeat => s.send(Cmd::Open, ctx),
             K::ArrowDown => s.send(Cmd::Step(1), ctx),
@@ -487,10 +505,77 @@ fn keys(ctx: &egui::Context, s: &mut Shared, page: f32) {
             K::Minus => zoom_by(&mut s.view, 0.8),
             K::Num0 => reset_look(&mut s.view),
             K::W if !repeat => { s.view.wrap = !s.view.wrap; s.view.rows_for = (0, 0); }
-            K::M if !repeat => { s.view.source = !s.view.source; s.view.rows_for = (0, 0); }
+            K::M if !repeat => { s.view.source = !s.view.source; s.view.rows_for = (0, 0); s.view.select = Selection::None; }
             _ => {}
         }
     }
+}
+
+/// What is chosen in the shown content, as it goes to the clipboard.
+fn selected_text(s: &Shared) -> Option<String> {
+    match (&s.content, s.view.select) {
+        (PreviewContent::Text(doc), Selection::Text { anchor, head }) => select::text_between(&doc.text, anchor, head),
+        (PreviewContent::Doc(doc), Selection::Text { anchor, head }) => select::text_between(&doc.source.as_ref()?.text, anchor, head),
+        (PreviewContent::Doc(doc), Selection::Doc { anchor, head }) => select::blocks_between(&doc.blocks, anchor, head),
+        (PreviewContent::Table(table), Selection::Cells { anchor, head }) => select::cells_between(&table.rows, anchor, head),
+        (PreviewContent::Page { text: Some(text), .. }, Selection::Page { anchor, head }) => select::page_between(text, anchor, head),
+        _ => None,
+    }
+}
+
+fn select_all(s: &Shared) -> Selection {
+    match &s.content {
+        PreviewContent::Text(doc) => Selection::Text { anchor: 0, head: doc.text.len() as u32 },
+        PreviewContent::Doc(doc) => match (&doc.source, s.view.source) {
+            (Some(source), true) => Selection::Text { anchor: 0, head: source.text.len() as u32 },
+            _ => match doc.blocks.last() {
+                Some(last) => Selection::Doc { anchor: (0, 0), head: (doc.blocks.len() as u32 - 1, last.text.len() as u32) },
+                None => Selection::None,
+            },
+        },
+        PreviewContent::Table(table) if !table.rows.is_empty() => {
+            let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
+            Selection::Cells { anchor: (0, 0), head: (table.rows.len() as u32 - 1, columns as u32 - 1) }
+        }
+        PreviewContent::Page { text: Some(text), .. } => Selection::Page { anchor: 0, head: text.chars.len() as u32 },
+        _ => Selection::None,
+    }
+}
+
+fn copy_selection(s: &mut Shared, ctx: &egui::Context) {
+    let Some(text) = selected_text(s) else { return };
+    ctx.copy_text(text);
+    s.view.copied = Some(Instant::now());
+    ctx.request_repaint_after(COPIED_FOR);
+}
+
+/// Copy and Select all on the right button, for the views with text.
+fn copy_menu(response: &egui::Response, s: &mut Shared) {
+    response.context_menu(|ui| {
+        if ui.add_enabled(!s.view.select.is_empty(), egui::Button::new("Copy")).clicked() {
+            copy_selection(s, &ui.ctx().clone());
+            ui.close();
+        }
+        if ui.button("Select all").clicked() {
+            s.view.select = select_all(s);
+            ui.close();
+        }
+    });
+}
+
+/// The colour behind chosen text.
+fn chosen(pal: Palette) -> Color32 {
+    let [r, g, b, _] = pal.accent.to_array();
+    Color32::from_rgba_unmultiplied(r, g, b, 90)
+}
+
+/// While text is chosen past an edge of a view, the view follows the pointer.
+fn follow_pointer(ui: &Ui, s: &mut Shared, dragging: bool, area: Rect, offset: f32) {
+    if !dragging { return; }
+    let Some(y) = ui.input(|i| i.pointer.interact_pos()).map(|p| p.y) else { return };
+    let by = if y < area.top() { (y - area.top()).max(-60.0) } else if y > area.bottom() { (y - area.bottom()).min(60.0) } else { return };
+    s.view.scroll_to = Some((offset + by / 2.0).max(0.0));
+    ui.ctx().request_repaint();
 }
 
 /// The shown page and the page count of content that has pages or sheets.
@@ -562,12 +647,12 @@ fn draw(ui: &mut Ui, s: &mut Shared, class: ViewportClass) {
         PreviewContent::Model(tex, orig) => model_view(&mut child, s, tex, *orig, content_body),
         PreviewContent::Image(tex, orig, alpha) => {
             let sharpen = tex.size()[0] < orig[0] as usize;
-            image_view(&mut child, s, tex, *orig, *alpha, content_body, sharpen, false);
+            image_view(&mut child, s, tex, *orig, *alpha, content_body, sharpen, false, None);
         }
-        PreviewContent::Page { texture, orig, .. } => image_view(&mut child, s, texture, *orig, false, content_body, true, true),
+        PreviewContent::Page { texture, orig, text, .. } => image_view(&mut child, s, texture, *orig, false, content_body, true, true, text.as_deref()),
         PreviewContent::Animation(frames, orig) => {
             let tex = playing_frame(s, &ctx, frames);
-            image_view(&mut child, s, tex, *orig, true, content_body, false, false);
+            image_view(&mut child, s, tex, *orig, true, content_body, false, false, None);
         }
         PreviewContent::Doc(doc) => match (&doc.source, s.view.source) {
             (Some(source), true) => text_view(&mut child, s, source, content_body),
@@ -612,7 +697,8 @@ fn title_bar(ui: &mut Ui, s: &mut Shared, r: Rect, embedded: bool) {
     let response = ui.interact(r, ui.scope_id().with("preview_title"), Sense::click_and_drag());
     if response.drag_started() && !embedded { ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag); }
     let icon = if s.is_dir { Icon::Folder(s.folder) } else { Icon::Entry(s.kind, &s.ext) };
-    let info = if s.size.is_empty() { format!("{} / {}", s.place.0, s.place.1) } else { format!("{}   ·   {} / {}", s.size, s.place.0, s.place.1) };
+    let mut info = if s.size.is_empty() { format!("{} / {}", s.place.0, s.place.1) } else { format!("{}   ·   {} / {}", s.size, s.place.0, s.place.1) };
+    if s.view.copied.is_some_and(|at| at.elapsed() < COPIED_FOR) { info = format!("Copied   ·   {info}"); }
     if chrome::title_bar(ui, pal, r, icon, &s.name, &info) { s.send(Cmd::Close, ui.ctx()); }
 }
 
@@ -735,8 +821,12 @@ fn model_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32
 }
 
 #[allow(clippy::too_many_arguments)]
-fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32; 2], alpha: bool, body: Rect, sharpen: bool, paged: bool) {
+fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32; 2], alpha: bool, body: Rect, sharpen: bool, paged: bool, text: Option<&PageText>) {
     let response = ui.interact(body, ui.scope_id().with("preview_image"), Sense::click_and_drag());
+    let ppp = ui.ctx().pixels_per_point();
+    // Where the page was drawn last, which is where the pointer found its text.
+    let shown = fitted_rect(body, tex, orig, s.view.zoom, paged, ppp).translate(s.view.pan);
+    let choosing = text.is_some_and(|text| page_choosing(ui, s, text, &response, shown));
     let (wheel, pinch, hover) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta(), i.pointer.hover_pos()));
     let before = s.view.zoom;
     let over = response.contains_pointer();
@@ -756,9 +846,8 @@ fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32
             s.view.pan -= from_center * (s.view.zoom / before - 1.0);
         }
     }
-    if response.dragged() { s.view.pan += response.drag_delta(); }
-    if response.double_clicked() { s.view.zoom = 1.0; s.view.pan = Vec2::ZERO; }
-    let ppp = ui.ctx().pixels_per_point();
+    if response.dragged() && !choosing { s.view.pan += response.drag_delta(); }
+    if response.double_clicked() && !choosing { s.view.zoom = 1.0; s.view.pan = Vec2::ZERO; }
     let fitted = fitted_rect(body, tex, orig, s.view.zoom, paged, ppp);
     let spare = ((fitted.size() - body.size()) / 2.0).max(Vec2::ZERO);
     s.view.pan = s.view.pan.clamp(-spare, spare);
@@ -770,6 +859,10 @@ fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32
         let at = |x: u16, y: u16| r.min + vec2(x as f32 / 65535.0 * r.width(), y as f32 / 65535.0 * r.height());
         p.image(detail.id(), Rect::from_min_max(at(*l, *t), at(*cr, *cb)), unit_uv(), Color32::WHITE);
     }
+    if let (Some(text), Selection::Page { anchor, head }) = (text, s.view.select) {
+        paint_page_choice(&p, text, r, select::ordered(anchor, head), chosen(s.pal));
+    }
+    if text.is_some() { copy_menu(&response, s); }
     let look = (s.view.zoom, s.view.pan);
     if s.view.last_look != look {
         s.view.last_look = look;
@@ -785,6 +878,71 @@ fn image_view(ui: &mut Ui, s: &mut Shared, tex: &egui::TextureHandle, orig: [u32
             s.send(Cmd::Detail(crop), &ui.ctx().clone());
         }
     }
+}
+
+/// Where on the screen a character of a page is, for a page drawn at `r`.
+fn char_rect(r: Rect, part: [f32; 4]) -> Rect {
+    Rect::from_min_max(r.min + vec2(part[0] * r.width(), part[1] * r.height()), r.min + vec2(part[2] * r.width(), part[3] * r.height()))
+}
+
+/// The place between characters at `pos`: before the character under it or after it,
+/// by which half is pointed at. Away from all text, only when `nearest`.
+fn page_place(text: &PageText, r: Rect, pos: Pos2, nearest: bool) -> Option<u32> {
+    let mut best: Option<(f32, usize)> = None;
+    for (i, &(_, part)) in text.chars.iter().enumerate() {
+        let distance = char_rect(r, part).expand(1.0).distance_sq_to_pos(pos);
+        if distance == 0.0 { best = Some((0.0, i)); break; }
+        if nearest && best.is_none_or(|(d, _)| distance < d) { best = Some((distance, i)); }
+    }
+    let (_, i) = best?;
+    let after = pos.x > char_rect(r, text.chars[i].1).center().x;
+    Some(i as u32 + after as u32)
+}
+
+/// Text on a page is chosen by dragging from a character; a drag that starts away from
+/// the text still moves the page. True while choosing, so the page does not move.
+fn page_choosing(ui: &Ui, s: &mut Shared, text: &PageText, response: &egui::Response, r: Rect) -> bool {
+    let (pressed, down, shift, pos) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.modifiers.shift, i.pointer.interact_pos()));
+    let Some(pos) = pos else { return s.view.choosing };
+    let over = response.hovered().then(|| page_place(text, r, pos, false)).flatten();
+    if over.is_some() && !response.dragged() { ui.ctx().set_cursor_icon(egui::CursorIcon::Text); }
+    let anchor = match s.view.select { Selection::Page { anchor, .. } => Some(anchor), _ => None };
+    if pressed && response.hovered() {
+        s.view.choosing = over.is_some();
+        s.view.select = match (over, shift.then_some(anchor).flatten()) {
+            (Some(at), Some(from)) => Selection::Page { anchor: from, head: at },
+            (Some(at), None) => Selection::Page { anchor: at, head: at },
+            (None, _) => Selection::None,
+        };
+    } else if s.view.choosing && down && let (Some(anchor), Some(at)) = (anchor, page_place(text, r, pos, true)) {
+        s.view.select = Selection::Page { anchor, head: at };
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+    }
+    if response.double_clicked() && let Some(at) = over {
+        let i = (at as usize).min(text.chars.len() - 1);
+        let (from, to) = select::word_at(&text.text, text.chars[i].0 as usize);
+        s.view.select = Selection::Page { anchor: select::page_char(text, from), head: select::page_char(text, to) };
+        return true;
+    }
+    // Held until the button is let go: egui calls it a drag only once the pointer has moved
+    // a little, and the frames before that must not end the choosing.
+    let choosing = s.view.choosing;
+    if !down && !pressed { s.view.choosing = false; }
+    choosing
+}
+
+/// Chosen characters, joined along their lines so that no seams show.
+fn paint_page_choice(p: &egui::Painter, text: &PageText, r: Rect, (from, to): (u32, u32), color: Color32) {
+    let mut run: Option<Rect> = None;
+    for &(_, part) in text.chars.iter().take(to as usize).skip(from as usize) {
+        let c = char_rect(r, part);
+        run = match run {
+            Some(line) if (c.center().y - line.center().y).abs() < line.height() * 0.3 && c.left() <= line.right() + line.height() => Some(line.union(c)),
+            Some(line) => { p.rect_filled(line, CornerRadius::ZERO, color); Some(c) }
+            None => Some(c),
+        };
+    }
+    if let Some(line) = run { p.rect_filled(line, CornerRadius::ZERO, color); }
 }
 
 /// Where a picture goes before panning.
@@ -863,13 +1021,42 @@ fn text_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<TextDoc>, body: Rect) {
     let mut area = egui::ScrollArea::both().id_salt("preview_text").auto_shrink(false);
     if let Some(y) = s.view.scroll_to.take() { area = area.vertical_scroll_offset(y); }
     let total = rows.len() + doc.trimmed as usize;
+    let mut dragging = false;
     let output = area.show_rows(ui, row_h, total, |ui, range| {
         ui.set_min_width(content_w);
         let top = ui.min_rect().min;
         let n = range.len() as f32;
         let step = row_h + ui.spacing().item_spacing.y;
-        let (r, _) = ui.allocate_exact_size(vec2(content_w, (n * step - ui.spacing().item_spacing.y).max(0.0)), Sense::hover());
+        let (r, response) = ui.allocate_exact_size(vec2(content_w, (n * step - ui.spacing().item_spacing.y).max(0.0)), Sense::click_and_drag());
         let p = ui.painter_at(r.expand(2.0));
+        // One enormous line costs a whole frame to lay out; nobody scrolls that far right.
+        let cut = |start: u32, end: u32| doc.text.floor_char_boundary((end as usize).min(start as usize + 20_000)) as u32;
+        let shown = range.start..range.end.min(rows.len());
+        // The place under the pointer, held to the rows on screen while choosing past them.
+        let place = |pos: Pos2| -> Option<u32> {
+            if shown.is_empty() { return None; }
+            let row = (shown.start as isize + ((pos.y - top.y) / step).floor() as isize).clamp(shown.start as isize, shown.end as isize - 1) as usize;
+            let (line, start, end) = rows[row];
+            if pos.x < top.x + text_x { return Some(start); }
+            let end = cut(start, end);
+            let galley = p.layout_job(coloured_row(doc, line, start, end, &font, pal));
+            let x = pos.x - top.x - text_x;
+            Some(start + select::byte_at(&galley, &doc.text[start as usize..end as usize], vec2(x, galley.size().y / 2.0)) as u32)
+        };
+        text_choosing(ui, s, &response, &place, |at| {
+            let (start, end) = select::word_at(&doc.text, at as usize);
+            (start as u32, end as u32)
+        }, |at| {
+            let line = doc.lines.partition_point(|l| l.1 < at).min(doc.lines.len().saturating_sub(1));
+            doc.lines.get(line).map_or((at, at), |&(start, end)| (start, (end as usize + 1).min(doc.text.len()) as u32))
+        });
+        dragging = response.dragged();
+        if response.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::Text); }
+        copy_menu(&response, s);
+        let chosen_range = match s.view.select {
+            Selection::Text { anchor, head } if anchor != head => Some(select::ordered(anchor, head)),
+            _ => None,
+        };
         let mut last = None;
         for (at, row) in range.enumerate() {
             let y = top.y + at as f32 * step + row_h / 2.0;
@@ -881,14 +1068,49 @@ fn text_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<TextDoc>, body: Rect) {
                 p.text(pos2(top.x + gutter - 6.0, y), Align2::RIGHT_CENTER, (line + 1).to_string(), font.clone(), blend(pal.text_weak, pal.panel, 0.35));
             }
             last = Some(line);
-            // One enormous line costs a whole frame to lay out; nobody scrolls that far right.
-            let end = doc.text.floor_char_boundary((end as usize).min(start as usize + 20_000)) as u32;
+            let end = cut(start, end);
             let galley = p.layout_job(coloured_row(doc, line, start, end, &font, pal));
-            p.galley(pos2(top.x + text_x, y - galley.size().y / 2.0), galley, pal.text);
+            let at = pos2(top.x + text_x, y - galley.size().y / 2.0);
+            if let Some((from, to)) = chosen_range && from <= end && to > start {
+                let row_text = &doc.text[start as usize..end as usize];
+                let a = select::chars_before(row_text, from.saturating_sub(start) as usize);
+                let b = select::chars_before(row_text, (to.min(end) - start) as usize);
+                // The line end is chosen too: show it as a little room past the text.
+                let past = to > end && end == doc.lines[line as usize].1;
+                let row0 = &galley.rows[0];
+                let (x0, x1) = (row0.x_offset(egui::text::CharIndex(a)), if past { row0.size.x + char_w / 2.0 } else { row0.x_offset(egui::text::CharIndex(b)) });
+                if x1 > x0 {
+                    p.rect_filled(Rect::from_x_y_ranges(at.x + x0..=at.x + x1, y - row_h / 2.0..=y + row_h / 2.0), CornerRadius::ZERO, chosen(pal));
+                }
+            }
+            p.galley(at, galley, pal.text);
         }
     });
     s.view.offset = output.state.clamped_offset().y;
     s.view.rows = rows;
+    follow_pointer(ui, s, dragging, output.inner_rect, s.view.offset);
+}
+
+/// Choosing text with the mouse: a press starts, a drag extends, Shift extends from where
+/// it started, a double click takes the word and a triple click the line. `place` turns a
+/// pointer position into a byte; `word` and `line` turn a byte into a stretch.
+fn text_choosing(ui: &Ui, s: &mut Shared, response: &egui::Response, place: &dyn Fn(Pos2) -> Option<u32>, word: impl Fn(u32) -> (u32, u32), line: impl Fn(u32) -> (u32, u32)) {
+    let (pressed, shift, pos) = ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift, i.pointer.interact_pos()));
+    let Some(pos) = pos else { return };
+    let anchor = match s.view.select { Selection::Text { anchor, .. } => Some(anchor), _ => None };
+    if pressed && response.hovered() {
+        let Some(at) = place(pos) else { return };
+        s.view.select = Selection::Text { anchor: if shift { anchor.unwrap_or(at) } else { at }, head: at };
+    } else if response.dragged_by(egui::PointerButton::Primary) && let (Some(anchor), Some(at)) = (anchor, place(pos)) {
+        s.view.select = Selection::Text { anchor, head: at };
+    }
+    if response.triple_clicked() && let Some(at) = place(pos) {
+        let (anchor, head) = line(at);
+        s.view.select = Selection::Text { anchor, head };
+    } else if response.double_clicked() && let Some(at) = place(pos) {
+        let (anchor, head) = word(at);
+        s.view.select = Selection::Text { anchor, head };
+    }
 }
 
 /// Sized once per width; only the blocks on screen are painted.
@@ -931,18 +1153,34 @@ fn doc_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<DocData>, body: Rect) {
     let height = s.view.laid_out_height;
     let mut area = egui::ScrollArea::vertical().id_salt("preview_doc").auto_shrink(false);
     if let Some(y) = s.view.scroll_to.take() { area = area.vertical_scroll_offset(y); }
+    let mut dragging = false;
     let output = area.show_viewport(ui, |ui, viewport| {
-        let (r, _) = ui.allocate_exact_size(vec2(body.width(), height), Sense::hover());
+        let (r, response) = ui.allocate_exact_size(vec2(body.width(), height), Sense::click_and_drag());
+        doc_choosing(ui, s, doc, &laid, &response, r.min + vec2(left, 0.0));
+        dragging = response.dragged();
+        if response.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::Text); }
+        copy_menu(&response, s);
+        let chosen_range = match s.view.select {
+            Selection::Doc { anchor, head } if anchor != head => Some(select::ordered(anchor, head)),
+            _ => None,
+        };
         let p = ui.painter();
         if let Some((cover, size)) = &doc.cover {
             let h = cover_height(*size, width);
             let w = h * size[0] as f32 / size[1].max(1) as f32;
             p.image(cover.id(), Rect::from_min_size(r.min + vec2((body.width() - w) / 2.0, 24.0), vec2(w, h)), unit_uv(), Color32::WHITE);
         }
-        for (galley, at, kind) in &laid {
+        for (i, (galley, at, kind)) in laid.iter().enumerate() {
             let size = galley.size();
             if at.y + size.y + 16.0 < viewport.min.y || at.y - 16.0 > viewport.max.y { continue; }
             let pos = r.min + vec2(left + at.x, at.y);
+            if let Some((from, to)) = chosen_range && let Some(block) = doc.blocks.get(i) && (from.0..=to.0).contains(&(i as u32)) {
+                let a = if i as u32 == from.0 { select::chars_before(&block.text, from.1 as usize) } else { 0 };
+                let b = if i as u32 == to.0 { select::chars_before(&block.text, to.1 as usize) } else { usize::MAX };
+                for span in select::galley_spans(galley, a, b) {
+                    p.rect_filled(span.translate(pos.to_vec2()), CornerRadius::ZERO, chosen(pal));
+                }
+            }
             match kind {
                 BlockKind::Quote => { p.rect_filled(Rect::from_min_size(pos - vec2(14.0, 0.0), vec2(3.0, size.y)), pal.corner_small(), pal.raised); }
                 BlockKind::Code => { p.rect_filled(Rect::from_min_size(pos - vec2(8.0, 6.0), vec2(width - at.x, size.y + 12.0)), pal.corner(), blend(pal.raised, pal.window, 0.45)); }
@@ -955,6 +1193,35 @@ fn doc_view(ui: &mut Ui, s: &mut Shared, doc: &Arc<DocData>, body: Rect) {
     });
     s.view.offset = output.state.clamped_offset().y;
     s.view.laid_out = laid;
+    follow_pointer(ui, s, dragging, output.inner_rect, s.view.offset);
+}
+
+/// As `text_choosing`, over the blocks of a document laid out from `origin`.
+fn doc_choosing(ui: &Ui, s: &mut Shared, doc: &DocData, laid: &[(Arc<egui::Galley>, Pos2, BlockKind)], response: &egui::Response, origin: Pos2) {
+    let (pressed, shift, pos) = ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift, i.pointer.interact_pos()));
+    let Some(pos) = pos else { return };
+    if !(pressed || response.dragged() || response.double_clicked() || response.triple_clicked()) { return; }
+    // The note about a cut document comes after the blocks and is not part of them.
+    let count = doc.blocks.len().min(laid.len());
+    if count == 0 { return; }
+    let local = pos - origin;
+    let i = laid[..count].partition_point(|(galley, at, _)| at.y + galley.size().y < local.y).min(count - 1);
+    let (galley, at, _) = &laid[i];
+    let text = &doc.blocks[i].text;
+    let byte = if local.y < at.y { 0 } else { select::byte_at(galley, text, local - at.to_vec2()) } as u32;
+    let here = (i as u32, byte);
+    let anchor = match s.view.select { Selection::Doc { anchor, .. } => Some(anchor), _ => None };
+    if pressed && response.hovered() {
+        s.view.select = Selection::Doc { anchor: if shift { anchor.unwrap_or(here) } else { here }, head: here };
+    } else if response.dragged_by(egui::PointerButton::Primary) && let Some(anchor) = anchor {
+        s.view.select = Selection::Doc { anchor, head: here };
+    }
+    if response.triple_clicked() {
+        s.view.select = Selection::Doc { anchor: (here.0, 0), head: (here.0, text.len() as u32) };
+    } else if response.double_clicked() {
+        let (from, to) = select::word_at(text, byte as usize);
+        s.view.select = Selection::Doc { anchor: (here.0, from as u32), head: (here.0, to as u32) };
+    }
 }
 
 fn cover_height(size: [u32; 2], width: f32) -> f32 {
@@ -973,10 +1240,18 @@ fn table_view(ui: &mut Ui, s: &mut Shared, table: &Arc<TableDoc>, body: Rect) {
     let mut area = egui::ScrollArea::both().id_salt("preview_table").auto_shrink(false);
     if let Some(y) = s.view.scroll_to.take() { area = area.vertical_scroll_offset(y); }
     let total = table.rows.len() + table.trimmed as usize;
+    let mut dragging = false;
     let output = area.show_rows(ui, row_h, total, |ui, range| {
         let top = ui.min_rect().min;
         let step = row_h + ui.spacing().item_spacing.y;
-        let (r, _) = ui.allocate_exact_size(vec2(width.max(body.width() - 16.0), range.len() as f32 * step), Sense::hover());
+        let (r, response) = ui.allocate_exact_size(vec2(width.max(body.width() - 16.0), range.len() as f32 * step), Sense::click_and_drag());
+        cell_choosing(ui, s, &response, &columns, top + vec2(numbers, 0.0), step, range.start..range.end.min(table.rows.len()));
+        dragging = response.dragged();
+        copy_menu(&response, s);
+        let chosen_cells = match s.view.select {
+            Selection::Cells { anchor, head } => Some((select::ordered(anchor.0, head.0), select::ordered(anchor.1, head.1))),
+            _ => None,
+        };
         let p = ui.painter_at(r.expand(2.0));
         for (at, row) in range.enumerate() {
             let band = Rect::from_min_size(top + vec2(0.0, at as f32 * step), vec2(r.width(), row_h));
@@ -986,6 +1261,12 @@ fn table_view(ui: &mut Ui, s: &mut Shared, table: &Arc<TableDoc>, body: Rect) {
             };
             if row == 0 { p.rect_filled(band, CornerRadius::ZERO, blend(pal.raised, pal.window, 0.3)); }
             else if row % 2 == 0 { p.rect_filled(band, CornerRadius::ZERO, blend(pal.window, pal.raised, 0.25)); }
+            if let Some(((first, last), (left_col, right_col))) = chosen_cells && (first..=last).contains(&(row as u32)) {
+                let x_of = |c: u32| top.x + numbers + columns.iter().take(c as usize).sum::<f32>();
+                let right = x_of((right_col + 1).min(columns.len() as u32));
+                let shade = Rect::from_x_y_ranges(x_of(left_col) - 4.0..=right - 4.0, band.y_range());
+                p.rect_filled(shade, CornerRadius::ZERO, chosen(pal));
+            }
             p.text(pos2(top.x + numbers - 12.0, band.center().y), Align2::RIGHT_CENTER, (row + 1).to_string(), FontId::monospace(11.0), pal.text_weak);
             let mut x = top.x + numbers;
             for (cell, column) in cells.iter().zip(&columns) {
@@ -999,6 +1280,32 @@ fn table_view(ui: &mut Ui, s: &mut Shared, table: &Arc<TableDoc>, body: Rect) {
         }
     });
     s.view.offset = output.state.clamped_offset().y;
+    follow_pointer(ui, s, dragging, output.inner_rect, s.view.offset);
+}
+
+/// Cells are chosen as a rectangle: a press on one, a drag to another. A press on a row
+/// number takes the whole row.
+#[allow(clippy::too_many_arguments)]
+fn cell_choosing(ui: &Ui, s: &mut Shared, response: &egui::Response, columns: &[f32], origin: Pos2, step: f32, shown: std::ops::Range<usize>) {
+    let (pressed, shift, pos) = ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift, i.pointer.interact_pos()));
+    let Some(pos) = pos else { return };
+    if shown.is_empty() || columns.is_empty() || !(pressed || response.dragged()) { return; }
+    let row = (shown.start as isize + ((pos.y - origin.y) / step).floor() as isize).clamp(shown.start as isize, shown.end as isize - 1) as u32;
+    let last = columns.len() as u32 - 1;
+    let mut x = pos.x - origin.x;
+    let numbers = x < 0.0;
+    let column = columns.iter().position(|w| { x -= w; x < 0.0 }).map_or(last, |c| c as u32);
+    let anchor = match s.view.select { Selection::Cells { anchor, .. } => Some(anchor), _ => None };
+    if pressed && response.hovered() {
+        s.view.select = match (numbers, shift.then_some(anchor).flatten()) {
+            (true, from) => Selection::Cells { anchor: (from.map_or(row, |a| a.0), 0), head: (row, last) },
+            (false, Some(from)) => Selection::Cells { anchor: from, head: (row, column) },
+            (false, None) => Selection::Cells { anchor: (row, column), head: (row, column) },
+        };
+    } else if response.dragged_by(egui::PointerButton::Primary) && let Some(anchor) = anchor {
+        let head = if anchor.1 == 0 && numbers { (row, last) } else { (row, column) };
+        s.view.select = Selection::Cells { anchor, head };
+    }
 }
 
 fn archive_view(ui: &mut Ui, s: &mut Shared, entries: &[ArchiveEntry], total: u64, trimmed: bool, body: Rect) {
@@ -1271,7 +1578,7 @@ mod tests {
 
     fn page(ctx: &egui::Context, page: u32, pages: u32) -> PreviewContent {
         let image = egui::ColorImage::filled([2, 2], Color32::WHITE);
-        PreviewContent::Page { texture: ctx.load_texture("t", image, Default::default()), orig: [100, 200], page, pages }
+        PreviewContent::Page { texture: ctx.load_texture("t", image, Default::default()), orig: [100, 200], page, pages, text: None }
     }
 
     #[test]
@@ -1449,6 +1756,113 @@ mod tests {
         ask(&mut app, Cmd::Play);
         app.sound_follows();
         assert_eq!(app.sound.status().state, sound::State::Idle, "no preview is on show at all");
+    }
+
+    /// Runs one frame and gives what was copied in it.
+    fn frame(ctx: &egui::Context, s: &mut Shared, events: Vec<egui::Event>) -> Option<String> {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), events, ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| draw(ui, s, ViewportClass::Deferred));
+        out.textures_delta.clear();
+        out.platform_output.commands.iter().find_map(|c| if let egui::OutputCommand::CopyText(t) = c { Some(t.clone()) } else { None })
+    }
+
+    fn drag(ctx: &egui::Context, s: &mut Shared, from: Pos2, to: Pos2) {
+        use egui::{Event, Modifiers, PointerButton};
+        let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        frame(ctx, s, vec![Event::PointerMoved(from)]);
+        frame(ctx, s, vec![button(from, true)]);
+        // Held a moment and moved a little, as a hand does, before egui calls it a drag.
+        frame(ctx, s, vec![]);
+        frame(ctx, s, vec![Event::PointerMoved(from + vec2(1.0, 0.0))]);
+        frame(ctx, s, vec![Event::PointerMoved(from.lerp(to, 0.5))]);
+        frame(ctx, s, vec![Event::PointerMoved(to)]);
+        frame(ctx, s, vec![button(to, false)]);
+    }
+
+    /// A key pressed and let go, so that the next press is not a repeat.
+    fn key(key: K, modifiers: egui::Modifiers) -> Vec<egui::Event> {
+        [true, false].map(|pressed| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers }).into()
+    }
+
+    #[test]
+    fn text_is_chosen_with_the_mouse_and_copied() {
+        let ctx = egui::Context::default();
+        let doc = TextDoc::new("first line
+second
+third".into(), false, Default::default());
+        let mut s = Shared { content: PreviewContent::Text(Arc::new(doc)), ..model_on_screen(&ctx) };
+        frame(&ctx, &mut s, vec![]);
+        let row = BAR_H + 8.0;
+        drag(&ctx, &mut s, pos2(2.0, row), pos2(790.0, row));
+        assert_eq!(frame(&ctx, &mut s, vec![egui::Event::Copy]).as_deref(), Some("first line"));
+        assert!(s.commands.is_empty(), "choosing text neither closes nor moves");
+        frame(&ctx, &mut s, key(K::A, egui::Modifiers::COMMAND));
+        assert_eq!(frame(&ctx, &mut s, vec![egui::Event::Copy]).as_deref(), Some("first line
+second
+third"));
+        frame(&ctx, &mut s, key(K::Escape, egui::Modifiers::NONE));
+        assert!(s.commands.is_empty() && s.view.select.is_empty(), "the first Escape lets go of the text");
+        assert_eq!(frame(&ctx, &mut s, vec![egui::Event::Copy]), None, "nothing chosen, nothing copied");
+        frame(&ctx, &mut s, key(K::Escape, egui::Modifiers::NONE));
+        assert_eq!(s.commands, [Cmd::Close]);
+    }
+
+    #[test]
+    fn a_document_copies_its_paragraphs_and_a_word_is_a_double_click() {
+        use super::super::load::Block;
+        use egui::{Event, Modifiers, PointerButton};
+        let ctx = egui::Context::default();
+        let block = |kind, text: &str| Block { kind, text: text.into() };
+        let blocks = vec![block(BlockKind::H1, "Title"), block(BlockKind::Paragraph, "Some words here"), block(BlockKind::Item, "one"), block(BlockKind::Item, "two")];
+        let doc = DocData { blocks, source: None, trimmed: true, cover: None };
+        let mut s = Shared { content: PreviewContent::Doc(Arc::new(doc)), ..model_on_screen(&ctx) };
+        frame(&ctx, &mut s, key(K::A, Modifiers::COMMAND));
+        assert_eq!(frame(&ctx, &mut s, vec![Event::Copy]).as_deref(), Some("Title
+
+Some words here
+
+one
+two"), "the note about a cut document is not copied");
+        let (galley, at, _) = s.view.laid_out[1].clone();
+        let left = (800.0 - (800.0f32 - 64.0).clamp(120.0, READING_WIDTH.max(120.0))) / 2.0;
+        let on = pos2(left, BAR_H) + at.to_vec2() + vec2(galley.size().x * 0.45, galley.size().y / 2.0);
+        let click = |pressed| Event::PointerButton { pos: on, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        frame(&ctx, &mut s, vec![Event::PointerMoved(on)]);
+        frame(&ctx, &mut s, vec![click(true), click(false), click(true), click(false)]);
+        assert_eq!(frame(&ctx, &mut s, vec![Event::Copy]).as_deref(), Some("words"));
+    }
+
+    #[test]
+    fn a_whole_table_copies_as_tab_separated_rows() {
+        let ctx = egui::Context::default();
+        let rows = vec![vec!["Name".to_string(), "Size".into()], vec!["a.txt".into(), "12".into()]];
+        let table = TableDoc { rows, widths: vec![6, 4], sheets: Vec::new(), page: 0, trimmed: false };
+        let mut s = Shared { content: PreviewContent::Table(Arc::new(table)), ..model_on_screen(&ctx) };
+        frame(&ctx, &mut s, key(K::A, egui::Modifiers::COMMAND));
+        assert_eq!(frame(&ctx, &mut s, vec![egui::Event::Copy]).as_deref(), Some("Name	Size
+a.txt	12"));
+    }
+
+    #[test]
+    fn a_drag_on_the_text_of_a_page_chooses_it_and_elsewhere_moves_the_page() {
+        let ctx = egui::Context::default();
+        let image = egui::ColorImage::filled([2, 2], Color32::WHITE);
+        let chars: Vec<(u32, [f32; 4])> = (0..5).map(|i| (i, [0.1 + i as f32 * 0.1, 0.1, 0.2 + i as f32 * 0.1, 0.2])).collect();
+        let text = Arc::new(PageText { text: "Hello".into(), chars });
+        let content = PreviewContent::Page { texture: ctx.load_texture("t", image, Default::default()), orig: [100, 100], page: 0, pages: 1, text: Some(text) };
+        let mut s = Shared { content, ..model_on_screen(&ctx) };
+        frame(&ctx, &mut s, vec![]);
+        let body = Rect::from_min_max(pos2(0.0, BAR_H), pos2(800.0, 600.0));
+        let page = page_rect(body, [100, 100], 1.0);
+        let at = |x: f32, y: f32| page.min + vec2(x * page.width(), y * page.height());
+        drag(&ctx, &mut s, at(0.11, 0.15), at(0.38, 0.15));
+        assert_eq!(frame(&ctx, &mut s, vec![egui::Event::Copy]).as_deref(), Some("Hel"));
+        assert_eq!(s.view.pan, Vec2::ZERO, "choosing does not move the page");
+        frame(&ctx, &mut s, key(K::Plus, egui::Modifiers::NONE));
+        frame(&ctx, &mut s, vec![]);
+        drag(&ctx, &mut s, at(0.5, 0.7), at(0.45, 0.6));
+        assert!(s.view.pan != Vec2::ZERO, "away from the text a drag still moves the page");
+        assert!(s.view.select.is_empty(), "and lets go of the text");
     }
 
     #[test]
