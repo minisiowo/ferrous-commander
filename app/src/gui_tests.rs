@@ -1292,6 +1292,23 @@ fn safety_app(name: &str) -> (std::path::PathBuf, std::path::PathBuf, egui::Cont
 }
 
 #[test]
+fn clicking_outside_the_rename_field_saves_the_new_name() {
+    let (root, file, ctx, mut app) = safety_app("rename_click");
+    let pane = app.pane_rects.iter().find(|(i, _)| *i == 0).unwrap().1;
+    let first_row = pane.top() + 1.0 + TAB_H + HEADER_H + 22.0;
+    let empty_space = pos2(pane.left() + 80.0, first_row + 8.5 * app.row_h());
+
+    key(&ctx, &mut app, Key::F2, Modifiers::NONE);
+    frame(&ctx, &mut app, vec![Event::Text("renamed".into())], Modifiers::NONE);
+    click(&ctx, &mut app, empty_space, Modifiers::NONE);
+
+    assert!(app.panes[0].rename.is_none());
+    assert!(!file.exists());
+    assert_eq!(std::fs::read(root.join("renamed.txt")).unwrap(), b"keep");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn held_keys_do_not_repeat_file_operations() {
     use crate::app::Notice;
     let (root, file, ctx, mut app) = safety_app("repeat");

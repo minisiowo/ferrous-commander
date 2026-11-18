@@ -1042,13 +1042,16 @@ impl App {
                 let r = ui.put(er, te);
                 // The row is lit like any selected one; this says where the typing goes.
                 p.rect_stroke(r.rect, pal.corner(), Stroke::new(1.0, pal.accent), egui::StrokeKind::Inside);
+                let clicked_outside = r.clicked_elsewhere();
+                let lost_focus = r.lost_focus();
                 if focus {
                     self.panes[i].rename_focus = false;
-                } else if r.lost_focus() {
-                    if enter {
-                        self.acts.push(Act::CommitRename(i));
+                } else if clicked_outside || lost_focus {
+                    r.surrender_focus();
+                    if (enter && lost_focus) || (clicked_outside && text != e.name()) {
+                        // A click can also queue navigation that clears the pending rename.
+                        self.acts.insert(0, Act::CommitRename(i));
                     } else {
-                        // clicking outside cancels (config RenameClickingOutside)
                         self.panes[i].rename = None;
                     }
                 }
