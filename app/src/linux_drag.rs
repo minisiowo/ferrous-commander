@@ -209,7 +209,7 @@ fn should_handoff(rect: egui::Rect, pos: Option<egui::Pos2>, delta: egui::Vec2, 
         || (p.y > edge.bottom() && delta.y > 0.0)
 }
 
-fn uri_list(paths: &[PathBuf]) -> Result<Vec<u8>> {
+pub(crate) fn uri_list(paths: &[PathBuf]) -> Result<Vec<u8>> {
     if paths.is_empty() { return Err("No files selected".into()); }
     let mut out = Vec::new();
     for path in paths {
@@ -223,7 +223,7 @@ fn uri_list(paths: &[PathBuf]) -> Result<Vec<u8>> {
         }
         out.extend_from_slice(b"\r\n");
     }
-    if out.len() > 1024 * 1024 { return Err("Too many filenames for one drag; select fewer files".into()); }
+    if out.len() > 1024 * 1024 { return Err("Too many filenames; select fewer files".into()); }
     Ok(out)
 }
 

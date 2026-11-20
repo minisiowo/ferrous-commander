@@ -27,7 +27,7 @@
 | 📦 **Archives** | Unpack and create archives with nothing else to install |
 | 🗑️ **Safe by default** | Delete goes to the Trash, existing files are never overwritten, cancelled jobs leave nothing behind |
 | 🎨 **Themes** | Dark, Tokyo Night, Gruvbox, Catppuccin Latte, Rosé Pine, and live [Omarchy](https://omarchy.org/) theme |
-| 🔌 **Works with your desktop** | System clipboard and drag and drop on Windows, native Wayland and X11 file drags on Linux |
+| 🔌 **Works with your desktop** | Copy files between file managers through the system clipboard on Linux and Windows. Native file drag and drop on both systems |
 
 ## Download
 

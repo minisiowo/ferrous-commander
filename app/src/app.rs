@@ -388,6 +388,10 @@ pub struct App {
     pub(crate) wake: Wake,
     pub drives: Vec<DriveInfo>,
     drives_at: Option<Instant>,
+    #[cfg(target_os = "linux")]
+    pub system_clipboard: Option<crate::linux_clipboard::Files>,
+    #[cfg(target_os = "linux")]
+    pending_paste: Option<(PathBuf, Task<crate::linux_clipboard::Selection>)>,
     pub clip: Option<(std::sync::Arc<[PathBuf]>, bool)>,
     #[cfg(windows)]
     clip_sequence: u32,
@@ -577,6 +581,10 @@ impl App {
             cache: HashMap::new(),
             drives: Vec::new(),
             drives_at: None,
+            #[cfg(target_os = "linux")]
+            system_clipboard: None,
+            #[cfg(target_os = "linux")]
+            pending_paste: None,
             clip: None,
             #[cfg(windows)]
             clip_sequence: 0,
@@ -831,6 +839,8 @@ impl App {
             self.finish_eject(&mount, &name, result.unwrap_or_else(|| Err("Ejecting stopped unexpectedly".into())));
         }
         self.index.sync(self.st.index_home, &self.st.index_roots, &self.st.index_exclude, &self.wake);
+        #[cfg(target_os = "linux")]
+        self.finish_clipboard_paste(ctx);
         self.index.poll(&self.wake);
         for (path, result) in take_finished(&mut self.open_with_pending) {
             self.report_opened(&path, result.unwrap_or_else(|| Err("Application handler stopped unexpectedly".into())));
@@ -939,7 +949,11 @@ impl App {
         #[cfg(windows)]
         { crate::file_transfer::has_files() }
         #[cfg(not(windows))]
-        { self.clip.is_some() }
+        {
+            #[cfg(target_os = "linux")]
+            if self.system_clipboard.is_some() { return true; }
+            self.clip.is_some()
+        }
     }
 
     pub fn save(&mut self) {
@@ -1663,6 +1677,30 @@ impl App {
 
     // ---------------------------------------------------------------- jobs
 
+    #[cfg(target_os = "linux")]
+    fn finish_clipboard_paste(&mut self, ctx: &egui::Context) {
+        let Some((_, task)) = &self.pending_paste else { return };
+        let result = match task.poll() {
+            Polled::Running => return,
+            Polled::Lost => Err("Clipboard reader stopped".into()),
+            Polled::Done(result) => result,
+        };
+        let (dest, _) = self.pending_paste.take().unwrap();
+        match result {
+            Ok(Some((paths, true))) => {
+                if self.clip.as_ref().is_some_and(|(own, cut)| *cut && own.as_ref() == paths) {
+                    self.clip = None;
+                    self.start_job(OpKind::Move, paths, Some(dest), ctx);
+                } else {
+                    self.toast(ToastKind::Info, "No pending cut selection");
+                }
+            }
+            Ok(Some((paths, false))) => self.start_job(OpKind::Copy, paths, Some(dest), ctx),
+            Ok(None) => self.toast(ToastKind::Info, "Clipboard doesn't contain files"),
+            Err(e) => self.toast(ToastKind::Error, e),
+        }
+    }
+
     pub(crate) fn copy_paths_to_clipboard(&mut self, sel: Vec<PathBuf>, cut: bool, _ctx: &egui::Context) {
         if sel.is_empty() {
             return;
@@ -1673,12 +1711,22 @@ impl App {
             return;
         }
         #[cfg(not(windows))]
-        _ctx.copy_text(
-            sel.iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
+        {
+            #[cfg(target_os = "linux")]
+            let system = self.system_clipboard.as_ref();
+            #[cfg(target_os = "linux")]
+            if let Some(Err(e)) = system.map(|files| files.write(&sel, cut)) {
+                self.toast(ToastKind::Error, e);
+                return;
+            }
+            #[cfg(target_os = "linux")]
+            let internal_only = system.is_none();
+            #[cfg(not(target_os = "linux"))]
+            let internal_only = true;
+            if internal_only {
+                _ctx.copy_text(sel.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n"));
+            }
+        }
         self.toast(
             ToastKind::Info,
             if cut {
@@ -1687,6 +1735,11 @@ impl App {
                 "Selection copied to Clipboard"
             },
         );
+        #[cfg(target_os = "linux")]
+        if self.system_clipboard.is_some() && !cut {
+            self.clip = None;
+            return;
+        }
         self.clip = Some((sel.into(), cut));
     }
 
@@ -1905,6 +1958,13 @@ impl App {
             Act::Paste(i, into) => {
                 let dest = into.unwrap_or_else(|| self.panes[i].path().to_path_buf());
                 if is_computer(&dest) {
+                    return;
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(files) = self.system_clipboard.clone() {
+                    if self.pending_paste.is_none() {
+                        self.pending_paste = Some((dest, Task::spawn(&self.wake, move || files.read())));
+                    }
                     return;
                 }
                 #[cfg(windows)]

@@ -20,6 +20,8 @@ mod linux_fs;
 mod linux_properties;
 #[cfg(target_os = "linux")]
 mod linux_drag;
+#[cfg(target_os = "linux")]
+mod linux_clipboard;
 mod keymap;
 mod launch;
 mod lua_config;
@@ -106,20 +108,26 @@ impl Shell {
 }
 
 /// A plugin so that text fields in every window get their clipboard shortcuts.
-#[cfg(windows)]
-#[derive(Default)]
+#[cfg(any(windows, target_os = "linux"))]
 struct ClipboardKeys {
+    #[cfg(target_os = "linux")]
+    files: linux_clipboard::Files,
     held: std::collections::HashSet<egui::Key>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 impl egui::Plugin for ClipboardKeys {
     fn debug_name(&self) -> &'static str {
         "ClipboardKeys"
     }
 
     fn input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
-        file_transfer::shortcuts(input, &mut self.held, ctx.text_edit_focused());
+        let typing = ctx.text_edit_focused();
+        #[cfg(windows)]
+        let text = file_transfer::text;
+        #[cfg(target_os = "linux")]
+        let text = || if typing { self.files.text() } else { String::new() };
+        keymap::clipboard_shortcuts(input, &mut self.held, typing, text);
     }
 }
 
@@ -192,18 +200,33 @@ fn report_renderer(cc: &eframe::CreationContext) {
 fn run(renderer: eframe::Renderer, shot: Option<PathBuf>, loaded: Option<(settings::Settings, Option<String>)>) -> eframe::Result {
     archive::detect_tools();
     let place = loaded.as_ref().map(|(settings, _)| settings.window).unwrap_or_default();
+    #[cfg(target_os = "linux")]
+    let files = if shot.is_none() { linux_clipboard::Files::connect().map_err(|e| eprintln!("System file clipboard unavailable: {e}")).ok() } else { None };
+    let options = options(renderer, place);
+    #[cfg(target_os = "linux")]
+    let options = eframe::NativeOptions { clipboard_shortcuts: files.is_none(), ..options };
     eframe::run_native(
         "Ferrous Commander",
-        options(renderer, place),
+        options,
         Box::new(move |cc| {
             if preview::trace() { report_renderer(cc); }
             cc.egui_ctx.add_plugin(TextureLimit);
             #[cfg(windows)]
-            cc.egui_ctx.add_plugin(ClipboardKeys::default());
+            cc.egui_ctx.add_plugin(ClipboardKeys { held: Default::default() });
             if shot.is_some() { cc.egui_ctx.set_embed_viewports(true); }
             fonts(&cc.egui_ctx);
+            let app = app::App::with_settings(shot, loaded);
+            #[cfg(target_os = "linux")]
+            let app = {
+                let mut app = app;
+                if let Some(files) = files {
+                    cc.egui_ctx.add_plugin(ClipboardKeys { held: Default::default(), files: files.clone() });
+                    app.system_clipboard = Some(files);
+                }
+                app
+            };
             Ok(Box::new(Shell {
-                app: app::App::with_settings(shot, loaded),
+                app,
                 #[cfg(windows)]
                 dressed: None,
             }))

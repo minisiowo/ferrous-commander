@@ -32,6 +32,37 @@ pub struct Chord {
     pub alt: bool,
 }
 
+/// egui's default Ctrl+V only delivers text/image events, dropping file-only
+/// clipboard shortcuts. Translate the keys ourselves, including for text fields.
+/// One press is one operation: a held Ctrl+V must not paste the files repeatedly. Raw
+/// input carries no repeat flag (egui derives it later), hence `held`. A repeat is
+/// dropped, not passed on: egui never saw the press, so it would look like a new one.
+/// Shift+Delete cuts only while typing. In the file list it deletes for good.
+pub fn clipboard_shortcuts(input: &mut egui::RawInput, held: &mut std::collections::HashSet<egui::Key>, typing: bool, text: impl Fn() -> String) {
+    input.events.retain_mut(|event| {
+        match event {
+            egui::Event::WindowFocused(false) => held.clear(),
+            egui::Event::Key { key, pressed: false, .. } => { held.remove(key); }
+            _ => {}
+        }
+        let egui::Event::Key { key, pressed: true, modifiers: m, .. } = event else { return true };
+        let first_press = held.insert(*key);
+        let command = if m.command && !m.shift && !m.alt {
+            match key { egui::Key::C => 1, egui::Key::X => 2, egui::Key::V => 3, _ => 0 }
+        } else if m.shift && !m.ctrl && !m.alt {
+            match key { egui::Key::Delete if typing => 2, egui::Key::Insert => 3, _ => 0 }
+        } else { 0 };
+        if command == 0 { return true; }
+        if !first_press { return false; }
+        *event = match command {
+            1 => egui::Event::Copy,
+            2 => egui::Event::Cut,
+            _ => egui::Event::Paste(text()),
+        };
+        true
+    });
+}
+
 fn digit(key: Key) -> Option<usize> {
     Some(match key {
         Key::Num0 => 0, Key::Num1 => 1, Key::Num2 => 2, Key::Num3 => 3, Key::Num4 => 4,
@@ -1238,5 +1269,53 @@ mod tests {
         fn default_for_tests() -> Keymap {
             Keymap::new(&KeymapSettings::default())
         }
+    }
+
+    #[test]
+    fn file_shortcuts_preserve_text_edit_events() {
+        let mut input = egui::RawInput::default();
+        for key in [egui::Key::C, egui::Key::X] {
+            input.events.push(egui::Event::Key { key, physical_key: None,
+                pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND });
+        }
+        clipboard_shortcuts(&mut input, &mut Default::default(), false, String::new);
+        assert!(matches!(input.events[0], egui::Event::Copy));
+        assert!(matches!(input.events[1], egui::Event::Cut));
+    }
+
+    #[test]
+    fn shift_delete_reaches_the_file_list_as_a_key() {
+        let event = egui::Event::Key { key: egui::Key::Delete, physical_key: None,
+            pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT };
+        let mut input = egui::RawInput { events: vec![event], ..Default::default() };
+        clipboard_shortcuts(&mut input, &mut Default::default(), false, String::new);
+        assert!(matches!(input.events[0], egui::Event::Key { key: egui::Key::Delete, .. }), "must not cut files");
+    }
+
+    #[test]
+    fn held_shortcuts_fire_once_until_released_or_focus_is_lost() {
+        let press = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        let release = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers };
+        let mut held = Default::default();
+        let mut run = |events: Vec<egui::Event>| {
+            let mut input = egui::RawInput { events, ..Default::default() };
+            clipboard_shortcuts(&mut input, &mut held, true, String::new);
+            input.events
+        };
+        let cut = |events: &[egui::Event]| events.iter().filter(|e| matches!(e, egui::Event::Cut)).count();
+        // Windows and X11 send a press per autorepeat tick. Ctrl+X and Shift+Delete both mean Cut.
+        for (key, modifiers) in [(egui::Key::X, egui::Modifiers::COMMAND), (egui::Key::Delete, egui::Modifiers::SHIFT)] {
+            assert_eq!(cut(&run(vec![press(key, modifiers)])), 1);
+            let repeats = run(vec![press(key, modifiers), press(key, modifiers)]);
+            assert!(repeats.is_empty(), "must not reach egui as a fresh press: {repeats:?}");
+            run(vec![release(key, modifiers)]);
+            assert_eq!(cut(&run(vec![press(key, modifiers)])), 1, "released keys work again");
+            // Alt+Tab can swallow the release.
+            run(vec![egui::Event::WindowFocused(false)]);
+            assert_eq!(cut(&run(vec![press(key, modifiers)])), 1, "focus loss forgets held keys");
+            run(vec![release(key, modifiers)]);
+        }
+        let plain = run(vec![press(egui::Key::ArrowDown, egui::Modifiers::NONE), press(egui::Key::ArrowDown, egui::Modifiers::NONE)]);
+        assert_eq!(plain.len(), 2, "navigation keeps its autorepeat");
     }
 }

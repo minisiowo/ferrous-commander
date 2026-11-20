@@ -233,6 +233,12 @@ While dragging inside the window, a wide tooltip separates the action and item
 count, destination, and Ctrl hint. It flips away from window edges and shortens
 long destination names to keep the text on single lines.
 
+On **Linux**, Ctrl+C shares the selected files and folders with other file managers.
+Ctrl+V copies local files from the system clipboard into the active folder, including
+selections from Nautilus or Dolphin. Ctrl+X marks files for a move inside Ferrous
+Commander. **Copy as path** puts plain text on the clipboard. File sharing uses
+Wayland data control or X11. If neither is available, the internal clipboard still works.
+
 On **Windows**, Ctrl+C and Ctrl+X put actual files and folders on the system
 clipboard: switch to Explorer (or another file manager) and press Ctrl+V to copy
 or move them. Multiple selections and Unicode paths are supported; copying stays
@@ -403,4 +409,4 @@ area cancels. Moving/copying between this app's panels keeps its existing behavi
 
 On Wayland desktops the app runs natively and starts the drag through the
 compositor, so XWayland is not needed. The destination must accept file drops; browser security
-rules still apply. This does not add a shared Linux file clipboard.
+rules still apply.

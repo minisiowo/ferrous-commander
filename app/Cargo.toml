@@ -49,6 +49,7 @@ raw-window-handle = "0.6.2"
 winit = { version = "0.30.13", default-features = false, features = ["x11", "wayland"] }
 wayland-client = "0.31.15"
 wayland-backend = { version = "0.3.17", features = ["client_system"] }
+clipboard-rs = { version = "0.3.5", default-features = false, features = ["wayland"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 x11rb = { version = "0.13.2", features = ["xtest"] }
