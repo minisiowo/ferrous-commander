@@ -470,15 +470,16 @@ impl App {
                 }
                 Input::Press { chord, repeat, text } => {
                     swallow = false;
-                    if self.st.vim_keys && self.panes[i].vim_filtering {
+                    let filtering = self.st.vim_keys && self.panes[i].vim_filtering;
+                    if filtering {
                         if self.filter_key(i, chord) {
                             self.matcher.clear();
                             swallow = true;
                             continue;
                         }
-                        if chord.is_typing() {
-                            // A shortcut begun before typing must not finish after it.
-                            self.matcher.clear();
+                        // Letters are the filter's, unless they go on with a shortcut begun
+                        // while filtering by a key that types nothing, such as Ctrl+B for the leader.
+                        if chord.is_typing() && self.matcher.keys().is_empty() {
                             if let Some(text) = text {
                                 self.typed(i, &text);
                             }
@@ -488,6 +489,12 @@ impl App {
                     let mode = self.key_mode(i);
                     match self.matcher.feed(&self.keys, mode, chord, repeat) {
                         Outcome::Unbound => {
+                            if let Some(text) = text {
+                                self.typed(i, &text);
+                            }
+                        }
+                        // A letter that fits no shortcut is still part of the filter.
+                        Outcome::Cancelled if filtering && chord.is_typing() => {
                             if let Some(text) = text {
                                 self.typed(i, &text);
                             }

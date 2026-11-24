@@ -2588,16 +2588,35 @@ fn restoring_settings_restores_the_shortcuts_in_use() {
 }
 
 #[test]
-fn a_sequence_from_before_the_filter_does_not_finish_after_it() {
+fn a_sequence_that_fits_nothing_gives_its_letter_back_to_the_filter() {
     let (ctx, mut app, root) = neovim_app("filter_sequence");
     assert_eq!(app.panes[0].tabs.len(), 1);
     type_key(&ctx, &mut app, Key::Slash, Modifiers::NONE, Some("/"));
     assert!(app.panes[0].vim_filtering);
     type_key(&ctx, &mut app, Key::W, Modifiers::COMMAND, None);
-    letter(&ctx, &mut app, 'q');
-    assert_eq!(app.panes[0].filter, "q");
+    letter(&ctx, &mut app, 'z');
+    assert_eq!(app.panes[0].filter, "z");
     assert!(app.matcher.keys().is_empty());
+    assert_eq!(app.panes[0].tabs.len(), 1);
     key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn the_leader_previews_a_file_while_the_filter_is_typed() {
+    let (ctx, mut app, root) = neovim_app("filter_preview");
+    app.st.keymap.leader = "ctrl+b".into();
+    app.keys = crate::keymap::Keymap::new(&app.st.keymap);
+    type_key(&ctx, &mut app, Key::Slash, Modifiers::NONE, Some("/"));
+    word(&ctx, &mut app, "dir0");
+    wait_for_rows(&ctx, &mut app, 10);
+    type_key(&ctx, &mut app, Key::B, Modifiers::COMMAND, None);
+    word(&ctx, &mut app, "up");
+    assert!(app.preview_window, "Ctrl+B u p previews the row under the cursor");
+    assert_eq!(app.panes[0].filter, "dir0", "the shortcut's letters stay out of the filter");
+    assert!(app.panes[0].vim_filtering, "and the filter can still be typed");
+    word(&ctx, &mut app, "5");
+    assert_eq!(app.panes[0].filter, "dir05");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -3102,3 +3121,4 @@ fn the_theme_button_lists_the_themes_to_choose_from() {
     click_text(&ctx, &mut app, "Mine");
     assert_eq!(app.st.theme, ThemeId::Custom("mine".into()), "own themes are in the list too");
 }
+
