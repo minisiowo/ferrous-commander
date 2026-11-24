@@ -945,10 +945,15 @@ impl App {
         }
     }
 
+    /// A picture or a test keeps its files to itself instead of using the real Windows clipboard.
+    #[cfg(windows)]
+    fn windows_clipboard(&self) -> bool {
+        self.shot.is_none()
+    }
+
     pub fn can_paste_files(&self) -> bool {
         #[cfg(windows)]
-        { crate::file_transfer::has_files() }
-        #[cfg(not(windows))]
+        if self.windows_clipboard() { return crate::file_transfer::has_files(); }
         {
             #[cfg(target_os = "linux")]
             if self.system_clipboard.is_some() { return true; }
@@ -1706,7 +1711,7 @@ impl App {
             return;
         }
         #[cfg(windows)]
-        if let Err(e) = crate::file_transfer::write(&sel, cut) {
+        if self.windows_clipboard() && let Err(e) = crate::file_transfer::write(&sel, cut) {
             self.toast(ToastKind::Error, e);
             return;
         }
@@ -1968,9 +1973,13 @@ impl App {
                     return;
                 }
                 #[cfg(windows)]
-                let clipboard = match crate::file_transfer::read() {
-                    Ok(value) => value.map(|(paths, cut)| (std::sync::Arc::<[PathBuf]>::from(paths), cut)),
-                    Err(e) => { self.toast(ToastKind::Error, e); return; }
+                let clipboard = if self.windows_clipboard() {
+                    match crate::file_transfer::read() {
+                        Ok(value) => value.map(|(paths, cut)| (std::sync::Arc::<[PathBuf]>::from(paths), cut)),
+                        Err(e) => { self.toast(ToastKind::Error, e); return; }
+                    }
+                } else {
+                    self.clip.take()
                 };
                 #[cfg(not(windows))]
                 let clipboard = self.clip.take();
@@ -1981,7 +1990,7 @@ impl App {
                             self.clip = Some((paths.clone(), false));
                         }
                         #[cfg(windows)]
-                        if cut {
+                        if cut && self.windows_clipboard() {
                             crate::file_transfer::forget_cut();
                         }
                         self.start_job(kind, paths.to_vec(), Some(dest), ctx);
