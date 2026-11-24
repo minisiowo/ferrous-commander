@@ -64,12 +64,9 @@ pub struct Key {
 
 impl Key {
     /// Worth reading before it is known to be wanted.
-    /// Further pages of a document already open are, however large the file: they come
-    /// into view as it is scrolled.
     fn light(&self) -> bool {
         let is = |name: &str| self.path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case(name));
-        let model = is("stl") || is("3mf");
-        (self.page > 0 && is("pdf")) || (self.size <= PREFETCH_MAX_BYTES && !model)
+        self.size <= PREFETCH_MAX_BYTES && !(is("stl") || is("3mf"))
     }
 
     fn options(&self) -> Options {
@@ -292,6 +289,8 @@ struct Slot {
     wake: Condvar,
     /// The newest look at a model, for the preview window to collect without the file list.
     look: Mutex<Option<(Key, egui::TextureHandle)>>,
+    /// The job being worked on, until its result has been sent.
+    running: Mutex<Option<Key>>,
 }
 
 impl Slot {
@@ -308,10 +307,37 @@ impl Slot {
         self.wake.notify_one();
     }
 
+    /// A sharper part of the shown picture comes first, instead of the older parts asked
+    /// for. The pages read ahead stay behind it.
+    fn ask_detail(&self, job: Job) {
+        let mut jobs = self.jobs.lock().unwrap();
+        jobs.retain(|waiting| waiting.key.crop.is_none());
+        jobs.push_front(job);
+        self.wake.notify_one();
+    }
+
+    /// Adds what is neither waiting nor being worked on, after what is waiting.
+    fn read_ahead(&self, more: Vec<Job>) {
+        let running = self.running.lock().unwrap().clone();
+        let mut jobs = self.jobs.lock().unwrap();
+        for job in more {
+            if running.as_ref() != Some(&job.key) && !jobs.iter().any(|waiting| waiting.key == job.key) { jobs.push_back(job); }
+        }
+        self.wake.notify_one();
+    }
+
+    fn is_running(&self, key: &Key) -> bool {
+        self.running.lock().unwrap().as_ref() == Some(key)
+    }
+
     /// True when something else is waiting and this job is no longer asked for.
+    /// Work waiting on the same file lets it finish: the helper has that file open, and a
+    /// new helper would have to read it all again. For the next page of a document, that
+    /// took far longer than drawing the page, the more so on Windows, where starting a
+    /// process is slow.
     fn superseded(&self, key: &Key) -> bool {
         let jobs = self.jobs.lock().unwrap();
-        !jobs.is_empty() && !jobs.iter().any(|j| j.key == *key)
+        !jobs.is_empty() && !jobs.iter().any(|j| j.key.path == key.path)
     }
 }
 
@@ -325,10 +351,15 @@ const START: Option<Start> = None;
 fn run_lane(slot: Arc<Slot>, results: mpsc::Sender<(Key, PreviewContent)>, start: Option<Start>, idle: Duration) {
     let mut running: Option<helper::Helper> = None;
     loop {
+        // Cleared only once its result is on the way, so that it is not asked for twice.
+        *slot.running.lock().unwrap() = None;
         let job = {
             let mut jobs = slot.jobs.lock().unwrap();
             loop {
-                if let Some(job) = jobs.pop_front() { break job; }
+                if let Some(job) = jobs.pop_front() {
+                    *slot.running.lock().unwrap() = Some(job.key.clone());
+                    break job;
+                }
                 let (guard, wait) = slot.wake.wait_timeout(jobs, idle).unwrap();
                 jobs = guard;
                 if wait.timed_out() && jobs.is_empty() {
@@ -448,6 +479,8 @@ pub struct Preview {
     started: [bool; 2],
     asked: Option<Instant>,
     prefetched: Option<Key>,
+    /// The page whose neighbours were last asked for.
+    read_ahead_for: Option<Key>,
 }
 
 impl Preview {
@@ -469,6 +502,7 @@ impl Preview {
             started: [false; 2],
             asked: None,
             prefetched: None,
+            read_ahead_for: None,
         }
     }
 
@@ -505,14 +539,33 @@ impl Preview {
         self.key.as_ref()
     }
 
-    fn send(&mut self, lane: usize, jobs: Vec<Job>) {
+    /// The lane, started on first use.
+    fn lane(&mut self, lane: usize) -> &Arc<Slot> {
         let slot = if lane == 0 { &self.current } else { &self.neighbours };
         if !std::mem::replace(&mut self.started[lane], true) {
             let (slot, tx) = (slot.clone(), self.tx.clone());
             let idle = if lane == 0 { IDLE_LIMIT } else { NEIGHBOURS_IDLE_LIMIT };
             std::thread::spawn(move || run_lane(slot, tx, START, idle));
         }
-        slot.replace(jobs);
+        slot
+    }
+
+    fn send(&mut self, lane: usize, jobs: Vec<Job>) {
+        self.lane(lane).replace(jobs);
+    }
+
+    /// Once a page of a document is on show, draws the pages around it, the next ones first.
+    /// The shown file's own helper does it: it has the document open already, where a
+    /// second helper would read the whole file again. Each page is asked for once.
+    pub fn read_pages_ahead(&mut self, ctx: &egui::Context) {
+        let &PreviewContent::Page { page, pages, .. } = &self.content else { return };
+        let Some(key) = self.key.clone().filter(|key| key.page == page) else { return };
+        if self.read_ahead_for.as_ref() == Some(&key) { return; }
+        self.read_ahead_for = Some(key.clone());
+        let around = [(page + 1 < pages).then_some(page + 1), page.checked_sub(1), (page + 2 < pages).then_some(page + 2)];
+        let jobs: Vec<Job> = around.into_iter().flatten().map(|n| Key { page: n, ..key.clone() })
+            .filter(|k| !self.cache.contains(k)).map(|key| Job { key, ctx: ctx.clone(), prefetch: false }).collect();
+        if !jobs.is_empty() { self.lane(0).read_ahead(jobs); }
     }
 }
 
@@ -540,6 +593,8 @@ impl Preview {
             return;
         }
         preview.content = PreviewContent::Loading;
+        // Read ahead and still being drawn: it is on the way.
+        if preview.started[0] && preview.current.is_running(&key) { return; }
         preview.send(0, vec![Job { key, ctx: ctx.clone(), prefetch: false }]);
     }
 
@@ -598,7 +653,7 @@ impl App {
     pub fn want_detail(&mut self, crop: [u16; 4], ctx: &egui::Context) {
         let Some(mut key) = self.preview.key.clone() else { return };
         key.crop = Some(crop);
-        self.preview.send(0, vec![Job { key, ctx: ctx.clone(), prefetch: false }]);
+        self.preview.lane(0).ask_detail(Job { key, ctx: ctx.clone(), prefetch: false });
     }
 
     /// Asks for another look at the shown 3D model.
@@ -713,6 +768,59 @@ mod tests {
         let wrapped = doc.rows(Some(4));
         assert_eq!(wrapped.iter().map(piece).collect::<Vec<_>>(), ["żółw", "", "abcd", "ef"]);
         assert_eq!(wrapped.iter().map(|r| r.0).collect::<Vec<_>>(), [0, 1, 2, 2]);
+    }
+
+    #[test]
+    fn work_on_the_same_file_lets_the_running_job_finish() {
+        let ctx = egui::Context::default();
+        let slot = Slot::default();
+        let page = |n| Job { key: Key { page: n, ..key("doc.pdf") }, ctx: ctx.clone(), prefetch: false };
+        slot.replace(vec![page(2)]);
+        assert!(!slot.superseded(&page(1).key), "the helper has the document open");
+        slot.replace(vec![job("other.pdf", &ctx)]);
+        assert!(slot.superseded(&page(1).key), "another file does not wait for it");
+    }
+
+    #[test]
+    fn pages_are_read_ahead_once_and_a_detail_goes_before_them() {
+        let ctx = egui::Context::default();
+        let slot = Slot::default();
+        let page = |n| Job { key: Key { page: n, ..key("doc.pdf") }, ctx: ctx.clone(), prefetch: false };
+        *slot.running.lock().unwrap() = Some(page(1).key);
+        slot.read_ahead(vec![page(1), page(2)]);
+        slot.read_ahead(vec![page(2), page(3)]);
+        let pages = |slot: &Slot| slot.jobs.lock().unwrap().iter().map(|j| (j.key.page, j.key.crop.is_some())).collect::<Vec<_>>();
+        assert_eq!(pages(&slot), [(2, false), (3, false)], "nothing twice, and not what is being drawn");
+        let detail = |crop| Job { key: Key { crop: Some(crop), ..page(2).key }, ctx: ctx.clone(), prefetch: false };
+        slot.ask_detail(detail([1; 4]));
+        slot.ask_detail(detail([2; 4]));
+        assert_eq!(pages(&slot), [(2, true), (2, false), (3, false)], "the newest part first, the pages stay");
+    }
+
+    #[test]
+    fn the_pages_around_a_shown_page_are_asked_for_on_its_own_lane() {
+        let mut preview = Preview::new();
+        let ctx = egui::Context::default();
+        // No lane thread: the jobs stay where the test can see them.
+        preview.started[0] = true;
+        let at = |n| Key { page: n, ..key("doc.pdf") };
+        let texture = ctx.load_texture("page", egui::ColorImage::filled([1, 1], egui::Color32::WHITE), Default::default());
+        let shown = |n| PreviewContent::Page { texture: texture.clone(), orig: [1, 1], page: n, pages: 4, text: None };
+        preview.cache.insert(at(1), shown(1));
+        preview.cache.insert(at(3), shown(3));
+        preview.key = Some(at(1));
+        preview.content = shown(1);
+        preview.read_pages_ahead(&ctx);
+        let waiting = |preview: &Preview| preview.current.jobs.lock().unwrap().iter().map(|j| j.key.page).collect::<Vec<_>>();
+        assert_eq!(waiting(&preview), [2, 0], "the next page first, and none already drawn");
+        preview.current.jobs.lock().unwrap().clear();
+        preview.read_pages_ahead(&ctx);
+        assert!(waiting(&preview).is_empty(), "asked for once per page on show");
+        assert!(preview.neighbours.jobs.lock().unwrap().is_empty(), "the other helper would read the file again");
+        *preview.current.running.lock().unwrap() = Some(at(2));
+        preview.want(Some(at(2)), &ctx);
+        assert!(waiting(&preview).is_empty(), "a page being drawn ahead is not asked for again");
+        assert!(matches!(preview.content, PreviewContent::Loading));
     }
 
     #[test]

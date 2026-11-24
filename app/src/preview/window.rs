@@ -309,14 +309,10 @@ impl App {
         };
         self.want_preview(Some(Key::of(&e)), ctx);
         self.sound_preview(&e, ctx);
-        let mut neighbours: Vec<Key> = self.panes[i].cursor.map_or_else(Vec::new, |row| {
+        let neighbours: Vec<Key> = self.panes[i].cursor.map_or_else(Vec::new, |row| {
             [row.wrapping_sub(1), row + 1].into_iter().filter_map(|r| self.entry_at(i, r)).filter(|n| !n.is_dir).map(Key::of).collect()
         });
-        if let PreviewContent::Page { page, pages, .. } = self.preview.content {
-            // Most often read onwards, so the next pages come first.
-            let around = [(page + 1 < pages).then_some(page + 1), page.checked_sub(1), (page + 2 < pages).then_some(page + 2)];
-            neighbours.splice(0..0, around.into_iter().flatten().filter_map(|n| self.preview.page_key(n)));
-        }
+        self.preview.read_pages_ahead(ctx);
         self.prefetch_preview(neighbours, ctx);
         self.want_film(ctx);
         self.hand_over(ctx, &e, i);

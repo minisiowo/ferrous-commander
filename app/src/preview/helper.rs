@@ -417,6 +417,29 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// How long the pages of a PDF take through the real helper, kept and newly started:
+    /// `cargo build --release`, then with `FERROUS_HELPER_EXE=target/release/ferrous-commander`
+    /// and `FERROUS_PDF` naming a document, `cargo test --release pdf_page_baseline -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs the release program, named by FERROUS_HELPER_EXE, and FERROUS_PDF"]
+    fn pdf_page_baseline() {
+        let file = PathBuf::from(std::env::var_os("FERROUS_PDF").expect("FERROUS_PDF"));
+        let start = || {
+            let mut command = Command::new(std::env::var_os("FERROUS_HELPER_EXE").expect("FERROUS_HELPER_EXE"));
+            command.arg(FLAG);
+            Helper::from_command(command)
+        };
+        let never_stale = || false;
+        let mut kept = None;
+        for page in 0..6 {
+            for (which, running) in [("kept helper", &mut kept), ("new helper ", &mut None)] {
+                let started = Instant::now();
+                let reply = ask(running, start, &file, Options { max_side: 2048, page, ..ANY }, Duration::from_secs(30), &never_stale).unwrap();
+                println!("page {page}, {which}: {:6.1} ms, {:?}", started.elapsed().as_secs_f64() * 1000.0, reply.1.map(|p| p.size));
+            }
+        }
+    }
+
     #[test]
     fn requests_and_replies_survive_the_pipe() {
         let path = Path::new("/tmp/zażółć file.pdf");
