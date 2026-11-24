@@ -616,6 +616,12 @@ impl Keymap {
         None
     }
 
+    /// A key the standard layer has a shortcut for. While a filter is typed, it does there
+    /// what it does in the standard layer, where it never types: Space shows the preview.
+    pub fn standard_takes(&self, chord: Chord) -> bool {
+        self.standard.iter().any(|b| b.keys[0] == chord)
+    }
+
     fn extending(&self, mode: Mode, chord: Chord) -> Option<Target> {
         if !chord.shift || chord.is_typing() { return None; }
         let target = self.single(mode, Chord { shift: false, ..chord })?;

@@ -2621,6 +2621,21 @@ fn the_leader_previews_a_file_while_the_filter_is_typed() {
 }
 
 #[test]
+fn space_previews_a_file_while_the_filter_is_typed() {
+    let (ctx, mut app, root) = neovim_app("filter_space");
+    type_key(&ctx, &mut app, Key::Slash, Modifiers::NONE, Some("/"));
+    word(&ctx, &mut app, "dir0");
+    wait_for_rows(&ctx, &mut app, 10);
+    type_key(&ctx, &mut app, Key::Space, Modifiers::NONE, Some(" "));
+    assert!(app.preview_window, "Space previews, as it does everywhere else");
+    assert_eq!(app.panes[0].filter, "dir0", "and types no space into the filter");
+    assert!(app.panes[0].vim_filtering, "the filter can still be typed");
+    word(&ctx, &mut app, "5");
+    assert_eq!(app.panes[0].filter, "dir05");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn a_recorded_shortcut_replaces_its_old_owner_and_works() {
     use crate::keymap::{Command, Layer, parse_keys};
     use crate::ui_keys::Capture;

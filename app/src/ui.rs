@@ -478,8 +478,9 @@ impl App {
                             continue;
                         }
                         // Letters are the filter's, unless they go on with a shortcut begun
-                        // while filtering by a key that types nothing, such as Ctrl+B for the leader.
-                        if chord.is_typing() && self.matcher.keys().is_empty() {
+                        // while filtering by a key that types nothing, such as Ctrl+B for the leader,
+                        // or the standard layer has a shortcut for them, such as Space for the preview.
+                        if chord.is_typing() && self.matcher.keys().is_empty() && !self.keys.standard_takes(chord) {
                             if let Some(text) = text {
                                 self.typed(i, &text);
                             }
