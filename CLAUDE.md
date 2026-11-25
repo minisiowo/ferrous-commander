@@ -45,7 +45,10 @@ when the user asks, by following `.claude/skills/linux-security-report/SKILL.md`
 3. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 
 The tag starts `.github/workflows/release.yml`, which tests and builds on Linux and
-Windows and publishes a pre-release. A tag that differs from `Cargo.toml` fails.
+Windows and publishes a release. A version with a suffix (`0.5.0-beta.1`, tag
+`v0.5.0-beta.1`) publishes a pre-release instead, and the app shows "Release" or
+"Pre-release" next to its version from the same suffix. A tag that differs from
+`Cargo.toml` fails.
 Pushing a tag publishes to testers, so only do it when the user asks for a release.
 Before tagging, run the workflow on `main` by hand (`gh workflow run release.yml`)
 and wait for it to pass. If a tag's build still fails, leave the tag where it is and

@@ -5,6 +5,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+/// A version with a suffix, such as 0.5.0-beta.1, is published as a pre-release.
+pub const PRE_RELEASE: bool = !env!("CARGO_PKG_VERSION_PRE").is_empty();
+pub const CHANNEL: &str = if PRE_RELEASE { "Pre-release" } else { "Release" };
+/// The version with its channel, as the app shows it: "0.4.0 (Release)".
+pub const VERSION_LABEL: &str = if PRE_RELEASE {
+    concat!(env!("CARGO_PKG_VERSION"), " (Pre-release)")
+} else {
+    concat!(env!("CARGO_PKG_VERSION"), " (Release)")
+};
 pub const URL: &str = concat!(
     "https://github.com/minisiowo/ferrous-commander/releases/tag/v",
     env!("CARGO_PKG_VERSION")

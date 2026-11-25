@@ -291,7 +291,7 @@ fn main() {
                 return;
             }
             "--version" | "-V" => {
-                println!("ferrous-commander {}", env!("CARGO_PKG_VERSION"));
+                println!("ferrous-commander {}", release_notes::VERSION_LABEL);
                 return;
             }
             "--install" | "--uninstall" => {

@@ -1436,7 +1436,7 @@ fn dismissing_release_notes_records_the_version() {
     frame(&ctx, &mut app, vec![], Modifiers::NONE);
     assert_eq!(app.notices.len(), 1);
     assert!(!marker.exists());
-    let version = format!("Ferrous Commander {}", crate::release_notes::VERSION);
+    let version = format!("Ferrous Commander {} · {}", crate::release_notes::VERSION, crate::release_notes::CHANNEL);
     assert!(painted_text(&ctx, &mut app, &version).is_some());
     if let Some(line) = crate::release_notes::NOTES.lines().next() {
         let change = line.strip_prefix("- ").unwrap_or(line);

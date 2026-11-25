@@ -6,7 +6,7 @@
 
 **A fast, light multi-pane file manager for Linux and Windows, written in Rust.**
 
-[![Release](https://img.shields.io/github/v/release/minisiowo/ferrous-commander?include_prereleases&label=release)](https://github.com/minisiowo/ferrous-commander/releases)
+[![Release](https://img.shields.io/github/v/release/minisiowo/ferrous-commander?label=release)](https://github.com/minisiowo/ferrous-commander/releases)
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 

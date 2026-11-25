@@ -295,7 +295,7 @@ impl App {
                     }
                     Notice::ReleaseNotes { .. } => {
                         chrome::body(ui, |ui| {
-                            ui.label(RichText::new(format!("Ferrous Commander {}", release_notes::VERSION)).strong().color(pal.text));
+                            ui.label(RichText::new(format!("Ferrous Commander {} · {}", release_notes::VERSION, release_notes::CHANNEL)).strong().color(pal.text));
                             ui.add_space(6.0);
                             egui::ScrollArea::vertical().id_salt("release_notes").max_height(220.0).show(ui, |ui| {
                                 for line in release_notes::NOTES.lines() {
@@ -411,8 +411,9 @@ impl App {
         let accent = pal.accent;
         let mut install_result: Option<Result<String, String>> = None;
         let mut close_after_uninstall = false;
+        let version_info = format!("Version {}", release_notes::VERSION_LABEL);
         let closed = Panel::new("Settings", pal, Icon::Glyph("⚙", None))
-            .info(concat!("Version ", env!("CARGO_PKG_VERSION")))
+            .info(&version_info)
             .window(|w| w.id(egui::Id::unique("settings_panel_v2")))
             .fit_screen(ctx, vec2(660.0, 620.0), vec2(420.0, 260.0))
             .show(ctx, |ui| {
