@@ -1221,6 +1221,26 @@ impl App {
                 }
             });
         }
+        if !e.is_dir && let Some(folder) = e.path.parent() {
+            use crate::media_edit::{self, Edit, Turn};
+            let file = vec![e.path.clone()];
+            let edit = |operation, sources| Act::EditMedia(operation, sources, folder.to_path_buf());
+            if media_edit::is_pdf(&e.path) {
+                ui.menu_button("PDF tools", |ui| {
+                    act(ui, "Rotate pages left…", edit(Edit::RotatePdf(Turn::Left), file.clone()), &mut acts);
+                    act(ui, "Rotate pages right…", edit(Edit::RotatePdf(Turn::Right), file.clone()), &mut acts);
+                    act(ui, "Extract pages…", edit(Edit::ExtractPdf, file.clone()), &mut acts);
+                    if paths.len() > 1 && paths.iter().all(|path| media_edit::is_pdf(path)) {
+                        let mut pdfs = paths.clone();
+                        pdfs.sort();
+                        act(ui, "Merge selected PDFs…", edit(Edit::MergePdf, pdfs), &mut acts);
+                    }
+                });
+            } else if media_edit::image_format(&e.path).is_some() {
+                act(ui, "Rotate image left…", edit(Edit::RotateImage(Turn::Left), file.clone()), &mut acts);
+                act(ui, "Rotate image right…", edit(Edit::RotateImage(Turn::Right), file), &mut acts);
+            }
+        }
         act(ui, "Compress...", Act::Compress(i, paths), &mut acts);
         ui.separator();
         if menu_entry(ui, RichText::new("Delete").color(hex("#ef7063")), self.key_hint(Command::Delete)).clicked() {

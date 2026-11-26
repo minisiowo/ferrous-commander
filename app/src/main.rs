@@ -25,6 +25,7 @@ mod linux_clipboard;
 mod keymap;
 mod launch;
 mod lua_config;
+mod media_edit;
 mod omarchy;
 mod openwith;
 mod ops;

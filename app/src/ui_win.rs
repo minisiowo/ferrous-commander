@@ -10,7 +10,7 @@ use crate::chrome::{self, Icon, Panel};
 use crate::fsx;
 use crate::keymap::Command;
 use crate::release_notes;
-use crate::theme::hex;
+use crate::theme::{Palette, hex};
 
 fn settings_section(ui: &mut egui::Ui, title: &str, accent: egui::Color32) {
     ui.add_space(10.0);
@@ -26,6 +26,187 @@ const TRASH_NAME: &str = if cfg!(windows) { "Recycle Bin" } else { "Trash" };
 const SETTINGS_GRID_LABELS: &[&str] = &[
     "Theme", "Accent color", "Panels", "Font size", "Corners", "Outlines", "Window",
 ];
+
+struct MergeRowDrag(usize);
+
+fn paint_merge_row(ui: &egui::Ui, painter: &egui::Painter, rect: Rect, path: &std::path::Path, color: egui::Color32, cap: &egui::Galley) {
+    let name = egui::WidgetText::from(fsx::display_name(path)).into_galley(
+        ui, Some(egui::TextWrapMode::Truncate), (rect.width() - 32.0).max(0.0), egui::TextStyle::Body,
+    );
+    let scale = painter.pixels_per_point();
+    let text_top = ((rect.center().y - cap.size().y / 2.0) * scale).round() / scale;
+    // Use the cap height as a fixed reference so descenders and accents never move the grip or baseline.
+    let grip_center = text_top + cap.mesh_bounds.center().y;
+    let dot_spacing = cap.mesh_bounds.height() / 3.0;
+    for dx in [-2.0, 2.0] {
+        for dy in [-dot_spacing, 0.0, dot_spacing] {
+            painter.circle_filled(pos2(rect.left() + 12.0 + dx, grip_center + dy), 1.1, color);
+        }
+    }
+    painter.galley(pos2(rect.left() + 24.0, text_top), name, color);
+}
+
+fn merge_order(ui: &mut egui::Ui, sources: &mut Vec<std::path::PathBuf>, pal: Palette) {
+    use egui::{CursorIcon, DragAndDrop, LayerId, Order, PointerButton, StrokeKind, TextStyle};
+
+    ui.label("Drag files to set the merge order");
+    let drop = egui::ScrollArea::vertical()
+        .id_salt("pdf_merge_order")
+        .max_height(180.0)
+        .scroll_source(egui::scroll_area::ScrollSource {
+            drag: egui::scroll_area::DragScroll::Never,
+            ..Default::default()
+        })
+        .show(ui, |ui| {
+            let mut rows = Vec::with_capacity(sources.len());
+            let width = ui.available_width();
+            let row_height = ui.text_style_height(&TextStyle::Body) + 12.0;
+            let cap = egui::WidgetText::from("H").into_galley(ui, None, f32::INFINITY, TextStyle::Body);
+            let mut dragged_row = DragAndDrop::payload::<MergeRowDrag>(ui.ctx()).map(|drag| drag.0);
+            for (index, path) in sources.iter().enumerate() {
+                let (rect, response) = ui.allocate_exact_size(vec2(width, row_height), Sense::click_and_drag());
+                rows.push(rect);
+                if response.drag_started_by(PointerButton::Primary) {
+                    DragAndDrop::set_payload(ui.ctx(), MergeRowDrag(index));
+                    dragged_row = Some(index);
+                }
+                let dragging = dragged_row == Some(index);
+                if !ui.is_rect_visible(rect) {
+                    continue;
+                }
+                let painter = ui.painter();
+                if dragging {
+                    painter.rect(rect, pal.corner_small(), pal.accent.gamma_multiply(0.16),
+                        Stroke::new(1.0, pal.accent.gamma_multiply(0.55)), StrokeKind::Inside);
+                } else if response.hovered() {
+                    painter.rect_filled(rect, pal.corner_small(), pal.hover);
+                }
+                if dragged_row.is_none() {
+                    response.on_hover_cursor(CursorIcon::Grab).on_hover_text(path.display().to_string());
+                }
+                paint_merge_row(ui, painter, rect, path, if dragging { pal.text_weak } else { pal.text }, &cap);
+            }
+
+            let from = dragged_row?;
+            let pointer = ui.ctx().pointer_interact_pos()?;
+            let (released, dt) = ui.input(|input| (input.pointer.button_released(PointerButton::Primary), input.stable_dt));
+            if !released {
+                let screen = ui.ctx().content_rect().shrink(6.0);
+                let size = vec2(width, row_height + 4.0).min(screen.size());
+                let gap = row_height / 2.0 + 8.0;
+                let y = if pointer.y + gap + size.y <= screen.bottom() {
+                    pointer.y + gap
+                } else {
+                    pointer.y - gap - size.y
+                };
+                let top_left = pos2(pointer.x + 14.0, y).clamp(screen.min, screen.max - size);
+                let card = Rect::from_min_size(top_left, size);
+                let layer = LayerId::new(Order::Tooltip, ui.scope_id().with("pdf_merge_drag_preview"));
+                let painter = ui.ctx().layer_painter(layer);
+                let corner = egui::CornerRadius::same(6);
+                painter.rect_filled(card.translate(vec2(0.0, 3.0)), corner, egui::Color32::from_black_alpha(100));
+                painter.rect(card, corner, pal.raised, Stroke::new(1.5, pal.accent), StrokeKind::Inside);
+                paint_merge_row(ui, &painter, card, &sources[from], pal.text, &cap);
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            }
+            let bounds = rows.first()?.union(*rows.last()?);
+            let visible = bounds.intersect(ui.clip_rect());
+            if !visible.contains(pointer) {
+                return None;
+            }
+            let slot = rows.partition_point(|row| row.center().y < pointer.y);
+            let changes_order = slot != from && slot != from + 1;
+            if changes_order {
+                let y = rows.get(slot).map_or(bounds.bottom(), |row| row.top() - 1.0)
+                    .clamp(visible.top(), visible.bottom());
+                let x = visible.x_range().shrink(4.0);
+                ui.painter().hline(x, y, Stroke::new(3.0, pal.accent));
+                ui.painter().circle_filled(pos2(x.min, y), 3.0, pal.accent);
+                ui.painter().circle_filled(pos2(x.max, y), 3.0, pal.accent);
+            }
+            if released {
+                return changes_order.then_some((from, slot));
+            }
+
+            // Holding a row near the edge scrolls to files beyond the viewport.
+            let edge = 18.0;
+            let dy = if pointer.y < visible.top() + edge && bounds.top() < visible.top() {
+                1.0
+            } else if pointer.y > visible.bottom() - edge && bounds.bottom() > visible.bottom() {
+                -1.0
+            } else {
+                0.0
+            };
+            if dy != 0.0 {
+                ui.scroll_with_delta_animation(vec2(0.0, dy * dt.min(0.05) * 360.0), egui::style::ScrollAnimation::none());
+                ui.ctx().request_repaint();
+            }
+            None
+        }).inner;
+    if let Some((from, slot)) = drop {
+        let file = sources.remove(from);
+        sources.insert(if slot > from { slot - 1 } else { slot }, file);
+        DragAndDrop::clear_payload(ui.ctx());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn merge_order_moves_rows_only_when_dropped_in_the_list() {
+    use egui::{Event, Modifiers, PointerButton, RawInput};
+    use std::path::PathBuf;
+
+    let ctx = egui::Context::default();
+    let pal = Palette::get(crate::theme::ThemeName::Dark, hex("#379bff"));
+    let mut sources = ["a.pdf", "b.pdf", "c.pdf", "d.pdf"].map(PathBuf::from).to_vec();
+    let cap_center = std::cell::Cell::new(0.0);
+    let frame = |sources: &mut Vec<PathBuf>, events| {
+        let mut output = ctx.run_ui(RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(360.0, 300.0))),
+            events,
+            ..Default::default()
+        }, |ui| {
+            let cap = egui::WidgetText::from("H").into_galley(ui, None, f32::INFINITY, egui::TextStyle::Body);
+            cap_center.set(cap.mesh_bounds.center().y);
+            merge_order(ui, sources, pal);
+        });
+        output.textures_delta.clear();
+        output
+    };
+    let output = frame(&mut sources, vec![]);
+    use egui::epaint::Shape;
+    let row = |name: &str| output.shapes.iter().find_map(|shape| match &shape.shape {
+        Shape::Text(text) if text.galley.job.text == name => Some(text.pos + vec2(text.galley.size().x / 2.0, cap_center.get())),
+        _ => None,
+    }).unwrap();
+    let pointer = |pos, pressed| Event::PointerButton { pos, pressed, button: PointerButton::Primary, modifiers: Modifiers::NONE };
+    let drag = |sources: &mut Vec<PathBuf>, start, end| {
+        frame(sources, vec![Event::PointerMoved(start)]);
+        frame(sources, vec![pointer(start, true)]);
+        let held = frame(sources, vec![Event::PointerMoved(end)]);
+        frame(sources, vec![pointer(end, false)]);
+        held
+    };
+    let expect = |sources: &[PathBuf], names: [&str; 4]| assert_eq!(sources, names.map(PathBuf::from));
+    let first = row("a.pdf");
+    let last = row("d.pdf");
+    let grip_dots: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+        Shape::Circle(dot) if dot.center.x < first.x && (dot.center.y - first.y).abs() <= 5.0 => Some(dot.center.y),
+        _ => None,
+    }).collect();
+    assert_eq!(grip_dots.len(), 6);
+    assert!((grip_dots.iter().sum::<f32>() / 6.0 - first.y).abs() < 0.01);
+    let held = drag(&mut sources, first, last + vec2(0.0, 5.0));
+    assert_eq!(held.shapes.iter().filter(|shape| matches!(&shape.shape,
+        Shape::Text(text) if text.galley.job.text == "a.pdf")).count(), 2);
+    assert!(held.shapes.iter().any(|shape| matches!(&shape.shape,
+        Shape::LineSegment { stroke, .. } if stroke.color == pal.accent && stroke.width == 3.0)));
+    expect(&sources, ["b.pdf", "c.pdf", "d.pdf", "a.pdf"]);
+    drag(&mut sources, last, first - vec2(0.0, 5.0));
+    expect(&sources, ["a.pdf", "b.pdf", "c.pdf", "d.pdf"]);
+    drag(&mut sources, row("b.pdf"), pos2(30.0, 275.0));
+    expect(&sources, ["a.pdf", "b.pdf", "c.pdf", "d.pdf"]);
+}
 
 impl App {
     pub fn dialogs(&mut self, ctx: &egui::Context) {
@@ -50,6 +231,7 @@ impl App {
             Dialog::RenameLayout { .. } => ("Rename layout", "Layout name", "Rename"),
             Dialog::Password { .. } => ("Password needed", "Password", "Extract"),
             Dialog::Compress { .. } => ("Create archive", "Archive name", "Compress"),
+            Dialog::EditMedia { edit, .. } => (edit.title(), "Output file name", "Save copy"),
         };
         let pal = self.pal;
         let creates = matches!(d, Dialog::NewFolder { .. } | Dialog::NewFile { .. });
@@ -57,6 +239,7 @@ impl App {
             Dialog::NewFile { .. } => Icon::Entry(fsx::Kind::Other, ""),
             Dialog::Password { .. } => Icon::Glyph("🔒", None),
             Dialog::Compress { .. } => Icon::Entry(fsx::Kind::Archive, ""),
+            Dialog::EditMedia { .. } => Icon::Entry(fsx::Kind::Other, ""),
             _ => Icon::Folder(fsx::Kind::Folder.color()),
         };
         let closed = Panel::new(title, pal, icon)
@@ -80,6 +263,7 @@ impl App {
                     | Dialog::NewLayout { name, focus }
                     | Dialog::RenameLayout { name, focus, .. }
                     | Dialog::Compress { name, focus, .. }
+                    | Dialog::EditMedia { name, focus, .. }
                     | Dialog::Password { name, focus, .. } => (name, focus),
                 };
                 let resp = if is_location {
@@ -106,6 +290,20 @@ impl App {
                     });
                     ui.label(RichText::new(format!("{} item(s), saved in this folder. Existing files are never replaced.", sources.len())).color(pal.text_weak).size(11.0));
                 }
+                if let Dialog::EditMedia { edit, sources, pages, .. } = &mut d {
+                    use crate::media_edit::Edit;
+                    if edit.takes_pages() {
+                        ui.label("Pages (leave blank for all)");
+                        ui.add(egui::TextEdit::singleline(pages).hint_text("1, 3-5").desired_width(f32::INFINITY));
+                    }
+                    if matches!(edit, Edit::MergePdf) {
+                        merge_order(ui, sources, pal);
+                    }
+                    ui.label(RichText::new("Saves a new file beside the original.").color(pal.text_weak).size(11.0));
+                    if matches!(edit, Edit::MergePdf | Edit::ExtractPdf) {
+                        ui.label(RichText::new("Document bookmarks and interactive forms do not carry over.").color(pal.text_weak).size(11.0));
+                    }
+                }
                 if matches!(d, Dialog::NewLayout { .. }) {
                     let panels = self.panes.len();
                     let t = format!("Keeps {} with their tabs and layout. Open it again from the sidebar or Alt+P.", if panels == 1 { "1 panel".to_string() } else { format!("all {panels} panels") });
@@ -117,10 +315,13 @@ impl App {
                 let valid = matches!(d, Dialog::RenameFavorite { .. }) || (secret && !name.is_empty()) || !name.trim().is_empty() && (!matches!(d, Dialog::AddLocation { .. }) || std::path::Path::new(name.trim()).is_absolute());
                 let valid = valid && match &d {
                     Dialog::Compress { kind, .. } => fsx::valid_name(&crate::compress::file_name(&name, *kind)),
+                    Dialog::EditMedia { edit, sources, .. } => {
+                        fsx::valid_name(&crate::media_edit::output_name(&name, edit.output_suffix(&sources[0])))
+                    }
                     _ => true,
                 };
                 if !name.trim().is_empty() && !valid {
-                    ui.label(if matches!(d, Dialog::Compress { .. }) { "This name can't be used here." } else { "Enter a full folder path or network share." });
+                    ui.label(if matches!(d, Dialog::Compress { .. } | Dialog::EditMedia { .. }) { "This name can't be used here." } else { "Enter a full folder path or network share." });
                 }
                 if let Dialog::NewFolder { pane, .. } = &d {
                     let n = self.panes[*pane].selected.len();
@@ -193,6 +394,10 @@ impl App {
                     Dialog::RenameLayout { layout, .. } => self.acts.push(Act::RenameLayout(*layout, name.clone())),
                     Dialog::Compress { pane, sources, kind, .. } => {
                         self.compress(*pane, sources.clone(), crate::compress::file_name(&name, *kind), *kind, ui.ctx());
+                    }
+                    Dialog::EditMedia { edit, folder, sources, pages, .. } => {
+                        let name = crate::media_edit::output_name(&name, edit.output_suffix(&sources[0]));
+                        self.jobs.push(crate::ops::start_media_edit(*edit, sources.clone(), folder.clone(), name, pages.clone(), ui.ctx().clone()));
                     }
                     Dialog::Password { archive, dest, .. } => {
                         self.extract_with_password(archive.clone(), dest.clone(), name.clone(), ui.ctx());

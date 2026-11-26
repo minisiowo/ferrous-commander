@@ -19,6 +19,7 @@ pub enum OpKind {
     Destroy,
     Extract,
     Compress,
+    EditMedia,
     #[cfg(target_os = "linux")]
     Symlink,
     #[cfg(target_os = "linux")]
@@ -33,6 +34,7 @@ impl OpKind {
             OpKind::Trash | OpKind::Destroy => "Deleting",
             OpKind::Extract => "Extracting",
             OpKind::Compress => "Compressing",
+            OpKind::EditMedia => "Saving file",
             #[cfg(target_os = "linux")]
             OpKind::Symlink | OpKind::Hardlink => "Creating links",
         }
@@ -174,6 +176,33 @@ pub fn start_compress(sources: Vec<PathBuf>, dest: PathBuf, name: String, kind: 
         ctx.request_repaint();
     });
     Job { kind: OpKind::Compress, dest: Some(dest), progress, cancel }
+}
+
+pub fn start_media_edit(edit: crate::media_edit::Edit, sources: Vec<PathBuf>, dest: PathBuf, name: String, pages: String, ctx: egui::Context) -> Job {
+    let progress = Arc::new(Mutex::new(Progress { total_items: 1, ..Default::default() }));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (p, c, d) = (progress.clone(), cancel.clone(), dest.clone());
+    std::thread::spawn(move || {
+        let exact: Vec<_> = sources.iter().map(|source| op_path(source)).collect();
+        let target = op_path(&d).join(&name);
+        let mut report = |source: &Path| {
+            p.lock().unwrap().current = fsx::display_name(source);
+            ctx.request_repaint();
+        };
+        let result = crate::media_edit::save(edit, &exact, &pages, &target, &c, &mut report);
+        let mut state = p.lock().unwrap();
+        match result {
+            Ok(()) => {
+                state.created.push(d.join(&name));
+                state.done_items = 1;
+            }
+            Err(e) => state.errors.push(if e == "Cancelled" { e } else { format!("{name}: {e}") }),
+        }
+        state.finished = true;
+        drop(state);
+        ctx.request_repaint();
+    });
+    Job { kind: OpKind::EditMedia, dest: Some(dest), progress, cancel }
 }
 
 /// The path to operate on, immune to Windows path normalisation.

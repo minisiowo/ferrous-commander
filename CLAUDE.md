@@ -10,14 +10,18 @@ computers, one Windows and one Linux, and both pull from `main`.
 
 ## `main` must build on both Windows and Linux
 
-A commit that builds on only one system breaks the other computer. Before every
-commit that touches code, check both platforms from `app/`:
+A commit that builds on only one system breaks the other computer. For routine
+changes, run tests that cover the behavior you changed and any shared behavior it
+affects. Use a focused command such as `cargo test --locked <filter>` from `app/`.
+Reserve the full test suite for [release verification](#releases).
+
+Choose compile checks for the platforms the change affects. These are the
+commands to use from `app/` when applicable:
 
 ```sh
 cargo check --locked --all-targets                                # the current system
 cargo check --locked --all-targets --target x86_64-pc-windows-msvc  # from Linux
 cargo check --locked --all-targets --target x86_64-unknown-linux-gnu # from Windows
-cargo test --locked
 ```
 
 - Fix any failure before committing, on either platform.
@@ -51,8 +55,9 @@ Windows and publishes a release. A version with a suffix (`0.5.0-beta.1`, tag
 `Cargo.toml` fails.
 Pushing a tag publishes to testers, so only do it when the user asks for a release.
 Before tagging, run the workflow on `main` by hand (`gh workflow run release.yml`)
-and wait for it to pass. If a tag's build still fails, leave the tag where it is and
-release the next version number.
+and wait for the full test suite and release builds to pass on both Windows and
+Linux. If a tag's build still fails, leave the tag where it is and release the next
+version number.
 
 ### Release notes
 

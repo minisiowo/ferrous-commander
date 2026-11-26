@@ -225,6 +225,14 @@ pub enum Dialog {
         kind: crate::compress::Kind,
         focus: bool,
     },
+    EditMedia {
+        edit: crate::media_edit::Edit,
+        folder: PathBuf,
+        sources: Vec<PathBuf>,
+        pages: String,
+        name: String,
+        focus: bool,
+    },
     Password {
         archive: PathBuf,
         dest: Option<PathBuf>,
@@ -342,6 +350,7 @@ pub enum Act {
     Extract(Vec<PathBuf>, Option<PathBuf>),
     /// Ask for a name and format, then pack these items in the pane's folder.
     Compress(usize, Vec<PathBuf>),
+    EditMedia(crate::media_edit::Edit, Vec<PathBuf>, PathBuf),
 }
 
 pub struct ShotState {
@@ -1823,6 +1832,7 @@ impl App {
                     OpKind::Destroy => "Permanently deleted",
                     OpKind::Extract => "Extracted",
                     OpKind::Compress => "Compressed",
+                    OpKind::EditMedia => "Saved",
                     _ => "Finished processing",
                 };
                 self.toast(ToastKind::Success, format!("{word} {processed} item(s)"));
@@ -1913,6 +1923,12 @@ impl App {
                 if !is_computer(&folder) && !sources.is_empty() {
                     let name = crate::compress::suggested_name(&sources, &folder);
                     self.dialog = Some(Dialog::Compress { pane: i, sources, name, kind: crate::compress::Kind::Zip, focus: true });
+                }
+            }
+            Act::EditMedia(edit, sources, folder) => {
+                if let Some(source) = sources.first() {
+                    let name = edit.suggested_name(source);
+                    self.dialog = Some(Dialog::EditMedia { edit, folder, sources, pages: String::new(), name, focus: true });
                 }
             }
             Act::Extract(archives, dest) => {
