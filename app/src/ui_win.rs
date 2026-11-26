@@ -29,10 +29,19 @@ const SETTINGS_GRID_LABELS: &[&str] = &[
 
 struct MergeRowDrag(usize);
 
-fn paint_merge_row(ui: &egui::Ui, painter: &egui::Painter, rect: Rect, path: &std::path::Path, color: egui::Color32, cap: &egui::Galley) {
+/// The position column fits the widest number, so names line up in long lists.
+struct MergeRowNumber {
+    position: usize,
+    width: f32,
+    color: egui::Color32,
+}
+
+fn paint_merge_row(ui: &egui::Ui, painter: &egui::Painter, rect: Rect, number: MergeRowNumber, path: &std::path::Path, color: egui::Color32, cap: &egui::Galley) {
+    let name_left = rect.left() + 24.0 + number.width + 6.0;
     let name = egui::WidgetText::from(fsx::display_name(path)).into_galley(
-        ui, Some(egui::TextWrapMode::Truncate), (rect.width() - 32.0).max(0.0), egui::TextStyle::Body,
+        ui, Some(egui::TextWrapMode::Truncate), (rect.right() - 8.0 - name_left).max(0.0), egui::TextStyle::Body,
     );
+    let position = egui::WidgetText::from(format!("{}.", number.position)).into_galley(ui, None, f32::INFINITY, egui::TextStyle::Body);
     let scale = painter.pixels_per_point();
     let text_top = ((rect.center().y - cap.size().y / 2.0) * scale).round() / scale;
     // Use the cap height as a fixed reference so descenders and accents never move the grip or baseline.
@@ -43,7 +52,8 @@ fn paint_merge_row(ui: &egui::Ui, painter: &egui::Painter, rect: Rect, path: &st
             painter.circle_filled(pos2(rect.left() + 12.0 + dx, grip_center + dy), 1.1, color);
         }
     }
-    painter.galley(pos2(rect.left() + 24.0, text_top), name, color);
+    painter.galley(pos2(name_left - 6.0 - position.size().x, text_top), position, number.color);
+    painter.galley(pos2(name_left, text_top), name, color);
 }
 
 fn merge_order(ui: &mut egui::Ui, sources: &mut Vec<std::path::PathBuf>, pal: Palette) {
@@ -62,6 +72,9 @@ fn merge_order(ui: &mut egui::Ui, sources: &mut Vec<std::path::PathBuf>, pal: Pa
             let width = ui.available_width();
             let row_height = ui.text_style_height(&TextStyle::Body) + 12.0;
             let cap = egui::WidgetText::from("H").into_galley(ui, None, f32::INFINITY, TextStyle::Body);
+            let number_width = egui::WidgetText::from(format!("{}.", sources.len()))
+                .into_galley(ui, None, f32::INFINITY, TextStyle::Body).size().x;
+            let number = |index: usize| MergeRowNumber { position: index + 1, width: number_width, color: pal.text_weak };
             let mut dragged_row = DragAndDrop::payload::<MergeRowDrag>(ui.ctx()).map(|drag| drag.0);
             for (index, path) in sources.iter().enumerate() {
                 let (rect, response) = ui.allocate_exact_size(vec2(width, row_height), Sense::click_and_drag());
@@ -84,7 +97,7 @@ fn merge_order(ui: &mut egui::Ui, sources: &mut Vec<std::path::PathBuf>, pal: Pa
                 if dragged_row.is_none() {
                     response.on_hover_cursor(CursorIcon::Grab).on_hover_text(path.display().to_string());
                 }
-                paint_merge_row(ui, painter, rect, path, if dragging { pal.text_weak } else { pal.text }, &cap);
+                paint_merge_row(ui, painter, rect, number(index), path, if dragging { pal.text_weak } else { pal.text }, &cap);
             }
 
             let from = dragged_row?;
@@ -106,7 +119,7 @@ fn merge_order(ui: &mut egui::Ui, sources: &mut Vec<std::path::PathBuf>, pal: Pa
                 let corner = egui::CornerRadius::same(6);
                 painter.rect_filled(card.translate(vec2(0.0, 3.0)), corner, egui::Color32::from_black_alpha(100));
                 painter.rect(card, corner, pal.raised, Stroke::new(1.5, pal.accent), StrokeKind::Inside);
-                paint_merge_row(ui, &painter, card, &sources[from], pal.text, &cap);
+                paint_merge_row(ui, &painter, card, number(from), &sources[from], pal.text, &cap);
                 ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
             }
             let bounds = rows.first()?.union(*rows.last()?);
@@ -190,6 +203,10 @@ fn merge_order_moves_rows_only_when_dropped_in_the_list() {
     let expect = |sources: &[PathBuf], names: [&str; 4]| assert_eq!(sources, names.map(PathBuf::from));
     let first = row("a.pdf");
     let last = row("d.pdf");
+    for (number, name) in [("1.", first), ("4.", last)] {
+        let position = row(number);
+        assert!(position.x < name.x && (position.y - name.y).abs() < 0.01, "{number} must sit left of its file name");
+    }
     let grip_dots: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
         Shape::Circle(dot) if dot.center.x < first.x && (dot.center.y - first.y).abs() <= 5.0 => Some(dot.center.y),
         _ => None,
@@ -235,11 +252,15 @@ impl App {
         };
         let pal = self.pal;
         let creates = matches!(d, Dialog::NewFolder { .. } | Dialog::NewFile { .. });
+        let media_ext = match &d {
+            Dialog::EditMedia { sources, .. } => sources[0].extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default(),
+            _ => String::new(),
+        };
         let icon = match &d {
             Dialog::NewFile { .. } => Icon::Entry(fsx::Kind::Other, ""),
             Dialog::Password { .. } => Icon::Glyph("🔒", None),
             Dialog::Compress { .. } => Icon::Entry(fsx::Kind::Archive, ""),
-            Dialog::EditMedia { .. } => Icon::Entry(fsx::Kind::Other, ""),
+            Dialog::EditMedia { .. } => Icon::Entry(fsx::Kind::from_ext(&media_ext), &media_ext),
             _ => Icon::Folder(fsx::Kind::Folder.color()),
         };
         let closed = Panel::new(title, pal, icon)
@@ -250,6 +271,11 @@ impl App {
                 if let Dialog::Password { archive, wrong, .. } = &d {
                     ui.label(RichText::new(fsx::display_name(archive)).color(pal.text).strong());
                     if *wrong { ui.label(RichText::new("Wrong password. Try again.").color(hex("#ef7063"))); }
+                }
+                if let Dialog::EditMedia { edit, sources, .. } = &d
+                    && !matches!(edit, crate::media_edit::Edit::MergePdf) {
+                    ui.label(RichText::new(fsx::display_name(&sources[0])).color(pal.text).strong())
+                        .on_hover_text(sources[0].display().to_string());
                 }
                 let secret = matches!(d, Dialog::Password { .. });
                 let is_location = matches!(d, Dialog::AddLocation { .. });
@@ -290,11 +316,16 @@ impl App {
                     });
                     ui.label(RichText::new(format!("{} item(s), saved in this folder. Existing files are never replaced.", sources.len())).color(pal.text_weak).size(11.0));
                 }
+                let mut pages_ok = true;
                 if let Dialog::EditMedia { edit, sources, pages, .. } = &mut d {
                     use crate::media_edit::Edit;
                     if edit.takes_pages() {
                         ui.label("Pages (leave blank for all)");
                         ui.add(egui::TextEdit::singleline(pages).hint_text("1, 3-5").desired_width(f32::INFINITY));
+                        if let Err(e) = crate::media_edit::page_ranges(pages) {
+                            pages_ok = false;
+                            ui.label(RichText::new(e).color(hex("#ef7063")));
+                        }
                     }
                     if matches!(edit, Edit::MergePdf) {
                         merge_order(ui, sources, pal);
@@ -313,15 +344,29 @@ impl App {
                     ui.label(RichText::new("Changes the name in the sidebar only; the folder is not renamed. Leave empty to use the folder's name.").color(pal.text_weak).size(11.0));
                 }
                 let valid = matches!(d, Dialog::RenameFavorite { .. }) || (secret && !name.is_empty()) || !name.trim().is_empty() && (!matches!(d, Dialog::AddLocation { .. }) || std::path::Path::new(name.trim()).is_absolute());
+                let mut name_problem = None;
                 let valid = valid && match &d {
                     Dialog::Compress { kind, .. } => fsx::valid_name(&crate::compress::file_name(&name, *kind)),
-                    Dialog::EditMedia { edit, sources, .. } => {
-                        fsx::valid_name(&crate::media_edit::output_name(&name, edit.output_suffix(&sources[0])))
+                    Dialog::EditMedia { edit, folder, sources, .. } => {
+                        let file = crate::media_edit::output_name(&name, edit.output_suffix(&sources[0]));
+                        if !fsx::valid_name(&file) {
+                            name_problem = Some("This name can't be used here.");
+                        } else if std::fs::symlink_metadata(folder.join(&file)).is_ok() {
+                            name_problem = Some("A file with this name already exists.");
+                        }
+                        name_problem.is_none() && pages_ok
                     }
                     _ => true,
                 };
                 if !name.trim().is_empty() && !valid {
-                    ui.label(if matches!(d, Dialog::Compress { .. } | Dialog::EditMedia { .. }) { "This name can't be used here." } else { "Enter a full folder path or network share." });
+                    match &d {
+                        // A page problem is already shown under the pages field.
+                        Dialog::EditMedia { .. } => if let Some(message) = name_problem {
+                            ui.label(RichText::new(message).color(hex("#ef7063")));
+                        },
+                        Dialog::Compress { .. } => { ui.label("This name can't be used here."); }
+                        _ => { ui.label("Enter a full folder path or network share."); }
+                    }
                 }
                 if let Dialog::NewFolder { pane, .. } = &d {
                     let n = self.panes[*pane].selected.len();

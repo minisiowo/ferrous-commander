@@ -83,21 +83,16 @@ pub fn image_format(path: &Path) -> Option<ImageFormat> {
     }
 }
 
-/// Empty input selects every page. Validate the entire range before modifying a document.
-fn page_numbers(input: &str, count: u32) -> Result<Vec<u32>, String> {
-    if count == 0 {
-        return Err("This PDF has no pages".into());
-    }
-    if input.trim().is_empty() {
-        return Ok((1..=count).collect());
-    }
+/// Page ranges as typed, checked for form only, so the dialog can flag mistakes before the
+/// document is opened. Empty parts are skipped, and en or em dashes work like hyphens.
+pub fn page_ranges(input: &str) -> Result<Vec<(u32, u32)>, String> {
     let number = |text: &str| {
-        text.trim().parse::<u32>().ok().filter(|n| (1..=count).contains(n))
-            .ok_or_else(|| format!("Enter page numbers from 1 to {count}, for example 1, 3-5"))
+        text.trim().parse::<u32>().ok().filter(|&n| n > 0)
+            .ok_or_else(|| "Enter page numbers such as 1, 3-5".to_string())
     };
-    let mut pages = BTreeSet::new();
-    for part in input.split(',') {
-        let (first, last) = match part.split_once('-') {
+    let mut ranges = Vec::new();
+    for part in input.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+        let (first, last) = match part.split_once(['-', '\u{2013}', '\u{2014}']) {
             Some((first, last)) => (number(first)?, number(last)?),
             None => {
                 let page = number(part)?;
@@ -107,16 +102,44 @@ fn page_numbers(input: &str, count: u32) -> Result<Vec<u32>, String> {
         if first > last {
             return Err(format!("Page range {first}-{last} must be in ascending order"));
         }
-        pages.extend(first..=last);
+        ranges.push((first, last));
     }
+    Ok(ranges)
+}
+
+/// Empty input selects every page. Validate the entire range before modifying a document.
+fn page_numbers(input: &str, count: u32) -> Result<Vec<u32>, String> {
+    if count == 0 {
+        return Err("This PDF has no pages".into());
+    }
+    let ranges = page_ranges(input)?;
+    if ranges.is_empty() {
+        return Ok((1..=count).collect());
+    }
+    if ranges.iter().any(|&(_, last)| last > count) {
+        return Err(if count == 1 {
+            "This PDF has only 1 page".into()
+        } else {
+            format!("This PDF has {count} pages. Enter page numbers from 1 to {count}")
+        });
+    }
+    let pages: BTreeSet<_> = ranges.into_iter().flat_map(|(first, last)| first..=last).collect();
     Ok(pages.into_iter().collect())
 }
 
-fn read_pdf(path: &Path) -> Result<Document, String> {
+/// Prefixes an error with the file it came from.
+fn about(path: &Path) -> impl Fn(String) -> String {
     let name = crate::fsx::display_name(path);
-    let doc = Document::load(path).map_err(|e| format!("{name}: {e}"))?;
+    move |e| format!("{name}: {e}")
+}
+
+fn read_pdf(path: &Path) -> Result<Document, String> {
+    let doc = Document::load(path).map_err(|e| match e {
+        lopdf::Error::IO(e) => crate::fsx::friendly_err(&e),
+        _ => "This file is damaged or is not a PDF".into(),
+    })?;
     if doc.was_encrypted() || doc.is_encrypted() {
-        return Err(format!("{name}: editing protected PDFs is unavailable"));
+        return Err("Editing password-protected PDFs is unavailable".into());
     }
     Ok(doc)
 }
@@ -172,13 +195,13 @@ fn collect_pages(sources: &[PathBuf], pages: &str, cancel: &AtomicBool, report: 
     for source in sources {
         check_cancel(cancel)?;
         report(source);
-        let mut input = read_pdf(source)?;
+        let mut input = read_pdf(source).map_err(about(source))?;
         if input.version.starts_with("2.") {
             output.version.clone_from(&input.version);
         }
         input.renumber_objects_with(output.max_id + 1);
         let mut ids = input.get_pages();
-        let chosen: BTreeSet<_> = page_numbers(pages, ids.len() as u32)?.into_iter().collect();
+        let chosen: BTreeSet<_> = page_numbers(pages, ids.len() as u32).map_err(about(source))?.into_iter().collect();
         let omitted: BTreeSet<_> = ids.iter()
             .filter_map(|(number, &id)| (!chosen.contains(number)).then_some(id))
             .collect();
@@ -191,7 +214,7 @@ fn collect_pages(sources: &[PathBuf], pages: &str, cancel: &AtomicBool, report: 
             });
         }
         ids.retain(|number, _| chosen.contains(number));
-        prepare_pages(&mut input, &ids, root).map_err(|e| format!("{}: {e}", crate::fsx::display_name(source)))?;
+        prepare_pages(&mut input, &ids, root).map_err(|e| about(source)(e.to_string()))?;
         kids.extend(ids.into_values().map(Object::Reference));
         output.max_id = input.max_id;
         output.objects.append(&mut input.objects);
@@ -204,24 +227,38 @@ fn collect_pages(sources: &[PathBuf], pages: &str, cancel: &AtomicBool, report: 
     Ok(output)
 }
 
-fn rotated_pixels(mut decoder: impl ImageDecoder, turn: Turn) -> Result<(DynamicImage, Option<Vec<u8>>), String> {
+/// Decoded pixels, already turned upright and then by `turn`, with the metadata to write back.
+struct Rotated {
+    pixels: DynamicImage,
+    profile: Option<Vec<u8>>,
+    /// Camera, date and location details, with the orientation reset because it is applied to the pixels.
+    exif: Option<Vec<u8>>,
+}
+
+fn rotated_pixels(mut decoder: impl ImageDecoder, turn: Turn) -> Result<Rotated, String> {
+    use image::metadata::Orientation;
     if decoder.total_bytes() > Limits::default().max_alloc.unwrap_or(u64::MAX) {
         return Err("This image is too large to rotate".into());
     }
-    let orientation = decoder.orientation().map_err(|e| e.to_string())?;
+    let mut exif = decoder.exif_metadata().map_err(|e| e.to_string())?;
+    let orientation = exif.as_mut().and_then(|chunk| Orientation::remove_from_exif_chunk(chunk)).unwrap_or(Orientation::NoTransforms);
     let profile = decoder.icc_profile().map_err(|e| e.to_string())?;
     let mut pixels = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
     pixels.apply_orientation(orientation);
     pixels.apply_orientation(match turn {
-        Turn::Left => image::metadata::Orientation::Rotate270,
-        Turn::Right => image::metadata::Orientation::Rotate90,
+        Turn::Left => Orientation::Rotate270,
+        Turn::Right => Orientation::Rotate90,
     });
-    Ok((pixels, profile))
+    Ok(Rotated { pixels, profile, exif })
 }
 
-fn encode_image(mut encoder: impl ImageEncoder, pixels: DynamicImage, profile: Option<Vec<u8>>) -> image::ImageResult<()> {
+fn encode_image(mut encoder: impl ImageEncoder, image: Rotated) -> image::ImageResult<()> {
+    let Rotated { pixels, profile, exif } = image;
     if let Some(profile) = profile {
         encoder.set_icc_profile(profile).map_err(image::ImageError::Unsupported)?;
+    }
+    if let Some(exif) = exif {
+        encoder.set_exif_metadata(exif).map_err(image::ImageError::Unsupported)?;
     }
     encoder.write_image(pixels.as_bytes(), pixels.width(), pixels.height(), pixels.color().into())
 }
@@ -229,18 +266,17 @@ fn encode_image(mut encoder: impl ImageEncoder, pixels: DynamicImage, profile: O
 fn rotate_image(source: &Path, turn: Turn, out: &mut impl Write) -> Result<(), String> {
     let format = image_format(source).ok_or("Choose a PNG or JPEG image")?;
     if format == ImageFormat::Png {
-        let file = File::open(source).map_err(|e| e.to_string())?;
+        let file = File::open(source).map_err(|e| crate::fsx::friendly_err(&e))?;
         let decoder = image::codecs::png::PngDecoder::with_limits(BufReader::new(file), Limits::default()).map_err(|e| e.to_string())?;
         if decoder.is_apng().map_err(|e| e.to_string())? {
             return Err("Animated PNGs cannot be rotated".into());
         }
-        let (pixels, profile) = rotated_pixels(decoder, turn)?;
-        encode_image(image::codecs::png::PngEncoder::new(out), pixels, profile)
+        encode_image(image::codecs::png::PngEncoder::new(out), rotated_pixels(decoder, turn)?)
     } else {
-        let mut reader = ImageReader::open(source).map_err(|e| e.to_string())?;
+        let mut reader = ImageReader::open(source).map_err(|e| crate::fsx::friendly_err(&e))?;
         reader.set_format(format);
-        let (pixels, profile) = rotated_pixels(reader.into_decoder().map_err(|e| e.to_string())?, turn)?;
-        encode_image(image::codecs::jpeg::JpegEncoder::new_with_quality(out, 95), pixels, profile)
+        let rotated = rotated_pixels(reader.into_decoder().map_err(|e| e.to_string())?, turn)?;
+        encode_image(image::codecs::jpeg::JpegEncoder::new_with_quality(out, 95), rotated)
     }.map_err(|e| e.to_string())
 }
 
@@ -327,6 +363,49 @@ mod tests {
             Ok(())
         }).unwrap();
     }
+
+    #[test]
+    fn rotated_jpeg_keeps_exif_and_applies_its_orientation_once() {
+        use image::metadata::Orientation;
+        // A little-endian TIFF block holding Make = "Abc" and Orientation = 6 (turned right).
+        let exif = [
+            b"II*\0".as_slice(), &8u32.to_le_bytes(), &2u16.to_le_bytes(),
+            &0x010fu16.to_le_bytes(), &2u16.to_le_bytes(), &4u32.to_le_bytes(), b"Abc\0",
+            &0x0112u16.to_le_bytes(), &3u16.to_le_bytes(), &1u32.to_le_bytes(), &6u16.to_le_bytes(), &[0, 0],
+            &0u32.to_le_bytes(),
+        ].concat();
+        let exif_of = |path: &Path| {
+            ImageReader::open(path).unwrap().with_guessed_format().unwrap().into_decoder().unwrap().exif_metadata().unwrap().unwrap()
+        };
+        crate::ops::staged(&std::env::temp_dir(), |work| {
+            let source = work.join("photo.jpg");
+            let target = work.join("turned.jpg");
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new(File::create(&source).unwrap());
+            encoder.set_exif_metadata(exif.clone()).unwrap();
+            encoder.write_image(&[200; 6 * 4 * 3], 6, 4, image::ExtendedColorType::Rgb8).unwrap();
+            // Upright the photo is 4 x 6; a left turn lays it back to 6 x 4.
+            save(Edit::RotateImage(Turn::Left), std::slice::from_ref(&source), "", &target, &AtomicBool::new(false), &mut |_| {})?;
+            assert_eq!(image::image_dimensions(&target).unwrap(), (6, 4));
+            let kept = exif_of(&target);
+            assert!(kept.windows(4).any(|bytes| bytes == b"Abc\0"), "other EXIF details must survive");
+            assert_eq!(Orientation::from_exif_chunk(&kept), Some(Orientation::NoTransforms));
+            assert_eq!(Orientation::from_exif_chunk(&exif_of(&source)), Some(Orientation::Rotate90));
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn page_ranges_forgive_spacing_dashes_and_stray_commas() {
+        assert_eq!(page_numbers(" 1, 3\u{2013}4 ,, 2-2, ", 5).unwrap(), [1, 2, 3, 4]);
+        assert_eq!(page_numbers(" , ", 3).unwrap(), [1, 2, 3]);
+        assert!(page_ranges("0").is_err());
+        assert!(page_ranges("2-").is_err());
+        assert!(page_ranges("a").is_err());
+        assert!(page_ranges("4-2").unwrap_err().contains("ascending"));
+        assert!(page_ranges("9").is_ok());
+        assert_eq!(page_numbers("9", 1).unwrap_err(), "This PDF has only 1 page");
+        assert_eq!(page_numbers("2, 6", 5).unwrap_err(), "This PDF has 5 pages. Enter page numbers from 1 to 5");
+    }
 }
 
 fn check_cancel(cancel: &AtomicBool) -> Result<(), String> {
@@ -337,36 +416,40 @@ pub fn save(edit: Edit, sources: &[PathBuf], pages: &str, target: &Path, cancel:
     let source = sources.first().ok_or("Select a file first")?;
     let folder = target.parent().ok_or("Choose an output folder")?;
     check_cancel(cancel)?;
+    let output_err = about(target);
+    let write_err = |e: std::io::Error| output_err(crate::fsx::friendly_err(&e));
     crate::ops::staged(folder, |stage| {
         let draft = stage.join("output");
-        let file = File::create_new(&draft).map_err(|e| crate::fsx::friendly_err(&e))?;
+        let file = File::create_new(&draft).map_err(write_err)?;
         let mut out = BufWriter::new(file);
+        // Object and cross-reference streams keep rewritten PDFs close to their original size.
+        let write_pdf = |doc: &mut Document, out: &mut BufWriter<File>| doc.save_modern(out).map_err(write_err);
         match edit {
             Edit::RotateImage(turn) => {
                 report(source);
-                rotate_image(source, turn, &mut out)?;
+                rotate_image(source, turn, &mut out).map_err(about(source))?;
             }
             Edit::RotatePdf(turn) => {
                 report(source);
-                let mut doc = read_pdf(source)?;
-                rotate_pdf(&mut doc, pages, turn)?;
+                let mut doc = read_pdf(source).map_err(about(source))?;
+                rotate_pdf(&mut doc, pages, turn).map_err(about(source))?;
                 check_cancel(cancel)?;
-                doc.save_to(&mut out).map_err(|e| e.to_string())?;
+                write_pdf(&mut doc, &mut out)?;
             }
             Edit::ExtractPdf | Edit::MergePdf => {
                 let mut doc = collect_pages(sources, pages, cancel, report)?;
                 check_cancel(cancel)?;
-                doc.save_to(&mut out).map_err(|e| e.to_string())?;
+                write_pdf(&mut doc, &mut out)?;
             }
         }
-        out.flush().and_then(|()| out.get_ref().sync_all()).map_err(|e| crate::fsx::friendly_err(&e))?;
+        out.flush().and_then(|()| out.get_ref().sync_all()).map_err(write_err)?;
         drop(out);
         check_cancel(cancel)?;
         crate::ops::publish(&draft, target, cancel).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
-                "A file with that name already exists. Choose a different name.".into()
+                output_err("A file with that name already exists. Choose a different name.".into())
             } else {
-                crate::fsx::friendly_err(&e)
+                write_err(e)
             }
         })
     })

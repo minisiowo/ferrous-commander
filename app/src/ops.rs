@@ -196,7 +196,8 @@ pub fn start_media_edit(edit: crate::media_edit::Edit, sources: Vec<PathBuf>, de
                 state.created.push(d.join(&name));
                 state.done_items = 1;
             }
-            Err(e) => state.errors.push(if e == "Cancelled" { e } else { format!("{name}: {e}") }),
+            // Errors already name the file they concern.
+            Err(e) => state.errors.push(e),
         }
         state.finished = true;
         drop(state);

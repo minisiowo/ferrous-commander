@@ -1835,7 +1835,11 @@ impl App {
                     OpKind::EditMedia => "Saved",
                     _ => "Finished processing",
                 };
-                self.toast(ToastKind::Success, format!("{word} {processed} item(s)"));
+                let message = match (&kind, created.first()) {
+                    (OpKind::EditMedia, Some(file)) => format!("Saved {}", crate::fsx::display_name(file)),
+                    _ => format!("{word} {processed} item(s)"),
+                };
+                self.toast(ToastKind::Success, message);
             }
             if !unrecoverable.is_empty() {
                 self.notices.push(Notice::ConfirmDestroy { items: unrecoverable });
