@@ -245,6 +245,8 @@ pub enum Dialog {
         folder: PathBuf,
         sources: Vec<PathBuf>,
         pages: String,
+        /// Bookmarks and form fields go with the pages.
+        keep: bool,
         name: String,
         focus: bool,
     },
@@ -2066,7 +2068,7 @@ impl App {
             Act::EditMedia(edit, sources, folder) => {
                 if let Some(source) = sources.first() {
                     let name = edit.suggested_name(source);
-                    self.dialog = Some(Dialog::EditMedia { edit, folder, sources, pages: String::new(), name, focus: true });
+                    self.dialog = Some(Dialog::EditMedia { edit, folder, sources, pages: String::new(), keep: true, name, focus: true });
                 }
             }
             Act::Extract(archives, dest) => {

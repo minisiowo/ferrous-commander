@@ -178,7 +178,7 @@ pub fn start_compress(sources: Vec<PathBuf>, dest: PathBuf, name: String, kind: 
     Job { kind: OpKind::Compress, dest: Some(dest), progress, cancel }
 }
 
-pub fn start_media_edit(edit: crate::media_edit::Edit, sources: Vec<PathBuf>, dest: PathBuf, name: String, pages: String, ctx: egui::Context) -> Job {
+pub fn start_media_edit(edit: crate::media_edit::Edit, sources: Vec<PathBuf>, dest: PathBuf, name: String, pages: String, keep: bool, ctx: egui::Context) -> Job {
     let progress = Arc::new(Mutex::new(Progress { total_items: 1, ..Default::default() }));
     let cancel = Arc::new(AtomicBool::new(false));
     let (p, c, d) = (progress.clone(), cancel.clone(), dest.clone());
@@ -189,7 +189,7 @@ pub fn start_media_edit(edit: crate::media_edit::Edit, sources: Vec<PathBuf>, de
             p.lock().unwrap().current = fsx::display_name(source);
             ctx.request_repaint();
         };
-        let result = crate::media_edit::save(edit, &exact, &pages, &target, &c, &mut report);
+        let result = crate::media_edit::save(edit, &exact, &pages, keep, &target, &c, &mut report);
         let mut state = p.lock().unwrap();
         match result {
             Ok(()) => {

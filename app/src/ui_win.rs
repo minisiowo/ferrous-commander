@@ -317,7 +317,7 @@ impl App {
                     ui.label(RichText::new(format!("{} item(s), saved in this folder. Existing files are never replaced.", sources.len())).color(pal.text_weak).size(11.0));
                 }
                 let mut pages_ok = true;
-                if let Dialog::EditMedia { edit, sources, pages, .. } = &mut d {
+                if let Dialog::EditMedia { edit, sources, pages, keep, .. } = &mut d {
                     use crate::media_edit::Edit;
                     if edit.takes_pages() {
                         ui.label("Pages (leave blank for all)");
@@ -332,7 +332,8 @@ impl App {
                     }
                     ui.label(RichText::new("Saves a new file beside the original.").color(pal.text_weak).size(11.0));
                     if matches!(edit, Edit::MergePdf | Edit::ExtractPdf) {
-                        ui.label(RichText::new("Document bookmarks and interactive forms do not carry over.").color(pal.text_weak).size(11.0));
+                        ui.checkbox(keep, "Keep bookmarks and form fields").on_hover_text(
+                            "Bookmarks leading to pages that are left out are dropped. When merged forms use the same field names, the later ones get a number, so they keep their own values.");
                     }
                 }
                 if matches!(d, Dialog::NewLayout { .. }) {
@@ -440,9 +441,9 @@ impl App {
                     Dialog::Compress { pane, sources, kind, .. } => {
                         self.compress(*pane, sources.clone(), crate::compress::file_name(&name, *kind), *kind, ui.ctx());
                     }
-                    Dialog::EditMedia { edit, folder, sources, pages, .. } => {
+                    Dialog::EditMedia { edit, folder, sources, pages, keep, .. } => {
                         let name = crate::media_edit::output_name(&name, edit.output_suffix(&sources[0]));
-                        self.jobs.push(crate::ops::start_media_edit(*edit, sources.clone(), folder.clone(), name, pages.clone(), ui.ctx().clone()));
+                        self.jobs.push(crate::ops::start_media_edit(*edit, sources.clone(), folder.clone(), name, pages.clone(), *keep, ui.ctx().clone()));
                     }
                     Dialog::Password { archive, dest, .. } => {
                         self.extract_with_password(archive.clone(), dest.clone(), name.clone(), ui.ctx());
