@@ -167,10 +167,18 @@ pub fn unmount(uri: &str) -> Result<(), String> {
 }
 
 /// Size and free space, or nothing if the device does not answer within a moment.
+/// A device that hangs keeps one question waiting, not one more every refresh.
 pub fn space(folder: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
+    static WAITING: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
     let path = std::ffi::CString::new(folder.as_os_str().as_bytes()).ok()?;
+    {
+        let mut waiting = WAITING.lock().unwrap_or_else(|e| e.into_inner());
+        if waiting.iter().any(|w| w == folder) { return None; }
+        waiting.push(folder.to_path_buf());
+    }
     let (tx, rx) = std::sync::mpsc::channel();
+    let asked = folder.to_path_buf();
     std::thread::spawn(move || {
         // SAFETY: zeroed plain data, filled by the call; the path is NUL-terminated.
         let result = unsafe {
@@ -178,6 +186,7 @@ pub fn space(folder: &Path) -> Option<(u64, u64)> {
             (libc::statvfs(path.as_ptr(), &mut st) == 0)
                 .then(|| (st.f_blocks as u64 * st.f_frsize as u64, st.f_bavail as u64 * st.f_frsize as u64))
         };
+        WAITING.lock().unwrap_or_else(|e| e.into_inner()).retain(|w| *w != asked);
         let _ = tx.send(result);
     });
     rx.recv_timeout(Duration::from_millis(1500)).ok().flatten()
@@ -233,6 +242,13 @@ Mount(0): share on nas -> smb://nas/share/
         assert_eq!(folder_name("smb://nas/share/"), None, "a network share is not a device");
         assert_eq!(uri_of_folder("smb-share:server=nas,share=share"), None);
         assert_eq!(folder_name("mtp:///"), None);
+    }
+
+    #[test]
+    fn space_reports_a_size_and_nothing_for_a_missing_folder() {
+        let here = std::env::temp_dir();
+        assert!(space(&here).is_some_and(|(total, free)| total > 0 && free <= total));
+        assert_eq!(space(Path::new("/no/such/folder")), None);
     }
 
     #[test]
