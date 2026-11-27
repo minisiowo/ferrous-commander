@@ -819,15 +819,24 @@ impl App {
                     install_result = Some(crate::install::install().map_err(|e| format!("Install failed: {e}")));
                 }
             });
+            // Only when the user asks: installing never makes this the default.
             #[cfg(target_os = "linux")]
-            {
-                let mut on = crate::file_manager::is_default();
-                if ui.checkbox(&mut on, "Default file manager").on_hover_text(
-                    "Folders open here, and so does \"Show in folder\" in browsers and other programs, in a new tab of this window. \
-                     Turning it off gives folders back to the file manager used before.").changed() {
-                    install_result = Some(crate::file_manager::set_default(on));
+            ui.horizontal(|ui| {
+                if crate::file_manager::is_default() {
+                    ui.label(RichText::new("✔ Default file manager").color(weak));
+                    if ui.button("Stop using as default").on_hover_text("Folders and \"Show in folder\" go back to the file manager used before").clicked() {
+                        install_result = Some(crate::file_manager::set_default(false));
+                    }
+                } else {
+                    let installed = crate::install::is_installed() || crate::install::installed_by_package_manager();
+                    if ui.add_enabled(installed, egui::Button::new("Set as default file manager"))
+                        .on_hover_text("Folders open here, and so does \"Show in folder\" in browsers and other programs, in a new tab of this window")
+                        .on_disabled_hover_text("Install Ferrous Commander first, so the desktop can start it")
+                        .clicked() {
+                        install_result = Some(crate::file_manager::set_default(true));
+                    }
                 }
-            }
+            });
             });
             chrome::footer(ui, pal, |ui| {
                 if ui.button("Restore to default").clicked() {

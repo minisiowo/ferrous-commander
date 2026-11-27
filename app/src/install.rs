@@ -121,6 +121,31 @@ fn desktop_exec(path: &std::path::Path) -> Result<String, String> {
     if path.contains('%') { Ok(format!("/usr/bin/env {quoted}")) } else { Ok(quoted) }
 }
 
+/// The app-menu entry, which also offers this program for folders.
+#[cfg(not(windows))]
+fn write_launcher(command: &str) -> Result<(), String> {
+    let desk = desktop_path().ok_or("no data folder")?;
+    if let Some(d) = desk.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    let text = format!(
+        "[Desktop Entry]\nType=Application\nName={NAME}\nGenericName=File Manager\nComment=Fast file manager with tiled panels, tabs and column navigation\nExec={} %F\nIcon={BIN}\nTerminal=false\nCategories=System;FileTools;FileManager;Utility;\nMimeType=inode/directory;\nStartupWMClass={BIN}\n",
+        command
+    );
+    std::fs::write(&desk, text).map_err(|e| e.to_string())?;
+    let _ = std::process::Command::new("update-desktop-database").arg(desk.parent().unwrap()).status();
+    Ok(())
+}
+
+/// Rewrite the entry of an install made by an earlier version, whose quoted program path
+/// made xdg-open pass folders to another file manager. Nothing happens without an install.
+#[cfg(target_os = "linux")]
+pub fn refresh_launcher() -> Result<(), String> {
+    let (Some(exe), Some(desk)) = (bin_path(), desktop_path()) else { return Ok(()) };
+    if !exe.exists() || !desk.exists() { return Ok(()); }
+    write_launcher(&desktop_exec(&exe)?)
+}
+
 pub fn install() -> Result<String, String> {
     let exe = installed_exe().ok_or("no home folder")?;
     copy_self(&exe)?;
@@ -167,16 +192,7 @@ pub fn install() -> Result<String, String> {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
         image::save_buffer(&icon, &rgba, n, n, image::ColorType::Rgba8).map_err(|e| e.to_string())?;
-        let desk = desktop_path().ok_or("no data folder")?;
-        if let Some(d) = desk.parent() {
-            std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
-        }
-        let text = format!(
-            "[Desktop Entry]\nType=Application\nName={NAME}\nGenericName=File Manager\nComment=Fast file manager with tiled panels, tabs and column navigation\nExec={} %F\nIcon={BIN}\nTerminal=false\nCategories=System;FileTools;FileManager;Utility;\nMimeType=inode/directory;\nStartupWMClass={BIN}\n",
-            command
-        );
-        std::fs::write(&desk, text).map_err(|e| e.to_string())?;
-        let _ = std::process::Command::new("update-desktop-database").arg(desk.parent().unwrap()).status();
+        write_launcher(&command)?;
         // "Show in folder" must start the copy just installed, not the one it replaces.
         #[cfg(target_os = "linux")]
         crate::file_manager::follow_install(&exe);

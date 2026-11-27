@@ -251,6 +251,7 @@ pub fn set_default(on: bool) -> Result<String, String> {
         if !desktop.is_some_and(|d| d.exists()) && !system.exists() {
             return Err("Install Ferrous Commander first (Application, Install for this user), so the desktop can start it".into());
         }
+        crate::install::refresh_launcher()?;
         let previous = folder_default();
         let previous = previous.as_deref().filter(|p| *p != DESKTOP_ID);
         if let Some(dir) = file.parent() { std::fs::create_dir_all(dir).map_err(|e| e.to_string())?; }
