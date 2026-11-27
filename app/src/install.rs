@@ -99,6 +99,11 @@ fn copy_self(to: &std::path::Path) -> Result<(), String> {
 #[cfg(not(windows))]
 fn desktop_exec(path: &std::path::Path) -> Result<String, String> {
     let path = path.to_str().ok_or("Install path must be UTF-8 for the app-menu launcher")?;
+    // Unquoted where nothing needs quoting: xdg-mime, and so xdg-open outside GNOME and KDE,
+    // takes the first word with its quotes as the program, finds no such file and falls
+    // back to another file manager.
+    const RESERVED: &str = " \t\n\"'\\><~|&;$*?#()`%";
+    if !path.is_empty() && !path.chars().any(|c| RESERVED.contains(c)) { return Ok(path.to_owned()); }
     let mut quoted = String::from("\"");
     for c in path.chars() {
         // Desktop Entry string escaping follows Exec argument quoting.
@@ -172,6 +177,9 @@ pub fn install() -> Result<String, String> {
         );
         std::fs::write(&desk, text).map_err(|e| e.to_string())?;
         let _ = std::process::Command::new("update-desktop-database").arg(desk.parent().unwrap()).status();
+        // "Show in folder" must start the copy just installed, not the one it replaces.
+        #[cfg(target_os = "linux")]
+        crate::file_manager::follow_install(&exe);
         Ok(format!("Installed to {} with an app-menu launcher", exe.display()))
     }
 }
@@ -208,6 +216,9 @@ pub fn uninstall() -> Result<String, String> {
     }
     #[cfg(not(windows))]
     {
+        // Folders and "Show in folder" go back to the file manager used before.
+        #[cfg(target_os = "linux")]
+        crate::file_manager::forget();
         for p in [desktop_path(), icon_path(), bin_path()].into_iter().flatten() {
             match std::fs::remove_file(&p) {
                 Ok(()) => {},
@@ -351,5 +362,19 @@ mod tests {
 
         assert!(!dir.exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+mod launcher_tests {
+    use super::desktop_exec;
+
+    #[test]
+    fn the_launcher_quotes_a_program_path_only_when_it_must() {
+        let exec = |p: &str| desktop_exec(std::path::Path::new(p)).unwrap();
+        assert_eq!(exec("/home/me/.local/bin/ferrous-commander"), "/home/me/.local/bin/ferrous-commander");
+        assert_eq!(exec("/home/me/My Apps/ferrous-commander"), "\"/home/me/My Apps/ferrous-commander\"");
+        assert_eq!(exec("/home/me/50%/ferrous-commander"), "/usr/bin/env \"/home/me/50%%/ferrous-commander\"");
+        assert_eq!(exec("/home/me/$x/ferrous-commander"), r#""/home/me/\\$x/ferrous-commander""#);
     }
 }

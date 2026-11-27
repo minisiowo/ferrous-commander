@@ -1549,6 +1549,42 @@ fn real_drive_asks_before_running_and_starts_nothing_when_refused() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn show_in_folder_opens_a_tab_with_the_file_selected_and_reuses_it() {
+    let (root, file, ctx, mut app) = safety_app("show_in_folder");
+    let downloads = root.join("Downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    let tabs = app.panes[0].tabs.len();
+    app.show_in_folder(downloads.clone(), vec![], false);
+    assert_eq!(app.panes[0].tabs.len(), tabs + 1);
+    assert_eq!(app.panes[0].path(), downloads.as_path());
+    let wait = |app: &mut App, done: &dyn Fn(&App) -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done(app) {
+            assert!(std::time::Instant::now() < deadline, "timed out");
+            frame(&ctx, app, vec![], Modifiers::NONE);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    wait(&mut app, &|app| app.cache.get(&downloads).is_some_and(|l| l.generation > 0));
+
+    // A file downloaded after the folder was read is still found and selected.
+    let pdf = downloads.join("faktura.pdf");
+    std::fs::write(&pdf, "pdf").unwrap();
+    app.show_in_folder(downloads.clone(), vec![pdf.clone()], false);
+    assert_eq!(app.panes[0].tabs.len(), tabs + 1, "the open tab is reused");
+    wait(&mut app, &|app| app.panes[0].cursor_path.as_ref() == Some(&pdf));
+    assert!(app.panes[0].selected.contains(&pdf) && app.panes[0].selected.len() == 1);
+
+    // From another tab, it switches back instead of opening another.
+    app.show_in_folder(root.clone(), vec![file.clone()], false);
+    assert_eq!(app.panes[0].path(), root.as_path());
+    app.show_in_folder(downloads.clone(), vec![], false);
+    assert_eq!(app.panes[0].path(), downloads.as_path());
+    assert_eq!(app.panes[0].tabs.iter().filter(|t| t.path == downloads).count(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_device_not_mounted_yet_is_connected_before_a_panel_opens_it() {

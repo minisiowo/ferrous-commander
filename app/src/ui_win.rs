@@ -819,6 +819,15 @@ impl App {
                     install_result = Some(crate::install::install().map_err(|e| format!("Install failed: {e}")));
                 }
             });
+            #[cfg(target_os = "linux")]
+            {
+                let mut on = crate::file_manager::is_default();
+                if ui.checkbox(&mut on, "Default file manager").on_hover_text(
+                    "Folders open here, and so does \"Show in folder\" in browsers and other programs, in a new tab of this window. \
+                     Turning it off gives folders back to the file manager used before.").changed() {
+                    install_result = Some(crate::file_manager::set_default(on));
+                }
+            }
             });
             chrome::footer(ui, pal, |ui| {
                 if ui.button("Restore to default").clicked() {

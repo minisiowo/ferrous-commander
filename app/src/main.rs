@@ -10,6 +10,8 @@ mod drives;
 mod folder_loader;
 mod fsx;
 #[cfg(target_os = "linux")]
+mod file_manager;
+#[cfg(target_os = "linux")]
 mod gvfs;
 mod index;
 #[cfg(windows)]
@@ -281,7 +283,7 @@ fn main() {
         return;
     }
     let mut shot = None;
-    let mut start: Option<PathBuf> = None;
+    let mut start: Vec<PathBuf> = Vec::new();
     let mut k = 1;
     while k < args.len() {
         match args[k].to_str().unwrap_or("") {
@@ -290,7 +292,7 @@ fn main() {
                 k += 1;
             }
             "--help" | "-h" => {
-                println!("ferrous-commander [folder] [--screenshot <file.png>] [--install] [--uninstall [--silent]] [--export-icon <file>] [--version]");
+                println!("ferrous-commander [folder or file…] [--screenshot <file.png>] [--install] [--uninstall [--silent]] [--export-icon <file>] [--default-file-manager on|off] [--version]");
                 return;
             }
             "--version" | "-V" => {
@@ -317,6 +319,17 @@ fn main() {
                 }
                 return;
             }
+            #[cfg(target_os = "linux")]
+            "--default-file-manager" if k + 1 < args.len() && matches!(args[k + 1].to_str(), Some("on" | "off")) => {
+                match file_manager::set_default(args[k + 1] == "on") {
+                    Ok(m) => println!("{m}"),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
             "--export-icon" if k + 1 < args.len() => {
                 if let Err(e) = install::export_icon(std::path::Path::new(&args[k + 1])) {
                     eprintln!("{e}");
@@ -324,11 +337,27 @@ fn main() {
                 }
                 return;
             }
-            _ => start = Some(PathBuf::from(&args[k])),
+            _ => start.push(PathBuf::from(&args[k])),
         }
         k += 1;
     }
-    if let Some(dir) = start.filter(|d| d.is_dir()).and_then(|d| fsx::full_folder(&d).ok()) {
+    // As the default file manager, a folder opened from elsewhere goes to the open window.
+    #[cfg(target_os = "linux")]
+    {
+        if file_manager::hand_over(&start) { return; }
+        let mut shows = file_manager::plan(start, false, false).into_iter();
+        // The first folder opens as the window opens; files open their folder, selected.
+        if let Some(first) = shows.next() {
+            match fsx::full_folder(&first.folder) {
+                Ok(dir) if first.select.is_empty() => app::set_start_dir(dir),
+                _ => file_manager::queue(vec![first]),
+            }
+        }
+        file_manager::queue(shows.collect());
+        file_manager::start_if_default();
+    }
+    #[cfg(not(target_os = "linux"))]
+    if let Some(dir) = start.pop().filter(|d| d.is_dir()).and_then(|d| fsx::full_folder(&d).ok()) {
         app::set_start_dir(dir);
     }
     // The light OpenGL renderer first; the wgpu renderer (DirectX/Vulkan/Metal) if OpenGL is missing.

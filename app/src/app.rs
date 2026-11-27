@@ -856,12 +856,18 @@ impl App {
             .drives_at
             .is_none_or(|t| t.elapsed() > Duration::from_secs(10))
         {
+            #[cfg(target_os = "linux")]
+            if self.persist { crate::file_manager::follow_setting(); }
             self.refresh_drives();
         }
         self.receive_drives(ctx);
         self.finish_jobs();
         self.ask_for_password();
         self.receive_preview();
+        #[cfg(target_os = "linux")]
+        for show in crate::file_manager::take(&self.wake) {
+            self.show_in_folder(show.folder, show.select, show.properties);
+        }
         for (c, result) in take_finished(&mut self.connecting) {
             self.finish_connect(c, result.unwrap_or_else(|| Err("Connecting stopped unexpectedly".into())));
         }
@@ -1088,6 +1094,43 @@ impl App {
             }
             Err(error) => self.notices.push(Notice::Problems { title: format!("{name} was not ejected"), lines: vec![error] }),
         }
+    }
+
+    /// What another program asked for: a folder in a tab of the active panel, with
+    /// `select` selected in it, as after "Show in folder" in a browser. A tab already
+    /// showing the folder is reused, and the window comes to the front.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn show_in_folder(&mut self, folder: PathBuf, select: Vec<PathBuf>, properties: bool) {
+        let i = self.active.min(self.panes.len() - 1);
+        match self.panes[i].tabs.iter().position(|t| t.path == folder) {
+            Some(t) if self.panes[i].active == t => {}
+            Some(t) => {
+                self.panes[i].active = t;
+                self.panes[i].clear_view_state();
+            }
+            None => self.new_tab(i, Some(folder.clone()), true),
+        }
+        // A file that has just been downloaded may be missing from a listing read before.
+        self.reload(&folder);
+        let pane = &mut self.panes[i];
+        if let Some(first) = select.first() {
+            pane.arriving = select.iter().cloned().collect();
+            pane.selected = pane.arriving.clone();
+            pane.pending_select = Some(first.clone());
+            pane.view_key = None;
+        }
+        #[cfg(target_os = "linux")]
+        if properties && let Some(first) = select.first() {
+            self.acts.push(Act::Properties(first.clone()));
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = properties;
+        self.push_history(&folder);
+        self.mark_dirty();
+        if let Some(ctx) = self.wake.ctx() {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+        }
+        self.wake.repaint();
     }
 
     /// Mount a device the system sees but has not mounted, then open `to` inside it.
