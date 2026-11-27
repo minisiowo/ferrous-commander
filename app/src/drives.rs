@@ -592,14 +592,22 @@ pub fn list() -> Vec<DriveInfo> {
         out.push(DriveInfo { path: PathBuf::from("/"), name: "System disk".into(), label: "File system".into(),
             total: 0, free: 0, network: false, remote: String::new(), eject: None, mount: None });
     }
-    // Asking GIO takes half a second, so tests that click around a window would see the
-    // sidebar change under the pointer. Only the test of a real device lists them.
-    #[cfg(target_os = "linux")]
-    if !cfg!(test) || GVFS_IN_TESTS.load(std::sync::atomic::Ordering::Relaxed) {
-        gvfs_locations(&mut out);
-    }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// Phones, e-readers, cameras and network shares served by GVfs. Kept apart from `list`
+/// because asking GIO always takes half a second, and the disks must not wait for it.
+pub fn devices() -> Vec<DriveInfo> {
+    // Tests that click around a window would see the sidebar change under the pointer.
+    // Only the test of a real device lists them.
+    #[cfg(target_os = "linux")]
+    if !cfg!(test) || GVFS_IN_TESTS.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut out = Vec::new();
+        gvfs_locations(&mut out);
+        return out;
+    }
+    Vec::new()
 }
 
 #[cfg(all(test, target_os = "linux"))]

@@ -1247,7 +1247,7 @@ mod tests {
         crate::drives::GVFS_IN_TESTS.store(true, std::sync::atomic::Ordering::Relaxed);
         let uri = crate::gvfs::devices().into_iter().find(|d| d.uri.starts_with("mtp://")).expect("an MTP device is plugged in").uri;
         let _ = crate::gvfs::unmount(&uri);
-        let listed = || crate::drives::list().into_iter().find(|d| d.label.ends_with(&uri)).expect("the device is listed");
+        let listed = || crate::drives::devices().into_iter().find(|d| d.label.ends_with(&uri)).expect("the device is listed");
         let before = listed();
         assert_eq!(before.mount.as_deref(), Some(uri.as_str()), "listed before it is mounted");
         assert!(!before.network && before.eject.is_none());

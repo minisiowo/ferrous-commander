@@ -406,6 +406,11 @@ pub struct App {
     pub pane_rects: Vec<(usize, egui::Rect)>,
     pub cloud: Vec<PathBuf>,
     drives_task: Option<Task<(Vec<DriveInfo>, Vec<PathBuf>)>>,
+    /// Devices from GVfs come separately, half a second later: the disks do not wait.
+    devices_task: Option<Task<Vec<DriveInfo>>>,
+    /// The two parts `drives` is made of, each as last received.
+    local_drives: Vec<DriveInfo>,
+    devices: Vec<DriveInfo>,
     pub cache: HashMap<PathBuf, Listing>,
     folders: FolderLoader,
     /// Lets background threads wake the window as soon as a result is ready.
@@ -604,6 +609,9 @@ impl App {
             pane_rects: Vec::new(),
             cloud: Vec::new(),
             drives_task: None,
+            devices_task: None,
+            local_drives: Vec::new(),
+            devices: Vec::new(),
             cache: HashMap::new(),
             drives: Vec::new(),
             drives_at: None,
@@ -1152,7 +1160,7 @@ impl App {
             Ok(folder) => {
                 // GVfs may name the folder differently from the guess made before mounting.
                 let to = c.to.strip_prefix(&c.device).map(|rest| folder.join(rest)).unwrap_or_else(|_| c.to.clone());
-                for d in self.drives.iter_mut().filter(|d| d.path == c.device) {
+                for d in self.drives.iter_mut().chain(self.devices.iter_mut()).filter(|d| d.path == c.device) {
                     d.path = folder.clone();
                     d.mount = None;
                 }
@@ -1170,29 +1178,49 @@ impl App {
         }
     }
 
-    /// Ask a background thread for the drive list (network drives can take seconds to answer).
+    /// Ask background threads for the drive list (network drives can take seconds to answer).
     pub fn refresh_drives(&mut self) {
         self.drives_at = Some(Instant::now());
         if self.drives_task.is_none() {
             self.drives_task = Some(Task::spawn(&self.wake, || (crate::drives::list(), crate::drives::cloud_folders())));
         }
+        if self.devices_task.is_none() {
+            self.devices_task = Some(Task::spawn(&self.wake, crate::drives::devices));
+        }
     }
 
     fn receive_drives(&mut self, ctx: &egui::Context) {
-        let Some(task) = &self.drives_task else { return };
-        match task.poll() {
-            Polled::Running => {}
-            Polled::Lost => self.drives_task = None,
-            Polled::Done((drives, cloud)) => {
-                self.drives = drives;
-                self.cloud = cloud;
-                self.drives_task = None;
-                if let Some(l) = self.cache.get_mut(&computer()) {
-                    l.error = Some("reload".into());
+        let mut changed = false;
+        if let Some(task) = &self.drives_task {
+            match task.poll() {
+                Polled::Running => {}
+                Polled::Lost => self.drives_task = None,
+                Polled::Done((drives, cloud)) => {
+                    self.local_drives = drives;
+                    self.cloud = cloud;
+                    self.drives_task = None;
+                    changed = true;
                 }
-                ctx.request_repaint();
             }
         }
+        if let Some(task) = &self.devices_task {
+            match task.poll() {
+                Polled::Running => {}
+                Polled::Lost => self.devices_task = None,
+                Polled::Done(devices) => {
+                    self.devices = devices;
+                    self.devices_task = None;
+                    changed = true;
+                }
+            }
+        }
+        if !changed { return; }
+        self.drives = self.local_drives.iter().chain(&self.devices).cloned().collect();
+        self.drives.sort_by(|a, b| a.name.cmp(&b.name));
+        if let Some(l) = self.cache.get_mut(&computer()) {
+            l.error = Some("reload".into());
+        }
+        ctx.request_repaint();
     }
 
     pub(crate) fn sorting_for(&self, p: &Path) -> Sorting {
