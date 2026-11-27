@@ -378,6 +378,10 @@ fn copy_checked(src: &Path, dest_dir: &Path, cancel: &AtomicBool, check: impl Fn
     check_destination(src, dest_dir)?;
     let name = src.file_name().ok_or("Cannot copy a filesystem root")?;
     let target = fsx::unique_os_name(dest_dir, name, src.is_dir());
+    #[cfg(target_os = "linux")]
+    if crate::gvfs::is_gvfs_path(dest_dir) {
+        return copy_in_place(src, &target, cancel, check);
+    }
     staged(dest_dir, |stage| {
         let payload = stage.join("item");
         copy_rec(src, &payload, cancel).and_then(|()| check(&payload)).and_then(|()| {
@@ -472,6 +476,86 @@ fn copy_rec(src: &Path, dst: &Path, cancel: &AtomicBool) -> Result<(), String> {
         }
     };
     result.and_then(|()| crate::linux_fs::drop_setid(dst).map_err(|e| e.to_string()))
+}
+
+/// Phones and e-readers reached through GVfs (MTP) cannot move a folder by renaming it,
+/// not even within one folder, so a staged copy could never get its name. The copy is
+/// built under its final name instead, and removed again if it fails or is cancelled.
+#[cfg(target_os = "linux")]
+fn copy_in_place(src: &Path, target: &Path, cancel: &AtomicBool, check: impl FnOnce(&Path) -> Result<(), String>) -> Result<PathBuf, String> {
+    let result = copy_plain(src, target, cancel).and_then(|()| check(target)).and_then(|()|
+        if cancel.load(Ordering::Relaxed) { Err("Cancelled".into()) } else { Ok(()) });
+    let Err(e) = result else { return Ok(target.to_path_buf()) };
+    let cleanup = match std::fs::symlink_metadata(target) {
+        Ok(md) if md.is_dir() => std::fs::remove_dir_all(target),
+        Ok(_) => std::fs::remove_file(target),
+        Err(_) => Ok(()),
+    };
+    match cleanup {
+        Ok(()) => Err(e),
+        Err(gone) => Err(format!("{e}; the unfinished copy remains at {}: {gone}", shown(target))),
+    }
+}
+
+/// A copy for GVfs locations, where `cp` fails: MTP refuses permissions and timestamps.
+/// Both are kept where the location accepts them. Links and special files have no
+/// equivalent there and are refused, not silently left out.
+#[cfg(target_os = "linux")]
+fn copy_plain(src: &Path, dst: &Path, cancel: &AtomicBool) -> Result<(), String> {
+    use std::io::{Read, Write};
+    if cancel.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
+    let failed = |e: std::io::Error| format!("{}: {e}", shown(src));
+    let md = std::fs::symlink_metadata(src).map_err(failed)?;
+    let keep = |dst: &Path| {
+        let _ = std::fs::set_permissions(dst, md.permissions());
+        // By path: opening the copy for writing could make GVfs send it to the device again.
+        use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+        if let Ok(path) = std::ffi::CString::new(dst.as_os_str().as_bytes()) {
+            let times = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT },
+                libc::timespec { tv_sec: md.mtime() as libc::time_t, tv_nsec: md.mtime_nsec() as _ }];
+            // SAFETY: a NUL-terminated path and two live timespecs.
+            unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0); }
+        }
+    };
+    if md.is_dir() {
+        std::fs::create_dir(dst).map_err(|e| format!("{}: {e}", shown(dst)))?;
+        for child in std::fs::read_dir(src).map_err(failed)? {
+            let child = child.map_err(failed)?;
+            copy_plain(&child.path(), &dst.join(child.file_name()), cancel)?;
+        }
+        let _ = std::fs::set_permissions(dst, md.permissions());
+        Ok(())
+    } else if md.is_file() {
+        let mut input = std::fs::File::open(src).map_err(failed)?;
+        let mut output = std::fs::File::create_new(dst).map_err(|e| format!("{}: {e}", shown(dst)))?;
+        let mut buffer = vec![0u8; 1 << 20];
+        let mut written = 0u64;
+        loop {
+            if cancel.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
+            let n = match input.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(failed(e)),
+            };
+            output.write_all(&buffer[..n]).map_err(|e| format!("{}: {e}", shown(dst)))?;
+            written += n as u64;
+        }
+        // GVfs sends the file to the device when it is closed, and a failure there is
+        // reported only to a flush. Dropping the file would hide it.
+        output.sync_all().map_err(|e| format!("{}: {e}", shown(dst)))?;
+        drop(output);
+        let stored = std::fs::metadata(dst).map_err(|e| format!("{}: {e}", shown(dst)))?.len();
+        if stored != written {
+            return Err(format!("{}: the device stored {stored} of {written} bytes", shown(dst)));
+        }
+        keep(dst);
+        Ok(())
+    } else if md.file_type().is_symlink() {
+        Err(format!("{}: this location cannot store links", shown(src)))
+    } else {
+        Err(format!("{}: this location cannot store special files", shown(src)))
+    }
 }
 
 #[cfg(windows)]
@@ -1153,6 +1237,71 @@ mod tests {
     }
 
     /// Real cross-filesystem behaviour (USB-style FAT/exFAT, tmpfs, network mounts).
+    /// A phone or e-reader plugged in by USB (MTP), from the drive list to ejecting it.
+    /// Writes a test folder to its first storage and removes it again.
+    /// cargo test real_device -- --ignored
+    #[test]
+    #[ignore = "Needs a phone or e-reader plugged in, and writes to it"]
+    #[cfg(target_os = "linux")]
+    fn real_device_is_listed_connected_written_and_ejected() {
+        crate::drives::GVFS_IN_TESTS.store(true, std::sync::atomic::Ordering::Relaxed);
+        let uri = crate::gvfs::devices().into_iter().find(|d| d.uri.starts_with("mtp://")).expect("an MTP device is plugged in").uri;
+        let _ = crate::gvfs::unmount(&uri);
+        let listed = || crate::drives::list().into_iter().find(|d| d.label.ends_with(&uri)).expect("the device is listed");
+        let before = listed();
+        assert_eq!(before.mount.as_deref(), Some(uri.as_str()), "listed before it is mounted");
+        assert!(!before.network && before.eject.is_none());
+        let folder = crate::drives::mount(&uri).unwrap();
+        assert_eq!(folder, before.path, "the folder guessed before mounting");
+        let mounted = listed();
+        assert!(mounted.mount.is_none() && mounted.total > 0 && mounted.eject.is_some(), "{mounted:?}");
+        let storage = std::fs::read_dir(&folder).unwrap().flatten().map(|e| e.path()).find(|p| p.is_dir()).expect("a storage");
+        assert_eq!(crate::drives::foreign_place(&storage), Some("a removable drive"));
+        assert!(crate::linux_fs::trash_blocker(&storage.join("book.epub")).is_some(), "no trash on the device");
+
+        let c = AtomicBool::new(false);
+        let local = std::env::temp_dir().join(format!("fc_device_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&local);
+        std::fs::create_dir_all(local.join("Zażółć/sub")).unwrap();
+        std::fs::write(local.join("Zażółć/sub/a b.txt"), vec![7u8; 3_000_000]).unwrap();
+        std::fs::write(local.join("Zażółć/plain.txt"), "plain").unwrap();
+        let tree = local.join("Zażółć");
+        let same = |a: &Path, b: &Path| for rel in ["sub/a b.txt", "plain.txt"] {
+            assert_eq!(std::fs::read(a.join(rel)).unwrap(), std::fs::read(b.join(rel)).unwrap(), "{rel}");
+        };
+        let remote = storage.join(format!("fc_device_test_{}", std::process::id()));
+        std::fs::create_dir(&remote).unwrap();
+        let copied = copy_item(&tree, &remote, &c).unwrap();
+        same(&tree, &copied);
+        let single = copy_item(&tree.join("plain.txt"), &remote, &c).unwrap();
+        assert_eq!(std::fs::read(&single).unwrap(), b"plain");
+        assert!(!std::fs::read_dir(&remote).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".ferrous-copy-")));
+        // Within the device, and back out: the source goes only after its copy is proven.
+        let inner = remote.join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        let moved = move_item(&copied, &inner, &c).unwrap();
+        assert!(!copied.exists());
+        same(&tree, &moved);
+        let back = move_item(&moved, &local, &c).unwrap();
+        assert!(!moved.exists());
+        same(&tree, &back);
+        // A link has nowhere to go, and nothing half-made stays behind.
+        std::os::unix::fs::symlink("plain.txt", tree.join("link")).unwrap();
+        assert!(copy_item(&tree, &remote, &c).unwrap_err().contains("cannot store links"));
+        assert_eq!(std::fs::read_dir(&remote).unwrap().count(), 2, "only plain.txt and inner remain");
+        std::fs::remove_dir_all(&remote).unwrap();
+        std::fs::remove_dir_all(&local).unwrap();
+
+        crate::drives::eject(&folder, mounted.eject.as_deref().unwrap()).unwrap();
+        // After a lot of writing, GVfs takes its folder away a moment after `gio` returns.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while folder.exists() {
+            assert!(std::time::Instant::now() < deadline, "the device folder stays after ejecting");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(listed().mount.is_some(), "still plugged in, ready to connect again");
+    }
+
     /// FERROUS_FS_TARGETS="/run/media/$USER/STICK:/tmp" cargo test real_mounts -- --ignored
     #[test]
     #[ignore = "Writes to the mounted filesystems named in FERROUS_FS_TARGETS"]

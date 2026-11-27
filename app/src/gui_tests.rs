@@ -162,10 +162,12 @@ fn the_configuration_folder_opens_in_a_new_tab_of_the_app() {
 
 /// Where a text was painted in the last frame, found by its exact words.
 fn painted_text(ctx: &egui::Context, app: &mut App, name: &str) -> Option<Rect> {
-    let output = ctx.run_ui(RawInput {
+    let mut output = ctx.run_ui(RawInput {
         screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))),
         ..Default::default()
     }, |ui| app.draw(ui));
+    // New text, such as a device that has just been listed, adds glyphs to the font atlas.
+    output.textures_delta.clear();
     output.shapes.iter().find_map(|shape| match &shape.shape {
         egui::epaint::Shape::Text(text) if text.galley.job.text == name => Some(Rect::from_min_size(text.pos, text.galley.size())),
         _ => None,
@@ -240,10 +242,11 @@ fn tree_marquee_matches_painted_rows_after_scrolling() {
             app.panes[0].tree_entries[k].path == nested.join("file060.txt")).unwrap();
         app.panes[0].scroll_to = Some(row);
         for _ in 0..3 { frame(&ctx, &mut app, vec![], Modifiers::NONE); }
-        let output = ctx.run_ui(RawInput {
+        let mut output = ctx.run_ui(RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))),
             ..Default::default()
         }, |ui| app.draw(ui));
+        output.textures_delta.clear();
         let pane = app.pane_rects.iter().find(|(i, _)| *i == 0).unwrap().1;
         let label_center = |name: &str| output.shapes.iter().find_map(|shape| {
             if let egui::epaint::Shape::Text(text) = &shape.shape {
@@ -1008,11 +1011,12 @@ fn tab_close_buttons_remove_tabs_and_their_last_panel() {
     frame(&ctx, &mut app, vec![Event::PointerMoved(pos), Event::PointerButton {
         pos, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE,
     }], Modifiers::NONE);
-    let output = ctx.run_ui(RawInput {
+    let mut output = ctx.run_ui(RawInput {
         screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 750.0))),
         events: vec![Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }],
         ..Default::default()
     }, |ui| app.draw(ui));
+    output.textures_delta.clear();
     assert!(output.viewport_output.values().any(|v| v.commands.iter().any(|c| matches!(c, egui::ViewportCommand::Close))),
         "closing the final tab closes the application window");
 }
@@ -1545,6 +1549,47 @@ fn real_drive_asks_before_running_and_starts_nothing_when_refused() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_device_not_mounted_yet_is_connected_before_a_panel_opens_it() {
+    use crate::app::{Connecting, DriveInfo, Notice};
+    let (root, _, ctx, mut app) = safety_app("connect");
+    let guess = root.join("mtp:host=Maker_Reader");
+    let device = DriveInfo { path: guess.clone(), name: "Reader".into(), label: "Phone or e-reader (MTP)".into(), total: 0, free: 0,
+        network: false, remote: String::new(), eject: None, mount: Some("mtp://ferrous_test_no_such_device/".into()) };
+    app.drives.push(device.clone());
+
+    // The folder does not exist yet: the panel waits for the device instead of failing.
+    app.navigate(0, guess.join("Books"), None);
+    assert_eq!(app.panes[0].path(), root.as_path());
+    assert_eq!(app.connecting.len(), 1);
+    app.navigate(0, guess.clone(), None);
+    assert_eq!(app.connecting.len(), 1, "a second click does not mount it twice");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !app.connecting.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "connecting timed out");
+        frame(&ctx, &mut app, vec![], Modifiers::NONE);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(matches!(&app.notices[0], Notice::Problems { title, lines } if title == "Reader could not be opened" && lines[1].contains("Calibre")),
+        "{:?}", app.notices.first().map(|n| std::mem::discriminant(n)));
+    assert_eq!(app.panes[0].path(), root.as_path());
+    app.notices.clear();
+
+    // Mounted: GVfs named the folder differently, and the panel opens the right one.
+    let real = root.join("real");
+    std::fs::create_dir_all(real.join("Books")).unwrap();
+    app.drives.retain(|d| d.path != guess);
+    app.drives.push(device);
+    let connecting = Connecting { pane: 0, from: root.clone(), to: guess.join("Books"), select: None, device: guess.clone(), name: "Reader".into() };
+    app.connecting.push((connecting, crate::background::Task::done(Ok(real.clone()))));
+    frame(&ctx, &mut app, vec![], Modifiers::NONE);
+    assert_eq!(app.panes[0].path(), real.join("Books").as_path());
+    let listed = app.drives.iter().find(|d| d.name == "Reader").unwrap();
+    assert!(listed.path == real && listed.mount.is_none(), "{listed:?}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn eject_waits_for_running_operations_and_tabs_leave_a_drive_that_went() {
     use crate::app::{DriveInfo, Notice};
@@ -1552,7 +1597,7 @@ fn eject_waits_for_running_operations_and_tabs_leave_a_drive_that_went() {
     use std::sync::{Arc, Mutex, atomic::AtomicBool};
     let (root, _, ctx, mut app) = safety_app("eject");
     let drive = DriveInfo { path: root.clone(), name: "Stick".into(), label: String::new(), total: 0, free: 0,
-        network: false, remote: String::new(), eject: Some("/dev/ferrous-test-no-such-device".into()) };
+        network: false, remote: String::new(), eject: Some("/dev/ferrous-test-no-such-device".into()), mount: None };
 
     app.jobs.push(Job { kind: OpKind::Copy, dest: None, progress: Arc::new(Mutex::new(Progress::default())), cancel: Arc::new(AtomicBool::new(false)) });
     app.eject(&drive);

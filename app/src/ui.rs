@@ -1230,42 +1230,51 @@ impl App {
             font,
             pal.text,
         );
-        let small = FontId::proportional(11.0);
-        p.text(
-            pos2(r.max.x - 4.0, ir.center().y),
-            Align2::RIGHT_CENTER,
-            format!("{:.0}%", pct * 100.0),
-            small,
-            pal.text_weak,
-        );
-        let bar = Rect::from_min_max(
-            pos2(ir.max.x + 6.0, r.max.y - 13.0),
-            pos2(r.max.x - 76.0, r.max.y - 9.0),
-        );
-        p.rect_filled(
-            bar,
-            pal.corner_small(),
-            blend(pal.panel, pal.text_weak, 0.2),
-        );
-        let fill = Rect::from_min_size(bar.min, vec2(bar.width() * pct, bar.height()));
-        p.rect_filled(
-            fill,
-            pal.corner_small(),
-            if pct > 0.9 {
-                hex("#ef7063")
-            } else {
-                pal.accent
-            },
-        );
-        let gb = |b: u64| b as f64 / 1e9;
-        let sizes = format!("{:.0} / {:.0} GB", gb(used), gb(d.total));
-        p.text(
-            pos2(r.max.x - 4.0, bar.center().y),
-            Align2::RIGHT_CENTER,
-            sizes,
-            FontId::proportional(10.5),
-            pal.text_weak,
-        );
+        // No size to show: a device not mounted yet, a network share, a drive still waking up.
+        if d.total == 0 {
+            let kind = if cfg!(windows) { d.label.as_str() } else { d.label.lines().next().unwrap_or_default() };
+            let note = if d.mount.is_some() { format!("{kind} · not connected") } else { kind.to_owned() };
+            let small = FontId::proportional(10.5);
+            let note = fit_text(p, note.trim_start_matches(" · "), &small, r.width() - 34.0);
+            p.text(pos2(ir.max.x + 6.0, r.max.y - 11.0), Align2::LEFT_CENTER, note, small, pal.text_weak);
+        } else {
+            let small = FontId::proportional(11.0);
+            p.text(
+                pos2(r.max.x - 4.0, ir.center().y),
+                Align2::RIGHT_CENTER,
+                format!("{:.0}%", pct * 100.0),
+                small,
+                pal.text_weak,
+            );
+            let bar = Rect::from_min_max(
+                pos2(ir.max.x + 6.0, r.max.y - 13.0),
+                pos2(r.max.x - 76.0, r.max.y - 9.0),
+            );
+            p.rect_filled(
+                bar,
+                pal.corner_small(),
+                blend(pal.panel, pal.text_weak, 0.2),
+            );
+            let fill = Rect::from_min_size(bar.min, vec2(bar.width() * pct, bar.height()));
+            p.rect_filled(
+                fill,
+                pal.corner_small(),
+                if pct > 0.9 {
+                    hex("#ef7063")
+                } else {
+                    pal.accent
+                },
+            );
+            let gb = |b: u64| b as f64 / 1e9;
+            let sizes = format!("{:.0} / {:.0} GB", gb(used), gb(d.total));
+            p.text(
+                pos2(r.max.x - 4.0, bar.center().y),
+                Align2::RIGHT_CENTER,
+                sizes,
+                FontId::proportional(10.5),
+                pal.text_weak,
+            );
+        }
         if resp.clicked() {
             self.acts.push(Act::Navigate(self.active, d.path.clone()));
         }

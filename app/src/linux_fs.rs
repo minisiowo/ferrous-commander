@@ -179,6 +179,8 @@ fn redirected_trash(path: &Path, uid: u32) -> Option<PathBuf> {
 pub fn trash_blocker(path: &Path) -> Option<String> {
     // SAFETY: getuid has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
+    // Moving a file "to the trash" there would only hide it on the device, still taking space.
+    if crate::gvfs::is_device_path(path) { return Some("this device has no trash".into()); }
     redirected_trash(path, uid).map(|link| format!("this drive's trash folder is a link to another place ({})", link.display()))
 }
 

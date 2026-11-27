@@ -96,7 +96,7 @@ fn one_drive(letter: char) -> Option<DriveInfo> {
         } else { label };
         // Only removable media: Windows wants admin rights to take a fixed volume offline.
         let eject = matches!(kind, 2 | 5).then(|| format!("{letter}:"));
-        Some(DriveInfo { path: PathBuf::from(&root), name: format!("{letter}:"), label, total, free: avail, network, remote, eject })
+        Some(DriveInfo { path: PathBuf::from(&root), name: format!("{letter}:"), label, total, free: avail, network, remote, eject, mount: None })
     }
 }
 
@@ -154,6 +154,7 @@ pub fn list() -> Vec<DriveInfo> {
                 network: true,
                 remote: String::new(),
                 eject: None,
+                mount: None,
             }),
         })
         .collect();
@@ -171,6 +172,10 @@ fn is_network_fs(fs: &str) -> bool {
 /// thread. On success, says what the user may do next.
 #[cfg(target_os = "linux")]
 pub fn eject(mount: &Path, id: &str) -> Result<String, String> {
+    if let Some(uri) = id.strip_prefix("gio:") {
+        return crate::gvfs::unmount(uri).map(|()| "It is safe to unplug the device".to_owned()).map_err(|e|
+            if linux_names::is_busy(&e) { "The device is in use. Close the programs using it, then try again.".to_owned() } else { e });
+    }
     fn udisks(action: &str, device: &str) -> Result<(), String> {
         let output = std::process::Command::new("udisksctl")
             .args([action, "--no-user-interaction", "-b", device])
@@ -345,6 +350,7 @@ pub fn foreign_place(_path: &Path) -> Option<&'static str> { None }
 
 #[cfg(target_os = "linux")]
 pub fn foreign_place(path: &Path) -> Option<&'static str> {
+    if crate::gvfs::is_device_path(path) { return Some("a removable drive"); }
     let mounts = std::fs::read_to_string("/proc/self/mounts").ok()?;
     let place = |path: &Path| {
         let (source, mount, fs) = linux_names::mount_of(&mounts, path)?;
@@ -578,23 +584,71 @@ pub fn list() -> Vec<DriveInfo> {
                 network,
                 remote: if network { d.name().to_string_lossy().into_owned() } else { String::new() },
                 eject,
+                mount: None,
             });
         }
     }
     if !out.iter().any(|d| d.path == std::path::Path::new("/")) {
         out.push(DriveInfo { path: PathBuf::from("/"), name: "System disk".into(), label: "File system".into(),
-            total: 0, free: 0, network: false, remote: String::new(), eject: None });
+            total: 0, free: 0, network: false, remote: String::new(), eject: None, mount: None });
     }
-    // GNOME/GIO network mounts (smb://, sftp://, Google Drive…) live under $XDG_RUNTIME_DIR/gvfs
-    if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR")
-        && let Ok(rd) = std::fs::read_dir(PathBuf::from(rt).join("gvfs")) {
-            for de in rd.flatten() {
-                let name = de.file_name().to_string_lossy().into_owned();
-                out.push(DriveInfo { path: de.path(), name: name.clone(), label: String::new(), total: 0, free: 0, network: true, remote: name, eject: None });
-            }
-        }
+    // Asking GIO takes half a second, so tests that click around a window would see the
+    // sidebar change under the pointer. Only the test of a real device lists them.
+    #[cfg(target_os = "linux")]
+    if !cfg!(test) || GVFS_IN_TESTS.load(std::sync::atomic::Ordering::Relaxed) {
+        gvfs_locations(&mut out);
+    }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub static GVFS_IN_TESTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(not(test), target_os = "linux"))]
+static GVFS_IN_TESTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Locations GVfs serves: phones, e-readers and cameras, mounted or not yet, and network
+/// shares mounted through GIO (smb://, sftp://, Google Drive…).
+#[cfg(target_os = "linux")]
+fn gvfs_locations(out: &mut Vec<DriveInfo>) {
+    use crate::gvfs;
+    let Some(root) = gvfs::root() else { return };
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(&root).into_iter().flatten().flatten().map(|de| de.path()).collect();
+    let device = |path: PathBuf, name: String, uri: &str, mounted: bool| {
+        let (total, free) = if mounted { gvfs::space(&path).unwrap_or((0, 0)) } else { (0, 0) };
+        DriveInfo { path, name, label: format!("{}\n{uri}", gvfs::kind(uri)), total, free, network: false, remote: String::new(),
+            eject: mounted.then(|| format!("gio:{uri}")), mount: (!mounted).then(|| uri.to_owned()) }
+    };
+    for d in gvfs::devices() {
+        let Some(guess) = gvfs::folder_name(&d.uri).map(|name| root.join(name)) else { continue };
+        let path = if !d.mounted || folders.contains(&guess) { guess } else { gvfs::local_path(&d.uri).unwrap_or(guess) };
+        folders.retain(|f| *f != path);
+        out.push(device(path, d.name, &d.uri, d.mounted));
+    }
+    for path in folders {
+        let folder = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        match gvfs::uri_of_folder(&folder) {
+            // Mounted without a volume monitor reporting it, as with `gio mount` by hand.
+            Some(uri) => {
+                let name = uri.split("://").nth(1).unwrap_or_default().trim_end_matches('/').replace('_', " ");
+                out.push(device(path, name, &uri, true));
+            }
+            None => out.push(DriveInfo { path, name: folder.clone(), label: String::new(), total: 0, free: 0, network: true,
+                remote: folder, eject: None, mount: None }),
+        }
+    }
+}
+
+/// Mount a device listed with `DriveInfo::mount`, and return its folder. Blocks, so never
+/// call this on the UI thread.
+#[cfg(target_os = "linux")]
+pub fn mount(uri: &str) -> Result<PathBuf, String> {
+    crate::gvfs::mount(uri)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn mount(_uri: &str) -> Result<PathBuf, String> {
+    Err("Connecting devices is not available on this system".into())
 }
 
 /// Cloud-synced folders: OneDrive (personal and work), Dropbox, Google Drive, iCloud, Nextcloud…

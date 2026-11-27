@@ -59,6 +59,21 @@ pub struct DriveInfo {
     pub remote: String,
     /// What `drives::eject` needs, on drives that can be taken offline.
     pub eject: Option<String>,
+    /// A device the system sees but has not mounted yet, such as a phone or e-reader:
+    /// what `drives::mount` takes. `path` only exists once it is mounted.
+    pub mount: Option<String>,
+}
+
+/// A panel waiting for a device to be mounted before it opens `to`.
+pub(crate) struct Connecting {
+    pub pane: usize,
+    /// Where the panel was: if it went elsewhere meanwhile, it stays there.
+    pub from: PathBuf,
+    pub to: PathBuf,
+    pub select: Option<PathBuf>,
+    /// The device's folder as listed before mounting, a prefix of `to`.
+    pub device: PathBuf,
+    pub name: String,
 }
 
 pub struct Listing {
@@ -411,6 +426,8 @@ pub struct App {
     pub index: crate::index::Service,
     /// Drives being ejected: mount point and name, and the eventual outcome.
     pub ejecting: Vec<((PathBuf, String), Task<Result<String, String>>)>,
+    /// Devices being mounted because a panel wants to open them, and the folder each became.
+    pub(crate) connecting: Vec<(Connecting, Task<Result<PathBuf, String>>)>,
     pub dialog: Option<Dialog>,
     /// Archives waiting for a password, one question at a time.
     locked: VecDeque<(PathBuf, Option<PathBuf>, bool)>,
@@ -603,6 +620,7 @@ impl App {
             // Tests index only the folders they name, never the real home.
             index: if cfg!(test) { crate::index::Service::new(None, None) } else { crate::index::Service::for_home() },
             ejecting: Vec::new(),
+            connecting: Vec::new(),
             dialog: None,
             locked: VecDeque::new(),
             notices,
@@ -844,6 +862,9 @@ impl App {
         self.finish_jobs();
         self.ask_for_password();
         self.receive_preview();
+        for (c, result) in take_finished(&mut self.connecting) {
+            self.finish_connect(c, result.unwrap_or_else(|| Err("Connecting stopped unexpectedly".into())));
+        }
         for ((mount, name), result) in take_finished(&mut self.ejecting) {
             self.finish_eject(&mount, &name, result.unwrap_or_else(|| Err("Ejecting stopped unexpectedly".into())));
         }
@@ -1066,6 +1087,43 @@ impl App {
                 self.refresh_drives();
             }
             Err(error) => self.notices.push(Notice::Problems { title: format!("{name} was not ejected"), lines: vec![error] }),
+        }
+    }
+
+    /// Mount a device the system sees but has not mounted, then open `to` inside it.
+    fn connect(&mut self, i: usize, device: DriveInfo, to: PathBuf, select: Option<PathBuf>) {
+        let Some(uri) = device.mount.clone() else { return };
+        let from = self.panes[i].path().to_path_buf();
+        if let Some((c, _)) = self.connecting.iter_mut().find(|(c, _)| c.device == device.path) {
+            // A second click while it connects: open what was asked last, in that panel.
+            *c = Connecting { pane: i, from, to, select, device: device.path, name: device.name };
+            return;
+        }
+        let task = Task::spawn(&self.wake, move || crate::drives::mount(&uri));
+        self.toast(ToastKind::Info, format!("Connecting to {}…", device.name));
+        self.connecting.push((Connecting { pane: i, from, to, select, device: device.path, name: device.name }, task));
+    }
+
+    fn finish_connect(&mut self, c: Connecting, result: Result<PathBuf, String>) {
+        match result {
+            Ok(folder) => {
+                // GVfs may name the folder differently from the guess made before mounting.
+                let to = c.to.strip_prefix(&c.device).map(|rest| folder.join(rest)).unwrap_or_else(|_| c.to.clone());
+                for d in self.drives.iter_mut().filter(|d| d.path == c.device) {
+                    d.path = folder.clone();
+                    d.mount = None;
+                }
+                if let Some(l) = self.cache.get_mut(&computer()) { l.error = Some("reload".into()); }
+                if self.panes.get(c.pane).is_some_and(|p| p.path() == c.from) {
+                    self.navigate(c.pane, to, c.select);
+                }
+                self.refresh_drives();
+            }
+            Err(error) => self.notices.push(Notice::Problems {
+                title: format!("{} could not be opened", c.name),
+                lines: vec![error, "Only one program can use a phone or e-reader at a time. Close programs such as Calibre that may be using it, \
+                    make sure the device is unlocked and set to file transfer, then try again.".into()],
+            }),
         }
     }
 
@@ -1455,6 +1513,11 @@ impl App {
                 self.panes[i].pending_select = select;
                 self.panes[i].view_key = None;
             }
+            return;
+        }
+        if let Some(device) = self.drives.iter().find(|d| d.mount.is_some() && to.starts_with(&d.path)) {
+            let device = device.clone();
+            self.connect(i, device, to, select);
             return;
         }
         let unavailable = !is_computer(&to)
@@ -2135,6 +2198,11 @@ impl App {
                         self.panes[i].selected = [target].into_iter().collect();
                         self.reload(&dir);
                     }
+                    // Phones and e-readers reached by MTP refuse to rename folders this way.
+                    Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices && old.is_dir() => self.toast(
+                        ToastKind::Error,
+                        "Rename failed. This device cannot rename folders",
+                    ),
                     Err(e) => self.toast(
                         ToastKind::Error,
                         format!("Rename failed. {}", fsx::friendly_err(&e)),

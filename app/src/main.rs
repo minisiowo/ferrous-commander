@@ -9,6 +9,8 @@ mod compress;
 mod drives;
 mod folder_loader;
 mod fsx;
+#[cfg(target_os = "linux")]
+mod gvfs;
 mod index;
 #[cfg(windows)]
 mod file_transfer;
